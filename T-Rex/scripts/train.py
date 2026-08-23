@@ -882,6 +882,25 @@ def train(args):
     elif resumed_tactile:
         accelerator.print("Tactile expert weights kept from resumed midtrain checkpoint.")
 
+    # The backbone (base Qwen3-VL + MoT decoder) is bf16 via torch_dtype above,
+    # but the VLA-specific heads built in __init__ (x_embedder, t_embedder,
+    # final_layer*, deform_encoder, ...) are plain fp32 modules -- construction
+    # and resume-checkpoint loading (nn.Module.load_state_dict copies into the
+    # destination's existing dtype) never touch that. The cascaded-flow helpers
+    # (forward_flow_action_partial / tactile_flow_continue) hardcode bf16
+    # intermediates and call these heads directly rather than through
+    # model.forward(), so nothing autocasts them -- left uncast, the first
+    # training_stage=2 step raises "mat1 and mat2 must have the same dtype".
+    # test.py casts the whole model the same way at inference; mirror it here.
+    model = model.to(torch.bfloat16)
+    # Keep the embedded VQ-VAE in eval + fp32 so on-the-fly codes match the
+    # standalone tokenizer (the bf16 cast above would otherwise downcast the
+    # codebook and normalization buffers).
+    if getattr(model, "tactile_vqvae", None) is not None:
+        model.tactile_vqvae.float().eval()
+        for _b in ("tacf6_vqvae_min", "tacf6_vqvae_max"):
+            setattr(model, _b, getattr(model, _b).float())
+
     for name, param in model.named_parameters():
         if (name.startswith("visual") or name.startswith("deform_encoder")
                 or name.startswith("tactile_vqvae")):
@@ -922,13 +941,6 @@ def train(args):
     if args.gradient_checkpointing:
         model.model.gradient_checkpointing = True
         accelerator.print("Gradient checkpointing enabled on the MoT decoder layers.")
-
-    # Keep the embedded VQ-VAE in eval + fp32 so on-the-fly codes match the
-    # standalone tokenizer (no EMA drift, full-precision normalization).
-    if getattr(model, "tactile_vqvae", None) is not None:
-        model.tactile_vqvae.float().eval()
-        for _b in ("tacf6_vqvae_min", "tacf6_vqvae_max"):
-            setattr(model, _b, getattr(model, _b).float())
 
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
