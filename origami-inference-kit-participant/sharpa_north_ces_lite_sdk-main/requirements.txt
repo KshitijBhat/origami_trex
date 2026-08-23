@@ -1,0 +1,4 @@
+eclipse-zenoh>=1.9.0
+msgpack>=1.0.5
+numpy>=2.2.6
+opencv-python>=4.13.0.92

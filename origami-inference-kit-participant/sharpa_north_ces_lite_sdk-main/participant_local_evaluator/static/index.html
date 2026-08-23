@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Origami Participant Local Shadow Evaluation</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Origami · Participant Local Shadow Evaluation</h1>
+    <p>Public read-only real-robot observation → locally isolated image → next 100 North URDF steps</p>
+  </div>
+  <div class="badges">
+    <span id="remoteBadge" class="badge">Remote disconnected</span>
+    <span id="policyBadge" class="badge">Policy not started</span>
+    <span class="badge ok">SHADOW ONLY</span>
+  </div>
+</header>
+
+<main>
+  <section class="panel span12">
+    <h2>1. Public Read-Only Observation</h2>
+    <div class="form-grid">
+      <label>Endpoint<input id="endpoint" placeholder="tls/host:7448"></label>
+      <label>Session<input id="remoteSession" placeholder="team-session"></label>
+      <label>Token<input id="token" type="password" autocomplete="off" placeholder="Sent only to local backend memory"></label>
+      <label>TLS CA path<input id="tlsCa" placeholder="/secure/origami-ca.pem"></label>
+      <label>mTLS cert (optional)<input id="tlsCert" placeholder="/secure/team-cert.pem"></label>
+      <label>mTLS key (optional)<input id="tlsKey" type="password" autocomplete="off" placeholder="/secure/team-key.pem"></label>
+    </div>
+    <div class="row">
+      <button id="connectRemote" class="primary">Connect and Read One Frame</button>
+      <span class="muted">The token is never passed into the image, written to disk, or echoed in any API response. The browser does not establish a Zenoh connection.</span>
+    </div>
+  </section>
+
+  <section class="panel span12">
+    <h2>2. Local Image</h2>
+    <div class="row">
+      <input id="archiveFile" class="wide" type="file" accept=".tar.zst,application/zstd">
+      <input id="uploadSha" class="sha" placeholder="Expected SHA-256 (optional; backend always computes actual value)">
+      <button id="uploadArchive">Select and Load Submission Archive</button>
+      <span id="uploadProgress" class="muted">The file is streamed to the local backend over loopback and never crosses the public network.</span>
+    </div>
+    <p class="muted">For large files, the local-path mode below is recommended to avoid creating a temporary disk copy.</p>
+    <div class="row">
+      <input id="archivePath" class="wide" placeholder="/absolute/path/team-image.tar.zst">
+      <input id="archiveSha" class="sha" placeholder="Archive SHA-256 is required">
+      <button id="loadArchive">Load from Local Path</button>
+    </div>
+    <div class="row">
+      <input id="image" class="wide" placeholder="team/origami-policy:submission">
+      <button id="startPolicy" class="primary">Start Image</button>
+      <button id="stopPolicy">Stop Image</button>
+      <button id="resetPolicy">Reset</button>
+      <label class="inline">Steps<input id="previewSteps" type="number" min="1" max="100" value="100"></label>
+      <label class="inline">Hz<input id="controlHz" type="number" min="1" max="240" value="30"></label>
+      <button id="shadow" class="primary">Run Shadow Inference</button>
+    </div>
+    <p id="operation" class="operation">Waiting for an operation</p>
+    <p class="warning">The team container can connect only to the trusted Zenoh router on the internal Docker network. Its root filesystem is read-only and it runs non-root with cap-drop, no-new-privileges, and CPU/RAM/PID/tmpfs limits.</p>
+  </section>
+
+  <section class="panel span8">
+    <div class="section-head">
+      <h2>North URDF · Current / Predicted</h2>
+      <div class="badges">
+        <span id="urdfBadge" class="badge">Loading URDF…</span>
+        <span id="meshBadge" class="badge">Mesh —</span>
+      </div>
+    </div>
+    <div class="viewer">
+      <div id="robotView" role="img" aria-label="Complete 3D North URDF model"></div>
+      <span class="viewer-hint">Complete URDF + STL Mesh · Drag to rotate · Scroll to zoom · Right-drag to pan</span>
+    </div>
+    <div class="player">
+      <button id="showCurrent">Current</button>
+      <button id="playPause" disabled>▶</button>
+      <button id="stepBack" disabled>−1</button>
+      <button id="stepForward" disabled>+1</button>
+      <input id="timeline" type="range" min="0" max="0" value="0" disabled>
+      <span id="stepText">Current · 0 steps</span>
+    </div>
+  </section>
+
+  <section class="panel span4">
+    <h2>Compatibility</h2>
+    <div id="metrics" class="metrics"></div>
+    <h3>Current Step Warnings</h3>
+    <ul id="warnings" class="warnings"></ul>
+    <h3>Status and Errors</h3>
+    <pre id="statusText"></pre>
+  </section>
+
+  <section class="panel span12">
+    <h2>Four Real RGB Observations</h2>
+    <div class="cameras">
+      <figure><img id="headLeft" alt="head left"><figcaption>Head left</figcaption></figure>
+      <figure><img id="headRight" alt="head right"><figcaption>Head right</figcaption></figure>
+      <figure><img id="leftWrist" alt="left wrist"><figcaption>Left wrist</figcaption></figure>
+      <figure><img id="rightWrist" alt="right wrist"><figcaption>Right wrist</figcaption></figure>
+    </div>
+  </section>
+
+  <section class="panel span8">
+    <h2>Current 65-Dimensional State</h2>
+    <p class="muted">Prompt: <span id="prompt">—</span></p>
+    <div class="table-wrap">
+      <table><thead><tr><th>#</th><th>Joint</th><th>Radians</th></tr></thead><tbody id="stateRows"></tbody></table>
+    </div>
+  </section>
+  <section class="panel span4">
+    <h2>Container and Evaluation Logs</h2>
+    <pre id="logs"></pre>
+  </section>
+</main>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+:root {
+  color-scheme: dark;
+  --bg:#07101b; --panel:#101c2d; --line:#293b55; --text:#edf5ff;
+  --muted:#92a8c2; --blue:#5ba8ff; --green:#52d49c; --red:#ff7280; --amber:#ffc665;
+}
+* { box-sizing:border-box }
+body { margin:0; min-height:100vh; color:var(--text); background:radial-gradient(circle at 80% -10%,#193b60,#091421 38%,#060b12 80%); font:14px/1.45 system-ui,sans-serif }
+header { position:sticky; top:0; z-index:4; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:15px 22px; border-bottom:1px solid var(--line); background:#091321ec; backdrop-filter:blur(12px) }
+h1 { margin:0; font-size:19px } header p { margin:4px 0 0; color:var(--muted) }
+h2 { margin:0 0 12px; font-size:15px; color:#d6e7ff } h3 { font-size:13px; color:var(--muted); margin:16px 0 7px }
+main { max-width:1680px; margin:auto; padding:18px; display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:15px }
+.panel { min-width:0; padding:15px; border:1px solid var(--line); border-radius:12px; background:linear-gradient(145deg,var(--panel),#0c1727); box-shadow:0 12px 30px #0003 }
+.span12 { grid-column:span 12 }.span8 { grid-column:span 8 }.span4 { grid-column:span 4 }
+.section-head,.badges,.row,.player { display:flex; align-items:center; gap:8px; flex-wrap:wrap }.section-head { justify-content:space-between }
+.badge { display:inline-flex; padding:5px 9px; border-radius:999px; color:var(--muted); background:#1c2a3e; white-space:nowrap }
+.badge.ok { color:var(--green); background:#12382d }.badge.bad { color:var(--red); background:#3d1c28 }.badge.warn { color:var(--amber); background:#3c3019 }
+.form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-bottom:10px }
+label { display:grid; gap:5px; color:var(--muted); font-size:12px }.inline { display:flex; align-items:center; gap:5px }
+input,button { border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--text); background:#091423; font:inherit }
+input { min-width:0 } input.wide { flex:1; min-width:240px }.sha { min-width:430px }.inline input { width:75px }
+button { cursor:pointer; font-weight:650 } button:hover:not(:disabled) { border-color:var(--blue) } button.primary { background:#14518d } button:disabled { opacity:.42; cursor:not-allowed }
+.muted { color:var(--muted) }.warning { color:var(--amber); margin:10px 0 0 }.operation { padding:8px 10px; border-radius:8px; background:#08111e; color:var(--muted); white-space:pre-wrap }
+.viewer { position:relative; height:560px; overflow:hidden; border:1px solid var(--line); border-radius:10px; background:radial-gradient(circle at 50% 40%,#19314c,#050a11 70%) }
+#robotView { width:100%; height:100%; display:block } #robotView canvas { width:100%; height:100%; display:block }.viewer-hint { position:absolute; left:10px; bottom:8px; z-index:2; color:var(--muted); font-size:12px; pointer-events:none; text-shadow:0 1px 3px #000 }
+.player { margin-top:10px }.player #timeline { flex:1; min-width:180px; accent-color:var(--blue) }
+.metrics { display:grid; gap:1px }.metric { display:grid; grid-template-columns:1fr 1.4fr; gap:8px; padding:7px 0; border-bottom:1px solid #203149 }.metric span:first-child { color:var(--muted) }.metric span:last-child { text-align:right; overflow-wrap:anywhere }
+.warnings { min-height:30px; max-height:180px; overflow:auto; margin:0; padding-left:20px; color:var(--amber) }
+.cameras { display:grid; grid-template-columns:repeat(4,1fr); gap:10px } figure { margin:0; overflow:hidden; border:1px solid var(--line); border-radius:9px; background:#04080e } figure img { display:block; width:100%; aspect-ratio:1; object-fit:contain } figcaption { padding:7px 9px; color:var(--muted) }
+.table-wrap { max-height:480px; overflow:auto } table { width:100%; border-collapse:collapse } th,td { padding:6px 8px; border-bottom:1px solid #203149; text-align:left; font-variant-numeric:tabular-nums } th { position:sticky; top:0; background:#101c2d; color:var(--muted) }
+pre { max-height:350px; overflow:auto; margin:0; padding:10px; border-radius:8px; background:#050b13; color:#bdd2eb; white-space:pre-wrap; word-break:break-word; font:12px/1.45 ui-monospace,monospace }
+@media(max-width:1050px) { .span8,.span4 { grid-column:span 12 }.form-grid { grid-template-columns:1fr 1fr }.viewer { height:500px } }
+@media(max-width:700px) { header { position:static; align-items:flex-start; flex-direction:column }.form-grid,.cameras { grid-template-columns:1fr }.sha { min-width:100% }.viewer { height:420px } }

@@ -1,0 +1,1253 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Front = {
+                double3 position = (5, 0, 0)
+                double radius = 5
+            }
+            dictionary Perspective = {
+                double3 position = (1.5, 1.5, 1.5)
+                double3 target = (0, 0, 0.5)
+            }
+            dictionary Right = {
+                double3 position = (0, -5, 0)
+                double radius = 5
+            }
+            dictionary Top = {
+                double3 position = (0, 0, 5)
+                double radius = 5
+            }
+            string boundCamera = "/OmniverseKit_Persp"
+        }
+        dictionary omni_layer = {
+            string authoring_layer = "./north_poc2_2_v3_1.usda"
+            dictionary locked = {
+            }
+            dictionary muteness = {
+            }
+        }
+        dictionary renderSettings = {
+        }
+    }
+    defaultPrim = "North_Poc2_2_V3_1"
+    endTimeCode = 1000000
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 60
+    upAxis = "Z"
+)
+
+def "Render" (
+    hide_in_stage_window = true
+    no_delete = true
+)
+{
+    def "OmniverseKit"
+    {
+        def "HydraTextures" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            def RenderProduct "omni_kit_widget_viewport_ViewportTexture_0" (
+                hide_in_stage_window = true
+                no_delete = true
+            )
+            {
+                rel camera = </OmniverseKit_Persp>
+                uniform int2 resolution = (1280, 720)
+            }
+        }
+    }
+}
+
+over "North_Poc2_2_V3_1" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI"]
+    prepend references = @./north_poc2_2_v3_1/north_poc2_2_v3_1.usd@
+)
+{
+    string isaac:namespace (
+        displayName = "Namespace"
+        doc = "Namespace of the prim in Isaac Sim"
+    )
+
+    over "root_joint" (
+        delete apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI"]
+    )
+    {
+    }
+
+    # ========================================
+    # Collision Filtering: Left Arm link_5 and link_7
+    # ========================================
+    over "left_arm_link_5" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/left_arm_link_7>
+        rel physics:simulationOwner
+    }
+
+    over "left_arm_link_7" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/left_arm_link_5>
+        rel physics:simulationOwner
+    }
+
+    # ========================================
+    # Collision Filtering: Right Arm link_5 and link_7
+    # ========================================
+    over "right_arm_link_5" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/right_arm_link_7>
+        rel physics:simulationOwner
+    }
+
+    over "right_arm_link_7" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/right_arm_link_5>
+        rel physics:simulationOwner
+    }
+
+    # ========================================
+    # Collision Filtering: Left Hand (similar to left_sharpa_wave.usda)
+    # ========================================
+    over "left_hand_C_MC" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = [
+            </North_Poc2_2_V3_1/left_index_PP>,
+            </North_Poc2_2_V3_1/left_middle_PP>,
+            </North_Poc2_2_V3_1/left_ring_PP>,
+            </North_Poc2_2_V3_1/left_thumb_MC>,
+            </North_Poc2_2_V3_1/left_pinky_PP>,
+        ]
+        rel physics:simulationOwner
+    }
+
+    over "left_index_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/left_hand_C_MC>
+        rel physics:simulationOwner
+    }
+
+    over "left_middle_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/left_hand_C_MC>
+        rel physics:simulationOwner
+    }
+
+    over "left_ring_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/left_hand_C_MC>
+        rel physics:simulationOwner
+    }
+
+    over "left_pinky_MC" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/left_pinky_PP>
+        rel physics:simulationOwner
+    }
+
+    over "left_pinky_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = [
+            </North_Poc2_2_V3_1/left_pinky_MC>,
+            </North_Poc2_2_V3_1/left_hand_C_MC>,
+        ]
+        rel physics:simulationOwner
+    }
+
+    over "left_thumb_MC" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = [
+            </North_Poc2_2_V3_1/left_thumb_PP>,
+            </North_Poc2_2_V3_1/left_hand_C_MC>,
+        ]
+        rel physics:simulationOwner
+    }
+
+    over "left_thumb_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/left_thumb_MC>
+        rel physics:simulationOwner
+    }
+
+    # ========================================
+    # Collision Filtering: Right Hand
+    # ========================================
+    over "right_hand_C_MC" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = [
+            </North_Poc2_2_V3_1/right_index_PP>,
+            </North_Poc2_2_V3_1/right_middle_PP>,
+            </North_Poc2_2_V3_1/right_ring_PP>,
+            </North_Poc2_2_V3_1/right_thumb_MC>,
+            </North_Poc2_2_V3_1/right_pinky_PP>,
+        ]
+        rel physics:simulationOwner
+    }
+
+    over "right_index_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/right_hand_C_MC>
+        rel physics:simulationOwner
+    }
+
+    over "right_middle_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/right_hand_C_MC>
+        rel physics:simulationOwner
+    }
+
+    over "right_ring_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/right_hand_C_MC>
+        rel physics:simulationOwner
+    }
+
+    over "right_pinky_MC" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/right_pinky_PP>
+        rel physics:simulationOwner
+    }
+
+    over "right_pinky_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = [
+            </North_Poc2_2_V3_1/right_pinky_MC>,
+            </North_Poc2_2_V3_1/right_hand_C_MC>,
+        ]
+        rel physics:simulationOwner
+    }
+
+    over "right_thumb_MC" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = [
+            </North_Poc2_2_V3_1/right_thumb_PP>,
+            </North_Poc2_2_V3_1/right_hand_C_MC>,
+        ]
+        rel physics:simulationOwner
+    }
+
+    over "right_thumb_PP" (
+        prepend apiSchemas = ["PhysicsFilteredPairsAPI"]
+    )
+    {
+        rel physics:filteredPairs = </North_Poc2_2_V3_1/right_thumb_MC>
+        rel physics:simulationOwner
+    }
+
+    # ========================================
+    # Joint Parameters
+    # ========================================
+    over "joints"
+    {
+        # ========================================
+        # Lower Body Joints
+        # ========================================
+        over "lower_body_joint_1"
+        {
+            float physxJoint:armature = 7.128
+            float drive:angular:physics:damping = 3.74
+            float drive:angular:physics:stiffness = 21.78
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "lower_body_joint_2"
+        {
+            float physxJoint:armature = 7.128
+            float drive:angular:physics:damping = 3.74
+            float drive:angular:physics:stiffness = 21.78
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "lower_body_joint_3"
+        {
+            float drive:angular:physics:damping = 3.74
+            float drive:angular:physics:stiffness = 21.78
+            float physxJoint:armature = 7.128
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "lower_body_joint_4"
+        {
+            float drive:angular:physics:damping = 3.74
+            float drive:angular:physics:stiffness = 25.87
+            float physxJoint:armature = 5.44341
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "lower_body_joint_5"
+        {
+            float drive:angular:physics:damping = 3.74
+            float drive:angular:physics:stiffness = 25.87
+            float physxJoint:armature = 5.44341
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        # ========================================
+        # Left Arm Joints
+        # ========================================
+        over "left_arm_joint_1"
+        {
+            float drive:angular:physics:damping = 0.4
+            float drive:angular:physics:stiffness = 5.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_arm_joint_2"
+        {
+            float drive:angular:physics:damping = 0.4
+            float drive:angular:physics:stiffness = 5.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_arm_joint_3"
+        {
+            float drive:angular:physics:damping = 0.17
+            float drive:angular:physics:stiffness = 5.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_arm_joint_4"
+        {
+            float drive:angular:physics:damping = 0.23
+            float drive:angular:physics:stiffness = 2.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_arm_joint_5"
+        {
+            float drive:angular:physics:damping = 0.2
+            float drive:angular:physics:stiffness = 1.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_arm_joint_6"
+        {
+            float drive:angular:physics:damping = 0.2
+            float drive:angular:physics:stiffness = 1.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_arm_joint_7"
+        {
+            float drive:angular:physics:damping = 0.2
+            float drive:angular:physics:stiffness = 1.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        # ========================================
+        # Right Arm Joints
+        # ========================================
+        over "right_arm_joint_1"
+        {
+            float drive:angular:physics:damping = 0.4
+            float drive:angular:physics:stiffness = 5.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_arm_joint_2"
+        {
+            float drive:angular:physics:damping = 0.4
+            float drive:angular:physics:stiffness = 5.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_arm_joint_3"
+        {
+            float drive:angular:physics:damping = 0.17
+            float drive:angular:physics:stiffness = 5.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_arm_joint_4"
+        {
+            float drive:angular:physics:damping = 0.23
+            float drive:angular:physics:stiffness = 2.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_arm_joint_5"
+        {
+            float drive:angular:physics:damping = 0.2
+            float drive:angular:physics:stiffness = 1.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_arm_joint_6"
+        {
+            float drive:angular:physics:damping = 0.2
+            float drive:angular:physics:stiffness = 1.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_arm_joint_7"
+        {
+            float drive:angular:physics:damping = 0.2
+            float drive:angular:physics:stiffness = 1.0
+            float physxJoint:armature = 0.01
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        # ========================================
+        # Left Hand Finger Joints (from left_sharpa_wave.usda)
+        # ========================================
+        over "left_index_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_middle_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_ring_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_pinky_CMC"
+        {
+            float drive:angular:physics:damping = 6.85E-4
+            float drive:angular:physics:stiffness = 0.02409
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 15.000033
+            float physxJoint:armature = 0.00012
+            float physxJoint:jointFriction = 0.013
+            float physxJoint:maxJointVelocity = 2009.6014
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_pinky_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_thumb_CMC_FE"
+        {
+            float drive:angular:physics:damping = 4.206E-3
+            float drive:angular:physics:stiffness = 0.12138
+            float physics:lowerLimit = -9.998114
+            float physics:upperLimit = 110.00216
+            float physxJoint:armature = 0.0032
+            float physxJoint:jointFriction = 0.132
+            float physxJoint:maxJointVelocity = 678.426
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_index_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_middle_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_ring_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_pinky_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_thumb_CMC_AA"
+        {
+            float drive:angular:physics:damping = 7.8826E-3
+            float drive:angular:physics:stiffness = 0.2304
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.0032
+            float physxJoint:jointFriction = 0.132
+            float physxJoint:maxJointVelocity = 678.426
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_thumb_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -30.000067
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_thumb_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_index_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_middle_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_ring_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_pinky_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_thumb_IP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 100
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_index_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_middle_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_ring_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "left_pinky_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        # ========================================
+        # Right Hand Finger Joints (mirror of left hand)
+        # ========================================
+        over "right_index_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_middle_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_ring_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_pinky_CMC"
+        {
+            float drive:angular:physics:damping = 6.85E-4
+            float drive:angular:physics:stiffness = 0.02409
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 15.000033
+            float physxJoint:armature = 0.00012
+            float physxJoint:jointFriction = 0.013
+            float physxJoint:maxJointVelocity = 2009.6014
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_pinky_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -10
+            float physics:upperLimit = 90.000206
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_thumb_CMC_FE"
+        {
+            float drive:angular:physics:damping = 4.206E-3
+            float drive:angular:physics:stiffness = 0.12138
+            float physics:lowerLimit = -9.998114
+            float physics:upperLimit = 110.00216
+            float physxJoint:armature = 0.0032
+            float physxJoint:jointFriction = 0.132
+            float physxJoint:maxJointVelocity = 678.426
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_index_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_middle_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_ring_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_pinky_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_thumb_CMC_AA"
+        {
+            float drive:angular:physics:damping = 7.8826E-3
+            float drive:angular:physics:stiffness = 0.2304
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.0032
+            float physxJoint:jointFriction = 0.132
+            float physxJoint:maxJointVelocity = 678.426
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_thumb_MCP_FE"
+        {
+            float drive:angular:physics:damping = 0.0031940
+            float drive:angular:physics:stiffness = 0.083078
+            float physics:lowerLimit = -30.000067
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_thumb_MCP_AA"
+        {
+            float drive:angular:physics:damping = 3.63E-3
+            float drive:angular:physics:stiffness = 0.11557
+            float physics:lowerLimit = -20.001955
+            float physics:upperLimit = 20.001955
+            float physxJoint:armature = 0.00265
+            float physxJoint:jointFriction = 0.104
+            float physxJoint:maxJointVelocity = 921.14
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_index_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_middle_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_ring_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_pinky_PIP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 99.99832
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float physxJoint:maxJointVelocity = 665.6805
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_thumb_IP"
+        {
+            float drive:angular:physics:damping = 6.98E-4
+            float drive:angular:physics:stiffness = 0.01584
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 100
+            float physxJoint:armature = 0.00061
+            float physxJoint:jointFriction = 0.02476
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_index_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_middle_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_ring_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "right_pinky_DIP"
+        {
+            float drive:angular:physics:damping = 5.50E-4
+            float drive:angular:physics:stiffness = 0.01578
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 80.00209
+            float physxJoint:armature = 0.00042
+            float physxJoint:jointFriction = 0.000418
+            float physxJoint:maxJointVelocity = 840.2969
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+    }
+
+    # ========================================
+    # OmniGraph for ROS2 Communication
+    # ========================================
+    def OmniGraph "ActionGraph"
+    {
+        token evaluationMode = "Automatic"
+        token evaluator:type = "execution"
+        token fabricCacheBacking = "Shared"
+        int2 fileFormatVersion = (1, 9)
+        token pipelineStage = "pipelineStageSimulation"
+
+        def OmniGraphNode "ros2_publish_joint_state" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint64 inputs:context
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </North_Poc2_2_V3_1/ActionGraph/on_tick.outputs:tick>
+            custom string inputs:nodeNamespace
+            custom string inputs:qosProfile
+            custom uint64 inputs:queueSize
+            custom rel inputs:targetPrim = </North_Poc2_2_V3_1> (
+                customData = {
+                    dictionary omni = {
+                        dictionary graph = {
+                            string relType = "target"
+                        }
+                    }
+                }
+            )
+            custom double inputs:timeStamp
+            prepend double inputs:timeStamp.connect = </North_Poc2_2_V3_1/ActionGraph/on_tick.outputs:time>
+            custom string inputs:topicName = "/isaacsim/North_Poc2_2_V3_1_joint_states"
+            token node:type = "isaacsim.ros2.bridge.ROS2PublishJointState"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (699, 157)
+        }
+
+        def OmniGraphNode "ros2_subscribe_joint_state" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint64 inputs:context
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </North_Poc2_2_V3_1/ActionGraph/on_playback_tick.outputs:tick>
+            custom string inputs:nodeNamespace
+            custom string inputs:qosProfile
+            custom uint64 inputs:queueSize
+            custom string inputs:topicName = "/isaacsim/North_Poc2_2_V3_1_joint_actions"
+            token node:type = "isaacsim.ros2.bridge.ROS2SubscribeJointState"
+            int node:typeVersion = 2
+            custom double[] outputs:effortCommand
+            custom uint outputs:execOut (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom token[] outputs:jointNames
+            custom double[] outputs:positionCommand
+            custom double outputs:timeStamp
+            custom double[] outputs:velocityCommand
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (389, 506)
+        }
+
+        def OmniGraphNode "on_tick" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom uint inputs:framePeriod = 1
+            custom bool inputs:onlyPlayback
+            token node:type = "omni.graph.action.OnTick"
+            int node:typeVersion = 2
+            custom double outputs:absoluteSimTime
+            custom double outputs:deltaSeconds
+            custom double outputs:frame
+            custom bool outputs:isPlaying
+            custom uint outputs:tick (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom double outputs:time
+            custom double outputs:timeSinceStart
+            custom double state:accumulatedSeconds
+            custom uint state:frameCount
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (283.9323, 169.43248)
+        }
+
+        def OmniGraphNode "articulation_controller" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            custom double[] inputs:effortCommand
+            prepend double[] inputs:effortCommand.connect = </North_Poc2_2_V3_1/ActionGraph/ros2_subscribe_joint_state.outputs:effortCommand>
+            custom uint inputs:execIn (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            prepend uint inputs:execIn.connect = </North_Poc2_2_V3_1/ActionGraph/ros2_subscribe_joint_state.outputs:execOut>
+            custom int[] inputs:jointIndices
+            custom token[] inputs:jointNames
+            prepend token[] inputs:jointNames.connect = </North_Poc2_2_V3_1/ActionGraph/ros2_subscribe_joint_state.outputs:jointNames>
+            custom double[] inputs:positionCommand
+            prepend double[] inputs:positionCommand.connect = </North_Poc2_2_V3_1/ActionGraph/ros2_subscribe_joint_state.outputs:positionCommand>
+            custom string inputs:robotPath
+            custom rel inputs:targetPrim = </North_Poc2_2_V3_1> (
+                customData = {
+                    dictionary omni = {
+                        dictionary graph = {
+                            string relType = "target"
+                        }
+                    }
+                }
+            )
+            custom double[] inputs:velocityCommand
+            prepend double[] inputs:velocityCommand.connect = </North_Poc2_2_V3_1/ActionGraph/ros2_subscribe_joint_state.outputs:velocityCommand>
+            token node:type = "isaacsim.core.nodes.IsaacArticulationController"
+            int node:typeVersion = 1
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (781, 497)
+        }
+
+        def OmniGraphNode "on_playback_tick" (
+            prepend apiSchemas = ["NodeGraphNodeAPI"]
+        )
+        {
+            token node:type = "omni.graph.action.OnPlaybackTick"
+            int node:typeVersion = 2
+            custom double outputs:deltaSeconds
+            custom double outputs:frame
+            custom uint outputs:tick (
+                customData = {
+                    bool isExecution = 1
+                }
+            )
+            custom double outputs:time
+            uniform token ui:nodegraph:node:expansionState = "open"
+            uniform float2 ui:nodegraph:node:pos = (119.9443, 632.9849)
+        }
+    }
+
+    over "Looks"
+    {
+        over "DefaultMaterial"
+        {
+            over "DefaultMaterial"
+            {
+                color3f inputs:diffuse_color_constant = (0.7, 0.7, 0.7)
+                float inputs:metallic_constant = 0.91999996
+            }
+        }
+
+        over "material_CAD1EE"
+        {
+            over "Shader"
+            {
+                color3f inputs:diffuse_color_constant = (0.7, 0.7, 0.7)
+                color3f inputs:diffuse_tint = (1, 1, 1)
+                float inputs:metallic_constant = 0.92
+            }
+        }
+
+        over "DefaultMaterial_0"
+        {
+            over "DefaultMaterial"
+            {
+                color3f inputs:diffuse_color_constant = (0.7, 0.7, 0.7)
+                float inputs:metallic_constant = 0.92
+            }
+        }
+
+        over "material_3310033"
+        {
+            over "Shader"
+            {
+                color3f inputs:diffuse_color_constant = (0.3, 0.3, 0.3)
+            }
+        }
+
+        over "material_1910033"
+        {
+            over "Shader"
+            {
+                color3f inputs:diffuse_color_constant = (0.3, 0.3, 0.3)
+            }
+        }
+
+        over "material_E3E3E9"
+        {
+            over "Shader"
+            {
+                color3f inputs:diffuse_color_constant = (0.7, 0.7, 0.7)
+                float inputs:metallic_constant = 0.92
+            }
+        }
+    }
+}
+
+def PhysicsScene "physicsScene" (
+    prepend apiSchemas = ["PhysxSceneAPI"]
+)
+{
+}

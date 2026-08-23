@@ -1,0 +1,49 @@
+# Python environments and caches.
+.venv/
+venv/
+env/
+**/.venv/
+**/.venv-openpi/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local data, checkpoints, norm-stats assets, experiment outputs.
+DATA/
+data/
+wandb/
+logs/
+runs/
+outputs/
+/runtime/
+tmp/
+*.log
+
+# Internal exports must never enter the participant package.
+docs/chat-export/
+
+# Model / data artifacts (bring your own; do not commit).
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.parquet
+*.arrow
+*.mp4
+*.mov
+*.avi
+
+# OS / editor noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
