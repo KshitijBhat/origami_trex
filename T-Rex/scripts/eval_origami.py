@@ -327,7 +327,7 @@ def predict(model, batch, device, mode: str, total_steps: int, split_step: int,
         num_steps_total=total_steps, split_step=split_step, refresh_clean_kv=True)
     return model.tactile_flow_continue(
         cached_kv=cached_kv, latent_position_ids=pos, n_action_in_cache=n_action,
-        x_split=x_split, tau_split=tau_split,
+        x_split=x_split, tau_split=tau_split, attention_mask=mask,
         num_steps_total=total_steps, split_step=split_step,
         **_tactile_inputs(batch, device))
 
@@ -716,6 +716,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             model.tactile_flow_continue(
                 cached_kv=cached_kv, latent_position_ids=pos,
                 n_action_in_cache=n_action, x_split=x_split, tau_split=tau_split,
+                attention_mask=mask,
                 num_steps_total=total_steps, split_step=split_step,
                 **_tactile_inputs(batch, device))
             _sync(device)

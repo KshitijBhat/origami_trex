@@ -140,6 +140,27 @@ def eager_attention_forward(
 
 # ─── MoT Attention ───────────────────────────────────────────────────────────
 
+def read_cached_kv(cache: Cache, layer_idx: int):
+    """Read a layer's already-stored K/V without mutating the cache.
+
+    Handles both the transformers >=4.55 `cache.layers[i].keys/.values`
+    layout and the older top-level `key_cache`/`value_cache` lists.
+    Returns None when nothing is cached for that layer.
+    """
+    layers = getattr(cache, "layers", None)
+    if isinstance(layers, list):
+        if layer_idx < len(layers):
+            layer = layers[layer_idx]
+            keys = getattr(layer, "keys", None)
+            if keys is not None and keys.numel() > 0:
+                return keys, layer.values
+        return None
+    keys = getattr(cache, "key_cache", None)
+    if keys is not None and layer_idx < len(keys) and keys[layer_idx] is not None:
+        return keys[layer_idx], cache.value_cache[layer_idx]
+    return None
+
+
 class Qwen3VLAttentionMoT(nn.Module):
     """
     Multi-head attention with three parallel expert sets:
@@ -240,10 +261,27 @@ class Qwen3VLAttentionMoT(nn.Module):
             query_states, key_states = apply_rotary_pos_emb_1d(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            if torch.is_grad_enabled():
+                # Training-with-prefix-cache (cascaded tactile step): read the
+                # cached prefix K/V *without* appending.  `cache.update()` is
+                # not idempotent, so under gradient checkpointing the backward
+                # recompute would append this step's K/V a second time, making
+                # the KV length outgrow the causal mask built for
+                # past_len + seq_len.  Nothing downstream consumes the appended
+                # entries during training, so a read-only concat is equivalent
+                # and safe to replay.
+                prefix = read_cached_kv(past_key_value, self.layer_idx)
+                if prefix is not None:
+                    prefix_k, prefix_v = prefix
+                    key_states   = torch.cat(
+                        [prefix_k.to(key_states.dtype), key_states], dim=2)
+                    value_states = torch.cat(
+                        [prefix_v.to(value_states.dtype), value_states], dim=2)
+            else:
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
 
         # Use F.scaled_dot_product_attention (flash / memory-efficient backend)
         # for better numerical stability in bf16 vs manual matmul+softmax.

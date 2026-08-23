@@ -624,6 +624,7 @@ class Qwen3VLVLAModel(nn.Module):
                 outputs = self.model(
                     inputs_embeds=act_seq,
                     position_ids=act_pos,
+                    attention_mask=attention_mask,
                     past_key_values=past_kv,
                     use_cache=True,
                     latent_indexes=torch.arange(0, 0, device=device),
@@ -717,6 +718,7 @@ class Qwen3VLVLAModel(nn.Module):
                 outputs = self.model(
                     inputs_embeds=act_seq,
                     position_ids=act_pos,
+                    attention_mask=attention_mask,
                     past_key_values=past_kv,
                     use_cache=True,
                     latent_indexes=torch.arange(0, 0, device=device),
@@ -749,6 +751,7 @@ class Qwen3VLVLAModel(nn.Module):
             _ = self.model(
                 inputs_embeds=clean_seq,
                 position_ids=act_pos_final,
+                attention_mask=attention_mask,
                 past_key_values=past_kv,
                 use_cache=True,
                 latent_indexes=torch.arange(0, 0, device=device),
@@ -770,6 +773,7 @@ class Qwen3VLVLAModel(nn.Module):
         n_action_in_cache: int,
         x_split: torch.Tensor,                  # [B, n_chunk, action_dim] at τ=τ_split
         tau_split: float,
+        attention_mask: Optional[torch.Tensor] = None,
         tactile_f6: Optional[torch.Tensor] = None,
         tactile_deform: Optional[torch.Tensor] = None,
         tactile_codes: Optional[torch.Tensor] = None,
@@ -819,6 +823,7 @@ class Qwen3VLVLAModel(nn.Module):
             outputs = self.model(
                 inputs_embeds=full_embeds,
                 position_ids=tac_pos,
+                attention_mask=attention_mask,
                 past_key_values=cache,
                 use_cache=True,
                 latent_indexes=torch.arange(0, 0, device=device),
@@ -839,6 +844,7 @@ class Qwen3VLVLAModel(nn.Module):
         n_action_in_cache: int,
         x_tau: torch.Tensor,                    # [B, n_chunk, action_dim], full action state
         tau: torch.Tensor,                      # [B] flow times in [0, tau_split]
+        attention_mask: Optional[torch.Tensor] = None,
         tactile_f6: Optional[torch.Tensor] = None,
         tactile_deform: Optional[torch.Tensor] = None,
         tactile_codes: Optional[torch.Tensor] = None,
@@ -874,6 +880,7 @@ class Qwen3VLVLAModel(nn.Module):
         outputs = self.model(
             inputs_embeds=full_embeds,
             position_ids=tac_pos,
+            attention_mask=attention_mask,
             past_key_values=cached_kv,
             use_cache=True,
             latent_indexes=torch.arange(0, 0, device=device),
