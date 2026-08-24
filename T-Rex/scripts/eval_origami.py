@@ -243,6 +243,12 @@ class ErrorAccumulator:
     def per_joint_mae_deg(self) -> np.ndarray:
         return (self.abs / max(1, self.n)).mean(axis=0) * RAD2DEG
 
+    def per_joint_horizon_mae_deg(self) -> np.ndarray:
+        """[T, D] MAE in degrees, i.e. the un-reduced version of `per_joint_mae_deg`
+        and `per_horizon_step_mae_deg` -- lets a heatmap show where in (time, joint)
+        space the error concentrates, instead of only its two 1-D projections."""
+        return (self.abs / max(1, self.n)) * RAD2DEG
+
 
 # ── model plumbing ────────────────────────────────────────────────────────────
 def build_embeds(model, batch, device):
@@ -384,7 +390,8 @@ def dataset_config_from_checkpoint(checkpoint: str, overrides: dict) -> SimpleNa
 
 # ── plots ─────────────────────────────────────────────────────────────────────
 def write_plots(out_dir: str, reports: Dict[str, dict], per_joint: Dict[str, np.ndarray],
-                traces: Optional[dict]) -> None:
+                traces: Optional[dict],
+                per_joint_horizon: Optional[Dict[str, np.ndarray]] = None) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -393,6 +400,8 @@ def write_plots(out_dir: str, reports: Dict[str, dict], per_joint: Dict[str, np.
     # error is zero by construction and would just be a flat line here.
     reports = {k: v for k, v in reports.items() if k != "teleop_gt"}
     per_joint = {k: v for k, v in per_joint.items() if k != "teleop_gt"}
+    if per_joint_horizon is not None:
+        per_joint_horizon = {k: v for k, v in per_joint_horizon.items() if k != "teleop_gt"}
 
     # 1. error vs horizon step
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -459,6 +468,77 @@ def write_plots(out_dir: str, reports: Dict[str, dict], per_joint: Dict[str, np.
         np.atleast_1d(axes)[-1].set_xlabel("sample index within the episode")
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, "episode_trace.png"), dpi=150)
+        plt.close(fig)
+
+    # 5. per-joint x per-horizon-step error heatmap -- the two panels above are
+    # each a 1-D projection of this; this shows whether error concentrates at a
+    # few (joint, step) cells or is spread uniformly.
+    if per_joint_horizon:
+        for name, mae in per_joint_horizon.items():
+            fig, ax = plt.subplots(figsize=(16, 4.5))
+            im = ax.imshow(mae.T, aspect="auto", cmap="viridis", origin="lower",
+                           interpolation="nearest")
+            ax.set_yticks(np.arange(mae.shape[1]))
+            ax.set_yticklabels(JOINT_NAMES, fontsize=5)
+            ax.set_xlabel("chunk step k (30 Hz)")
+            ax.set_title(f"Error by joint x horizon step — {name}")
+            cbar = fig.colorbar(im, ax=ax, pad=0.01)
+            cbar.set_label("MAE (deg)")
+            fig.tight_layout()
+            fig.savefig(os.path.join(out_dir, f"joint_horizon_heatmap_{name}.png"), dpi=150)
+            plt.close(fig)
+
+    # 6. per-group error distribution -- the group bar chart (2) only shows the
+    # mean; this shows the spread across joints/horizon-steps within a group,
+    # so a group with one bad joint dragging the mean up looks different from
+    # one that is uniformly mediocre.
+    if per_joint_horizon:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        names = list(per_joint_horizon)
+        n_groups = len(JOINT_GROUPS)
+        width = 0.8 / max(1, len(names))
+        for i, name in enumerate(names):
+            mae = per_joint_horizon[name]
+            positions = np.arange(n_groups) + i * width
+            data = [mae[:, lo:hi].ravel() for _, lo, hi in JOINT_GROUPS]
+            bp = ax.boxplot(data, positions=positions, widths=width * 0.9,
+                            patch_artist=True, showfliers=False)
+            for patch in bp["boxes"]:
+                patch.set_facecolor(f"C{i}")
+                patch.set_alpha(0.6)
+            for median in bp["medians"]:
+                median.set_color("black")
+        ax.set_xticks(np.arange(n_groups) + 0.4 - width / 2)
+        ax.set_xticklabels([g[0] for g in JOINT_GROUPS])
+        ax.set_ylabel("MAE (deg)")
+        ax.set_title("Error distribution by joint group (across joints x horizon steps)")
+        ax.grid(alpha=0.3, axis="y")
+        handles = [plt.Rectangle((0, 0), 1, 1, fc=f"C{i}", alpha=0.6) for i in range(len(names))]
+        ax.legend(handles, names)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "group_error_distribution.png"), dpi=150)
+        plt.close(fig)
+
+    # 7. predicted-vs-ground-truth parity scatter -- the time-series trace (4)
+    # shows *when* the policy drifts; this shows whether error is a consistent
+    # bias (points shifted off the y=x line) or unstructured noise (scattered
+    # around it), which calls for very different fixes.
+    if traces:
+        picks = [0, 3, 7, 29, 36, 58]
+        fig, axes = plt.subplots(2, 3, figsize=(13, 8))
+        for ax, dim in zip(axes.ravel(), picks):
+            gt, pred = traces["gt"][:, dim], traces["pred"][:, dim]
+            lo, hi = min(gt.min(), pred.min()), max(gt.max(), pred.max())
+            ax.plot([lo, hi], [lo, hi], "--", color="gray", lw=1, alpha=0.7)
+            ax.scatter(gt, pred, s=8, alpha=0.5, color="C0")
+            ax.set_xlabel("teleop (rad)", fontsize=8)
+            ax.set_ylabel("policy (rad)", fontsize=8)
+            ax.set_title(JOINT_NAMES[dim], fontsize=9)
+            ax.grid(alpha=0.3)
+        fig.suptitle(f"Predicted vs. teleop absolute joint target "
+                     f"({traces.get('episode', '?')}, {traces.get('mode', '')})")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "parity_plot.png"), dpi=150)
         plt.close(fig)
 
 
@@ -728,6 +808,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ── report ────────────────────────────────────────────────────────────────
     reports = {name: acc.report() for name, acc in accumulators.items()}
     per_joint = {name: acc.per_joint_mae_deg() for name, acc in accumulators.items()}
+    per_joint_horizon = {name: acc.per_joint_horizon_mae_deg()
+                         for name, acc in accumulators.items()}
 
     baselines = [r for r in (compare_npz(p, horizon, dim) for p in args.compare_npz) if r]
     payload = {
@@ -754,7 +836,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dump(payload, handle, indent=2)
     write_per_joint_csv(os.path.join(args.out_dir, "per_joint.csv"), per_joint)
 
-    write_plots(args.out_dir, reports, per_joint, traces)
+    write_plots(args.out_dir, reports, per_joint, traces, per_joint_horizon)
 
     # ── console summary ───────────────────────────────────────────────────────
     def _unsafe(report):
