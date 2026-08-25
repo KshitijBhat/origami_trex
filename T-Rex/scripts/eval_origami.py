@@ -401,7 +401,7 @@ def dataset_config_from_checkpoint(checkpoint: str, overrides: dict) -> SimpleNa
 
 # ── plots ─────────────────────────────────────────────────────────────────────
 def write_plots(out_dir: str, reports: Dict[str, dict], per_joint: Dict[str, np.ndarray],
-                traces: Optional[dict],
+                traces: Optional[List[dict]],
                 per_joint_horizon: Optional[Dict[str, np.ndarray]] = None) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -463,22 +463,29 @@ def write_plots(out_dir: str, reports: Dict[str, dict], per_joint: Dict[str, np.
         fig.savefig(os.path.join(out_dir, f"joint_error_{name}.png"), dpi=150)
         plt.close(fig)
 
-    # 4. predicted vs ground-truth traces on a contiguous stretch
-    if traces:
-        picks = [0, 3, 7, 29, 36, 58]        # one joint from each group, plus both arms
-        fig, axes = plt.subplots(len(picks), 1, figsize=(13, 2.1 * len(picks)), sharex=True)
+    # 4. predicted vs ground-truth traces, one figure per traced episode.  One
+    # episode is one fold attempt; attempts vary enough in pacing and in where
+    # the paper ends up that a single trace mostly reports which episode was
+    # picked.  Several make the difference between "the policy tracks and
+    # jitters" and "the policy lost this particular attempt" visible.
+    picks = [0, 3, 7, 29, 36, 58]            # one joint per group, plus both arms
+    for i, trace in enumerate(traces or []):
+        fig, axes = plt.subplots(len(picks), 1, figsize=(13, 2.1 * len(picks)),
+                                 sharex=True)
         for ax, dim in zip(np.atleast_1d(axes), picks):
-            ax.plot(traces["gt"][:, dim], label="teleop", lw=1.4)
-            ax.plot(traces["pred"][:, dim], label="policy", lw=1.0, alpha=0.85)
+            ax.plot(trace["gt"][:, dim], label="teleop", lw=1.4)
+            ax.plot(trace["pred"][:, dim], label="policy", lw=1.0, alpha=0.85)
             ax.set_ylabel(JOINT_NAMES[dim], fontsize=7)
             ax.grid(alpha=0.3)
         np.atleast_1d(axes)[0].legend(loc="upper right", fontsize=8)
         np.atleast_1d(axes)[0].set_title(
-            f"Held-out episode ({traces.get('episode', '?')}, {traces.get('mode', '')}): "
-            f"teleop vs predicted absolute joint target at chunk step 0")
+            f"[{i + 1}/{len(traces)}] {trace.get('episode', '?')} "
+            f"({trace.get('season', '?')}, {trace.get('mode', '')}): "
+            f"teleop vs predicted absolute joint target at chunk step 0",
+            fontsize=9)
         np.atleast_1d(axes)[-1].set_xlabel("sample index within the episode")
         fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, "episode_trace.png"), dpi=150)
+        fig.savefig(os.path.join(out_dir, f"episode_trace_{i:02d}.png"), dpi=140)
         plt.close(fig)
 
     # 5. per-joint x per-horizon-step error heatmap -- the two panels above are
@@ -535,19 +542,24 @@ def write_plots(out_dir: str, reports: Dict[str, dict], per_joint: Dict[str, np.
     # bias (points shifted off the y=x line) or unstructured noise (scattered
     # around it), which calls for very different fixes.
     if traces:
-        picks = [0, 3, 7, 29, 36, 58]
+        # Pooled over every traced episode rather than one: the parity plot is
+        # about whether error is a bias or unstructured noise, and that question
+        # wants all the points, not the first episode's.
+        all_gt = np.concatenate([t["gt"] for t in traces])
+        all_pred = np.concatenate([t["pred"] for t in traces])
         fig, axes = plt.subplots(2, 3, figsize=(13, 8))
         for ax, dim in zip(axes.ravel(), picks):
-            gt, pred = traces["gt"][:, dim], traces["pred"][:, dim]
+            gt, pred = all_gt[:, dim], all_pred[:, dim]
             lo, hi = min(gt.min(), pred.min()), max(gt.max(), pred.max())
             ax.plot([lo, hi], [lo, hi], "--", color="gray", lw=1, alpha=0.7)
-            ax.scatter(gt, pred, s=8, alpha=0.5, color="C0")
+            ax.scatter(gt, pred, s=6, alpha=0.35, color="C0")
             ax.set_xlabel("teleop (rad)", fontsize=8)
             ax.set_ylabel("policy (rad)", fontsize=8)
             ax.set_title(JOINT_NAMES[dim], fontsize=9)
             ax.grid(alpha=0.3)
-        fig.suptitle(f"Predicted vs. teleop absolute joint target "
-                     f"({traces.get('episode', '?')}, {traces.get('mode', '')})")
+        fig.suptitle(f"Predicted vs. teleop absolute joint target — "
+                     f"{len(traces)} held-out episodes, "
+                     f"{all_gt.shape[0]} samples ({traces[0].get('mode', '')})")
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, "parity_plot.png"), dpi=150)
         plt.close(fig)
@@ -601,8 +613,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         choices=["cascaded", "blind"])
     parser.add_argument("--no_baselines", action="store_true")
     parser.add_argument("--trace_samples", type=int, default=300,
-                        help="contiguous samples from the first held-out episode, "
-                             "for the predicted-vs-teleop trace plot")
+                        help="contiguous samples per traced episode, for the "
+                             "predicted-vs-teleop trace plots")
+    parser.add_argument("--trace_episodes", type=int, default=10,
+                        help="how many held-out episodes to trace, spread evenly "
+                             "over the split. One episode is one fold attempt, and "
+                             "attempts differ enough that a single trace says more "
+                             "about which episode was picked than about the policy.")
     parser.add_argument("--latency_samples", type=int, default=20,
                         help="batch-1 timed requests, for slow/fast tick latency")
     parser.add_argument("--urdf",
@@ -784,28 +801,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Must be its own pass: the metric subset is strided across the whole split,
     # so consecutive entries there come from different episodes and would plot
     # as noise rather than a trajectory.
-    traces = None
-    if args.trace_samples > 0 and args.modes:
-        n_trace = min(args.trace_samples, dataset.ep_rows[0])
-        trace_loader = DataLoader(
-            Subset(dataset, list(range(n_trace))), batch_size=args.batch_size,
-            shuffle=False, num_workers=args.num_workers,
-            collate_fn=dataset.collate_fn)
-        preds, gts = [], []
-        for batch in trace_loader:
-            gt_delta = batch["eval_action_raw"].numpy().astype(np.float64)
-            state = batch["eval_state"].numpy().astype(np.float64)
-            normalised = predict(model, batch, device, args.modes[0],
-                                 total_steps, split_step, generator=generator)
-            pred_delta = denormalize(normalised.float().cpu().numpy().astype(np.float64),
-                                     action_mask, action_min, action_max)
-            if clamp_frozen:
-                pred_delta = clamp_frozen_actions(pred_delta, action_mask)
-            preds.append(state + pred_delta[:, 0])
-            gts.append(state + gt_delta[:, 0])
-        traces = {"pred": np.concatenate(preds), "gt": np.concatenate(gts),
-                  "episode": dataset.episodes[0]["file"], "mode": args.modes[0]}
-        print(f"trace: {n_trace} contiguous samples from {traces['episode']}")
+    traces: List[dict] = []
+    if args.trace_samples > 0 and args.trace_episodes > 0 and args.modes:
+        # `_build_index` appends every row of episode e before episode e+1, so an
+        # episode's rows are a contiguous slice of the global index.
+        starts, offset = [], 0
+        for n_rows in dataset.ep_rows:
+            starts.append(offset)
+            offset += n_rows
+        n_eps = min(args.trace_episodes, len(dataset.ep_rows))
+        picked = sorted(set(np.linspace(0, len(dataset.ep_rows) - 1,
+                                        n_eps).astype(int).tolist()))
+        print(f"tracing {len(picked)} of {len(dataset.ep_rows)} held-out episodes")
+        for ep_i in picked:
+            n_trace = min(args.trace_samples, dataset.ep_rows[ep_i])
+            trace_loader = DataLoader(
+                Subset(dataset, list(range(starts[ep_i], starts[ep_i] + n_trace))),
+                batch_size=args.batch_size, shuffle=False,
+                num_workers=args.num_workers, collate_fn=dataset.collate_fn)
+            preds, gts = [], []
+            for batch in trace_loader:
+                gt_delta = batch["eval_action_raw"].numpy().astype(np.float64)
+                state = batch["eval_state"].numpy().astype(np.float64)
+                normalised = predict(model, batch, device, args.modes[0],
+                                     total_steps, split_step, generator=generator)
+                pred_delta = denormalize(
+                    normalised.float().cpu().numpy().astype(np.float64),
+                    action_mask, action_min, action_max)
+                if clamp_frozen:
+                    pred_delta = clamp_frozen_actions(pred_delta, action_mask)
+                preds.append(state + pred_delta[:, 0])
+                gts.append(state + gt_delta[:, 0])
+            traces.append({
+                "pred": np.concatenate(preds), "gt": np.concatenate(gts),
+                "episode": dataset.episodes[ep_i]["file"],
+                "season": dataset.episodes[ep_i]["season"],
+                "mode": args.modes[0], "n_rows": n_trace,
+            })
+            print(f"  ep {ep_i:3d} {dataset.episodes[ep_i]['file']}: "
+                  f"{n_trace} contiguous samples")
 
     # ── request latency at batch size 1 ───────────────────────────────────────
     # This is the number the robot waits on, and what the kit's ~540 ms pi0.5
@@ -862,6 +896,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "action_dim": dim,
         "cascaded_total_steps": total_steps,
         "cascaded_split_step": split_step,
+        "traced_episodes": [{"episode": t["episode"], "season": t["season"],
+                             "n_rows": t["n_rows"]} for t in traces],
         "frozen_action_dims": frozen.tolist(),
         "frozen_action_joints": [JOINT_NAMES[i] for i in frozen],
         "clamp_frozen": bool(clamp_frozen),
