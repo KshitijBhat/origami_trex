@@ -209,6 +209,15 @@ class ErrorAccumulator:
                 for name, lo, hi in JOINT_GROUPS
             },
             "per_horizon_step_mae_deg": (mae.mean(axis=1) * RAD2DEG).tolist(),
+            # The organizer replans on a receding horizon and may command only a
+            # prefix of the chunk, so `mae_deg` above (a uniform average over all
+            # 25 steps) partly scores predictions the robot never executes.
+            # This is the same error restricted to the steps actually commanded
+            # before a replan; h = action_chunk reproduces `mae_deg`.
+            "executed_prefix_mae_deg": {
+                str(h): float(mae[:h].mean() * RAD2DEG)
+                for h in (1, 2, 3, 5, 8, 10, 15, 20, 25) if h <= self.horizon
+            },
         }
 
     def report(self) -> dict:
@@ -702,6 +711,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         for mode in args.modes:
             began = time.time()
+            # Reseed per (batch, mode) rather than letting one generator run on:
+            # otherwise `cascaded` and `blind` score the same frames with
+            # different flow noise, and the gap between them — which is the
+            # whole point of the ablation — mixes the tactile expert's effect
+            # with sampling variance.
+            generator.manual_seed(args.seed * 1_000_003 + step)
             normalised = predict(model, batch, device, mode, total_steps, split_step,
                                  generator=generator)
             _sync(device)
