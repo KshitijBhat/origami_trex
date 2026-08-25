@@ -54,6 +54,31 @@ def _denormalize(norm_values, mask, vmin, vmax):
     )
 
 
+def _clamp_frozen(delta, mask):
+    """Zero the predicted delta on dims the training stats marked frozen.
+
+    A masked-off dim is normalisation *passthrough*: `_normalize` left it in raw
+    units, so the flow head's job there is to cancel its own unit-variance input
+    noise against a target of ~0, and whatever it fails to cancel reaches the
+    wire as raw radians.  On the origami split that is the torso
+    `lower_body_joint_1/2` -- constant to ~4e-4 rad across every season, but
+    +-0.3 rad out of the policy, which alone blows the motor group's 0.06 rad
+    step-jump budget on essentially every chunk.
+
+    The chunk is a delta from `observation/state`, so zeroing commands the
+    measured position: exactly what the teleoperator did.  Driven by the mask,
+    so a checkpoint whose stats say the torso moves clamps nothing.
+    """
+    if mask is None:
+        return delta
+    dims = np.where(~np.asarray(mask, dtype=bool))[0]
+    if dims.size == 0:
+        return delta
+    out = np.array(delta, copy=True)
+    out[..., dims] = 0.0
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Build model from config.json
 # ─────────────────────────────────────────────────────────────────────────────
@@ -277,6 +302,11 @@ def model_load(args):
         statistic["state_mask"] = _arr("state", "mask")
         statistic["state_min"]  = _arr("state", "q01")
         statistic["state_max"]  = _arr("state", "q99")
+
+    frozen = np.where(~np.asarray(statistic["action_mask"], dtype=bool))[0]
+    if frozen.size:
+        print(f"[serve] frozen action dims {frozen.tolist()} -> delta clamped to 0 "
+              f"(normalisation passthrough dims; see _clamp_frozen)")
 
     return model, processor, statistic
 
@@ -574,10 +604,11 @@ class CascadedServer:
             self.attention_mask    = attention_mask
             self.n_action_in_cache = 0
             self.chunk_id         += 1
-            a_full = _denormalize(
+            a_full = _clamp_frozen(_denormalize(
                 full_chunk[0].float().cpu().numpy(),
                 statistic["action_mask"],
-                statistic["action_min"], statistic["action_max"])
+                statistic["action_min"], statistic["action_max"]),
+                statistic["action_mask"])
             self.last_actions = list(a_full)
             return self.last_actions, self.chunk_id
 
@@ -654,9 +685,10 @@ class CascadedServer:
             split_step         = args.cascaded_split_step,
         )
         a_refined_norm = refined[0].float().cpu().numpy()
-        a_refined = _denormalize(
+        a_refined = _clamp_frozen(_denormalize(
             a_refined_norm, statistic["action_mask"],
-            statistic["action_min"], statistic["action_max"])
+            statistic["action_min"], statistic["action_max"]),
+            statistic["action_mask"])
         return list(a_refined), self.chunk_id
 
     def predict(self, mode, payload):

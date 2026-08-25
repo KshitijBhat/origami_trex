@@ -32,7 +32,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 import pyarrow.parquet as pq
 
-from .seasons import ACTION_DIM, FINGER_NAMES
+from .seasons import ACTION_DIM, FINGER_NAMES, JOINT_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,9 @@ N_FINGERS = 10
 F6_PER_FINGER = 6
 # A fingertip counts as "in contact" above this force, and needs to be in
 # contact this often before its deform/force correlation means anything.
+# Mirrors `stats.MIN_NORM_RANGE_JOINT`; imported by value so verify stays
+# runnable against a stats file produced by any version of the prep.
+MIN_NORM_RANGE_JOINT = 1e-3
 CONTACT_THRESHOLD_N = 0.5
 MIN_CONTACT_FRACTION = 0.05
 COLUMNS = ("state", "action_chunk", "action_abs", "phase", "tacf6_hist",
@@ -123,9 +126,29 @@ def verify(root: str, n_samples: int = 8, seed: int = 0,
                 _check(got == want,
                        f"norm_stats.{key}.{field} has shape {got}, expected {want} "
                        f"(a wrong action rank mis-broadcasts silently)", problems)
-        off = np.where(~np.array(block["action"]["mask"]))[0]
-        logger.info("[verify] norm-stats ranks OK | %d action dim(s) masked off %s",
-                    len(off), off.tolist())
+        # Masked-off dims are normalisation *passthrough*, which is also what
+        # the serve/eval path clamps to delta 0 (`test.py:_clamp_frozen`).  Log
+        # the names and the actual spread, not just indices: whether the torso
+        # is still frozen once all 101 train seasons are in is exactly the
+        # question that decides whether clamping them is safe.
+        mask = np.array(block["action"]["mask"], dtype=bool)
+        spread = np.max(np.array(block["action"]["q99"])
+                        - np.array(block["action"]["q01"]), axis=0)   # [chunk,dim] -> [dim]
+        off = np.where(~mask)[0]
+        logger.info("[verify] norm-stats ranks OK | %d action dim(s) masked off "
+                    "(frozen -> clamped to delta 0 at inference)", len(off))
+        for i in off:
+            logger.info("[verify]     dim %2d %-22s max q99-q01 spread %.2e rad "
+                        "(%.4f deg)", i, JOINT_NAMES[i], spread[i],
+                        float(np.degrees(spread[i])))
+        # The near-misses matter too: a dim that only just cleared the threshold
+        # is one season away from flipping, and the clamp decision would flip
+        # with it.
+        near = [i for i in np.where(mask)[0] if spread[i] < 10 * MIN_NORM_RANGE_JOINT]
+        for i in near:
+            logger.info("[verify]     dim %2d %-22s NOT masked but spread is only "
+                        "%.2e rad — within 10x of the frozen threshold",
+                        i, JOINT_NAMES[i], spread[i])
 
     # ── 3-5. sample-level checks ──────────────────────────────────────────────
     from PIL import Image

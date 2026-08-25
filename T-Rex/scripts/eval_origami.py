@@ -62,7 +62,9 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from qwen_vla import extend_position_ids_for_flare, split_slow_fast_embeds
-from qwen_vla.origami_dataset import JOINT_GROUPS, OrigamiDataset, denormalize
+from qwen_vla.origami_dataset import (JOINT_GROUPS, OrigamiDataset,
+                                      clamp_frozen_actions, denormalize,
+                                      frozen_action_dims)
 from trex_origami.seasons import JOINT_NAMES
 
 RAD2DEG = 180.0 / math.pi
@@ -610,6 +612,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--compare_npz", nargs="*", default=[],
                         help="baseline .npz files from check_zenoh_policy.py")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--clamp_frozen", choices=["auto", "off"], default="auto",
+                        help="auto: zero the predicted delta on dims the training "
+                             "norm-stats marked frozen (un-normalised passthrough "
+                             "dims, where the head emits raw noise). off: score the "
+                             "policy's raw output, which is what the pilot reported.")
     parser.add_argument("--cascaded_total_steps", type=int, default=10)
     parser.add_argument("--cascaded_split_step", type=int, default=6)
     args = parser.parse_args(argv)
@@ -686,6 +693,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     action_mask = dataset.action_mask
     action_min, action_max = dataset.action_min, dataset.action_max
 
+    # Dims the training stats declared frozen.  These are normalisation
+    # passthrough dims, so the flow head's residual noise reaches the wire in
+    # raw radians; zeroing the delta commands `state[j]`, which is what the
+    # teleoperator did on every frame.  Derived from the stats, so a split where
+    # the torso actually moves clamps nothing.
+    frozen = frozen_action_dims(action_mask)
+    clamp_frozen = args.clamp_frozen == "auto" and frozen.size > 0
+    if frozen.size:
+        names = ", ".join(JOINT_NAMES[i] for i in frozen)
+        print(f"frozen action dims from norm-stats: {frozen.tolist()} ({names}) "
+              f"-> {'clamped to delta 0' if clamp_frozen else 'NOT clamped (--clamp_frozen off)'}")
+    else:
+        print("frozen action dims from norm-stats: none — nothing to clamp")
+
     accumulators = {mode: ErrorAccumulator(horizon, dim) for mode in args.modes}
     if not args.no_baselines:
         accumulators["hold_state"] = ErrorAccumulator(horizon, dim)
@@ -724,6 +745,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             pred_delta = denormalize(normalised.float().cpu().numpy().astype(np.float64),
                                      action_mask, action_min, action_max)
+            if clamp_frozen:
+                pred_delta = clamp_frozen_actions(pred_delta, action_mask)
             accumulator = accumulators[mode]
             accumulator.add(pred_delta - gt_delta, contact)
             # Amortised throughput, not request latency: batching hides the
@@ -776,6 +799,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                  total_steps, split_step, generator=generator)
             pred_delta = denormalize(normalised.float().cpu().numpy().astype(np.float64),
                                      action_mask, action_min, action_max)
+            if clamp_frozen:
+                pred_delta = clamp_frozen_actions(pred_delta, action_mask)
             preds.append(state + pred_delta[:, 0])
             gts.append(state + gt_delta[:, 0])
         traces = {"pred": np.concatenate(preds), "gt": np.concatenate(gts),
@@ -837,6 +862,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "action_dim": dim,
         "cascaded_total_steps": total_steps,
         "cascaded_split_step": split_step,
+        "frozen_action_dims": frozen.tolist(),
+        "frozen_action_joints": [JOINT_NAMES[i] for i in frozen],
+        "clamp_frozen": bool(clamp_frozen),
         "results": reports,
         "request_latency_ms": {
             phase: {

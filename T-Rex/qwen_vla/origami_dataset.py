@@ -73,6 +73,39 @@ def denormalize(norm_values, mask, vmin, vmax):
                     norm_values)
 
 
+def frozen_action_dims(mask) -> np.ndarray:
+    """Indices of the action dims the norm-stats declared frozen.
+
+    `trex_origami.stats.calculate_stats` masks off any dim whose q01..q99 spread
+    is below `MIN_NORM_RANGE_JOINT`, and `_normalize` then passes those dims
+    through un-scaled.  The flow head still emits *something* on them -- with a
+    target of ~0 and a unit-variance noise prior, its job there is to cancel its
+    own input noise -- so what reaches the wire is whatever it failed to cancel,
+    in raw radians rather than in [-1, 1].  On the pilot split that is the torso
+    `lower_body_joint_1/2`: constant to ~4e-4 rad in the data, +-0.3 rad out of
+    the policy, and 8% of the checkpoint's total per-joint MAE.
+
+    Derived from the mask rather than hard-coded, so a split where the torso
+    *does* move simply reports no frozen dims and nothing is clamped.
+    """
+    return np.where(~np.asarray(mask, dtype=bool))[0]
+
+
+def clamp_frozen_actions(delta, mask):
+    """Zero a delta chunk on the frozen dims -- i.e. command `state[j]` and hold.
+
+    `delta` is [..., D] in raw radians.  The wire contract is `state + delta`,
+    so zeroing is exactly "hold the measured position", which is what the
+    teleoperator did on those dims for every frame of every season.
+    """
+    dims = frozen_action_dims(mask)
+    if dims.size == 0:
+        return delta
+    out = np.array(delta, copy=True)
+    out[..., dims] = 0.0
+    return out
+
+
 def split_deform_strip(arr: np.ndarray) -> np.ndarray:
     """[480, 1200] -> [10, 240, 240], ordered left thumb..little then right."""
     t = arr.reshape(DEFORM_ROWS, DEFORM_TILE, DEFORM_COLS, DEFORM_TILE)
