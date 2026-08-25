@@ -36,6 +36,23 @@ if [ ! -f "${RESUME_CHECKPOINT}/model.pt" ]; then
     exit 1
 fi
 
+# A checkpoint you cannot resume from is the same as no checkpoint.  On Colab
+# /content is wiped when the VM is reclaimed, which is exactly the event the
+# checkpoints exist for, so refuse to start a long run pointed there unless the
+# caller says it is deliberate.
+case "${OUTPUT_DIR}" in
+    /content/drive/*|/mnt/*|"${HOME}"/*) ;;
+    *)
+        if [ "${ALLOW_EPHEMERAL_OUTPUT:-0}" != "1" ] && [ "${SMOKE:-0}" != "1" ]; then
+            echo "OUTPUT_DIR=${OUTPUT_DIR} is not on persistent storage." >&2
+            echo "A pre-emption would take the checkpoints with it. Point it at" >&2
+            echo "  /content/drive/MyDrive/... , or set ALLOW_EPHEMERAL_OUTPUT=1." >&2
+            exit 1
+        fi
+        echo ">>> WARNING: OUTPUT_DIR=${OUTPUT_DIR} is ephemeral (ALLOW_EPHEMERAL_OUTPUT=1)"
+        ;;
+esac
+
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-trex_origami_fold_plane}"
 RUN_NAME="${RUN_NAME:-${EXPERIMENT_NAME}_$(date +%m%d_%H%M)}"
 
@@ -63,7 +80,12 @@ if [ "${SMOKE:-0}" = "1" ]; then
     echo ">>> SMOKE RUN: 5 steps, no checkpoint"
     EXTRA_ARGS+=(--max_steps 5 --save_steps 0 --save_freq 100000 --val_freq 0)
 else
-    EXTRA_ARGS+=(--save_steps "${SAVE_STEPS:-2000}" --save_optimizer_state 1
+    # 5000 micro-steps is ~3 h at the pilot's 2.25 s/step: frequent enough that a
+    # pre-emption costs at most one checkpoint's worth of work, rare enough that
+    # the ~10 GB each (weights + adamw8bit state, --save_optimizer_state 1) does
+    # not spend the session on I/O.  At --save_steps 2000 a full-tier epoch
+    # writes ~13 of them.
+    EXTRA_ARGS+=(--save_steps "${SAVE_STEPS:-5000}" --save_optimizer_state 1
                  --val_freq "${VAL_FREQ:-1000}" --max_val_batches 30)
 fi
 if [ "${RESUME:-0}" = "1" ]; then
@@ -84,6 +106,29 @@ fi
 #   shape-mismatch drops for x_embedder / final_layer / final_layer_tactile /
 #      state_embedder — the 62->65 action-head change. Anything *else* being
 #      dropped means the checkpoint does not match this architecture.
+
+# ── pre-flight ────────────────────────────────────────────────────────────────
+# Every check here fails in seconds; the alternative is finding out hours in, or
+# not at all.  The stats-calibration check is the one that matters most: the
+# full split refits its own q01/q99, so warm-starting from the *pilot*
+# checkpoint would leave the action head emitting in the old normalisation and
+# silently mis-scale every predicted delta.  Cold-starting from midtrain and
+# resuming the same run after a pre-emption both pass.
+if [ "${SKIP_PREFLIGHT:-0}" != "1" ] && [ "${SMOKE:-0}" != "1" ]; then
+    PREFLIGHT_ARGS=(--train-root "${ORIGAMI_ROOT}" --val-root "${ORIGAMI_VAL_ROOT}"
+                    --resume-checkpoint "${RESUME_CHECKPOINT}"
+                    --batch-size "${TRAIN_BSZ}" --grad-accum "${GRAD_ACCUM}"
+                    --epochs "${N_EPOCHS}" --save-steps "${SAVE_STEPS:-5000}")
+    [ "${RESUME:-0}" = "1" ] && PREFLIGHT_ARGS+=(--resume-full-state)
+    if ! (cd "${PROJECT_ROOT}" && python3 -m trex_origami.preflight "${PREFLIGHT_ARGS[@]}"); then
+        if [ "${ALLOW_STATS_MISMATCH:-0}" = "1" ]; then
+            echo ">>> pre-flight failed but ALLOW_STATS_MISMATCH=1 — continuing anyway"
+        else
+            echo "pre-flight failed; fix the above or set SKIP_PREFLIGHT=1 to override" >&2
+            exit 1
+        fi
+    fi
+fi
 
 echo ">>> data   : ${ORIGAMI_ROOT}  (val ${ORIGAMI_VAL_ROOT})"
 echo ">>> resume : ${RESUME_CHECKPOINT}"
