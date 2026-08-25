@@ -91,7 +91,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from qwen_vla.origami_dataset import (JOINT_GROUPS, OrigamiDataset, _contact_flag,
-                                      denormalize)
+                                      clamp_frozen_actions, denormalize,
+                                      frozen_action_dims)
 from trex_origami.seasons import JOINT_NAMES
 
 RAD2DEG = 180.0 / math.pi
@@ -351,9 +352,13 @@ def run_config(model, dataset, spec: PerturbSpec, indices: List[int], args,
         normalised = predict_cascaded(model, batch, device, args.cascaded_total_steps,
                                       args.cascaded_split_step, noise)
         _sync(device)
-        pred_delta = denormalize(normalised.float().cpu().numpy().astype(np.float64),
-                                 dataset.action_mask, dataset.action_min,
-                                 dataset.action_max)
+        # Same clamp the eval and serve paths apply, so a degradation reported
+        # here is the perturbation and not the torso's un-normalised noise.
+        pred_delta = clamp_frozen_actions(
+            denormalize(normalised.float().cpu().numpy().astype(np.float64),
+                        dataset.action_mask, dataset.action_min,
+                        dataset.action_max),
+            dataset.action_mask)
         acc.add(pred_delta - gt_delta, contact)
         if safety is not None:
             for b in range(pred_delta.shape[0]):
@@ -395,9 +400,11 @@ def receding_horizon(model, dataset, args, device) -> Optional[dict]:
                              args.seed, device)
         normalised = predict_cascaded(model, batch, device, args.cascaded_total_steps,
                                       args.cascaded_split_step, noise)
-        preds.append(denormalize(normalised.float().cpu().numpy().astype(np.float64),
-                                 dataset.action_mask, dataset.action_min,
-                                 dataset.action_max))
+        preds.append(clamp_frozen_actions(
+            denormalize(normalised.float().cpu().numpy().astype(np.float64),
+                        dataset.action_mask, dataset.action_min,
+                        dataset.action_max),
+            dataset.action_mask))
         gts.append(batch["eval_action_raw"].numpy().astype(np.float64))
         states.append(batch["eval_state"].numpy().astype(np.float64))
     pred = np.concatenate(preds)      # [N, T, D] deltas
@@ -650,6 +657,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               "frame of the F6 window reaches the model (origami_dataset.py:390). "
               "tac_hist_stride_* and tac_hist_frozen are no-ops here and their "
               "numbers should be read as a sanity check, not a result.")
+    frozen = frozen_action_dims(dataset.action_mask)
+    if frozen.size:
+        print(f"frozen action dims {frozen.tolist()} -> delta clamped to 0, "
+              f"matching eval_origami.py and the serve path")
+
     ms_per_row = 1000.0 * dataset.sample_stride / 30.0
     print(f"sample_stride={dataset.sample_stride} -> one row of delay is "
           f"{ms_per_row:.0f} ms; delays and replan periods are quantized to that")
