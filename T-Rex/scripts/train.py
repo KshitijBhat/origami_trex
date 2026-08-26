@@ -1454,7 +1454,7 @@ if __name__ == "__main__":
     # ── origami-flat data path (Robotic Origami Challenge / Sharpa) ──
     parser.add_argument("--origami_root", type=str, default="",
                         help="origami-flat dataset root (--data_format origami)")
-    parser.add_argument("--origami_val_root", type=str, default="",
+    parser.add_argument("--origami_val_root", type=str, default="val",
                         help="held-out-season root used for validation")
     parser.add_argument("--origami_sampler", type=str, default="block",
                         choices=["block", "random"],

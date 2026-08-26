@@ -215,8 +215,11 @@ def decode_frames(
     """One ffmpeg pass over `video_path`, returning JPEG bytes for the selected frames.
 
     ffmpeg does the select, the resize and the JPEG encode, so raw frames never
-    cross into Python — the whole conversion is bounded by AV1 decode (~3200
-    fps for 480x480 on this box).
+    cross into Python — the whole conversion is bounded by video decode.  The
+    release ships h264 (not AV1): measured on this box, 480x480 RGB decodes at
+    ~1950 fps and the 1200x480 deform strip at ~3200 fps.  `accel.install()`
+    reroutes the RGB streams through NVDEC for ~2.6x; see that module for why
+    the deform strip stays here.
     """
     vf = f"select='{_select_expr(ranges)}'"
     if scale:
@@ -515,6 +518,11 @@ def _merge_entries(out_root: str, new_entries: List[dict]) -> List[dict]:
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+#: Some seasons failed but the split on disk is usable; callers should carry on
+#: with stats/verify and surface the gap at the end rather than aborting.
+EXIT_PARTIAL = 3
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Convert Robotic Origami Challenge seasons to origami-flat.")
@@ -623,7 +631,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.error("[prep] %d season(s) failed:", len(failures))
         for season, message in failures:
             logger.error("         %s: %s", season, message)
-        return 1
+        # Per-season failures are already non-fatal to the sweep, so make them
+        # non-fatal to the *pipeline* too.  Exiting 1 here meant a run that lost
+        # 2 of 101 seasons to a flaky download also lost the val split, the
+        # stats fit and both verifies, because the caller runs under `set -e`.
+        # EXIT_PARTIAL says "output is written and usable, just incomplete";
+        # 1 stays reserved for "nothing came out, do not proceed".
+        return EXIT_PARTIAL if entries else 1
     return 0
 
 

@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
-# Prepare the Robotic Origami Challenge data for T-Rex post-training.
+# Prepare the Robotic Origami Challenge data, overlapping fetch with convert and
+# decoding the RGB cameras on the GPU.  Drop-in replacement for run_prepare.sh.
 #
-# Streams seasons from the HF hub one at a time, converts each to origami-flat,
-# and deletes the source, so peak disk stays at "output so far + one season"
-# (~1 GB) instead of the ~300 GB the raw release would need.
+# Two changes over the serial script:
+#   * downloads run on a thread pool while conversions run on a process pool, so
+#     the network and the CPU/GPU are busy at the same time instead of taking
+#     turns;
+#   * the three 480x480 RGB streams decode through NVDEC (`h264_cuvid -resize`),
+#     which on this box runs at ~5100 fps against ~1950 fps on the CPU.  The
+#     1200x480 deform strip stays on the CPU, where it is measurably faster --
+#     it is not downscaled, so reading full frames back off the GPU costs more
+#     than NVDEC saves.
+#
+# Peak disk is bounded by --disk-budget seasons (~1 GB each) plus the output.
 #
 # Usage:
-#   bash trex_origami/run_prepare.sh pilot      # 10 train + 3 val seasons, stride 5
-#   bash trex_origami/run_prepare.sh full       # 101 train + 25 val seasons, stride 20
-#   bash trex_origami/run_prepare.sh dense      # 30 train + 8 val seasons, stride 5
+#   bash trex_origami/run_prepare_fast.sh pilot
+#   bash trex_origami/run_prepare_fast.sh full
+#   CONVERTERS=3 DOWNLOADERS=4 bash trex_origami/run_prepare_fast.sh full
+#   ORIGAMI_GPU=0 bash trex_origami/run_prepare_fast.sh full   # byte-exact CPU path
 #
-# Re-running is safe and resumable: already-converted episodes are skipped.
+# Re-running is safe and resumable: already-converted seasons are skipped
+# without being refetched, so this can pick up after run_prepare.sh.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,6 +32,13 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 OUT_ROOT="${OUT_ROOT:-/home/kshitij/origami_trex/data/origami_flat}"
 CACHE_ROOT="${CACHE_ROOT:-/home/kshitij/origami_trex/data/_src}"
 # export HF_TOKEN=hf_...   # only needed if the dataset repo is gated
+
+# Converters are processes doing ffmpeg + parquet; 2 is enough to keep both the
+# GPU (rgb) and the CPU (deform) busy, and more mostly contends for the same
+# 16 threads.  Downloaders are socket-bound, so they can outnumber them.
+DOWNLOADERS="${DOWNLOADERS:-3}"
+CONVERTERS="${CONVERTERS:-2}"
+DISK_BUDGET="${DISK_BUDGET:-4}"
 
 TIER="${1:-pilot}"
 case "${TIER}" in
@@ -35,10 +53,13 @@ VAL_ROOT="${OUT_ROOT}/${TIER}/val"
 
 echo ">>> tier=${TIER}  stride=${STRIDE}  train_limit=${TRAIN_LIMIT}  val_limit=${VAL_LIMIT}"
 echo ">>> out=${OUT_ROOT}/${TIER}  cache=${CACHE_ROOT}"
+echo ">>> downloaders=${DOWNLOADERS}  converters=${CONVERTERS}  disk_budget=${DISK_BUDGET} seasons"
 
 COMMON=(--cache-root "${CACHE_ROOT}" --sample-stride "${STRIDE}"
         --action-chunk 25 --chunk-stride 1 --image-size 224
-        --vqvae-window 16 --phase-mode none)
+        --vqvae-window 16 --phase-mode none
+        --downloaders "${DOWNLOADERS}" --converters "${CONVERTERS}"
+        --disk-budget "${DISK_BUDGET}")
 
 # A season that fails to download is not a reason to skip everything after it.
 # prepare exits 3 ("wrote a usable split, some seasons missing"), and we carry
@@ -48,7 +69,7 @@ COMMON=(--cache-root "${CACHE_ROOT}" --sample-stride "${STRIDE}"
 PARTIAL=""
 prepare_split() {                        # prepare_split <split> <limit> <out-root>
   local split="$1" limit="$2" out="$3" rc=0
-  python3 -m trex_origami.prepare --split "${split}" --limit "${limit}" \
+  python3 -m trex_origami.prepare_fast --split "${split}" --limit "${limit}" \
           --out-root "${out}" "${COMMON[@]}" || rc=$?
   case "${rc}" in
     0) ;;
