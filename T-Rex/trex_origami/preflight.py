@@ -22,9 +22,12 @@ Checks:
   resume calibration  The action head's output scale is defined by the q01/q99
                       the model trained against.  Warm-starting the full run
                       from the pilot checkpoint while the full split refits its
-                      own stats silently mis-scales every action dim.  Resuming
-                      *the same run* after a pre-emption is fine and is not
-                      flagged.
+                      own stats silently mis-scales every action dim.  Two cases
+                      are fine and are not flagged: resuming *the same run*
+                      after a pre-emption, and cold-starting from the midtrain
+                      checkpoint, whose stats are eef-62 -- a different action
+                      space means the head is re-initialised on load, so there
+                      is no old normalisation to carry over.
 
   budget              samples -> micro-steps -> wall clock, so the checkpoint
                       cadence and the session count are chosen from a number
@@ -181,8 +184,8 @@ def check_resume(resume_checkpoint: str, train_root: str, resume_full_state: boo
 
     ckpt_block = _action_block(os.path.join(resume_checkpoint, "stats_data.json"))
     if ckpt_block is None:
-        problems.ok(f"{resume_checkpoint} carries no 65-D origami stats — this is "
-                    f"the midtrain checkpoint, the intended cold start")
+        problems.ok(f"{resume_checkpoint} carries no action stats — nothing the "
+                    f"action head could be mis-calibrated against")
         return
 
     data_block = _action_block(os.path.join(train_root, "meta", "norm_stats.json"))
@@ -192,14 +195,34 @@ def check_resume(resume_checkpoint: str, train_root: str, resume_full_state: boo
 
     ckpt_q01, ckpt_q99 = np.array(ckpt_block["q01"]), np.array(ckpt_block["q99"])
     data_q01, data_q99 = np.array(data_block["q01"]), np.array(data_block["q99"])
-    if ckpt_q01.shape != data_q01.shape:
-        problems.fail(
-            f"resume checkpoint's action stats are {ckpt_q01.shape} but the data's "
-            f"are {data_q01.shape}.")
+
+    # A different action *dim* is the signature of the intended cold start: the
+    # released midtrain checkpoint ships its own stats_data.json fitted on
+    # T-Rex's eef-62 / chunk-16 corpus, and train.py drops the shape-mismatched
+    # x_embedder / final_layer / final_layer_tactile / state_embedder keys, so
+    # the head is re-initialised and calibrated against *these* stats.  There is
+    # no old normalisation left to mis-scale.
+    if ckpt_q01.shape[-1] != data_q01.shape[-1]:
+        problems.ok(
+            f"checkpoint's action stats are {tuple(ckpt_q01.shape)} (chunk x dim) vs "
+            f"the data's {tuple(data_q01.shape)} — a different action space, so the "
+            f"action head is re-initialised on load. This is the intended cold start "
+            f"from the midtrain checkpoint")
         return
 
     scale_ckpt = np.maximum(ckpt_q99 - ckpt_q01, 1e-12)
     scale_data = np.maximum(data_q99 - data_q01, 1e-12)
+    cell = "chunk step {}"
+    if ckpt_q01.shape != data_q01.shape:
+        # Same action space, different chunk length.  No weight depends on chunk
+        # length, so the head *does* transfer and its calibration still matters;
+        # compare the per-dim envelope instead of cell-wise.
+        problems.warning(
+            f"checkpoint chunk length {ckpt_q01.shape[0]} != the data's "
+            f"{data_q01.shape[0]}; comparing the per-dim envelope, not cell-wise")
+        scale_ckpt = scale_ckpt.max(axis=0, keepdims=True)
+        scale_data = scale_data.max(axis=0, keepdims=True)
+        cell = "per-dim envelope, {}"
     ratio = scale_data / scale_ckpt
     # Worst dim by |log ratio| so a 2x shrink is ranked as badly as a 2x stretch.
     # Report the ratio *at that cell*, not the global max: the extremes usually
@@ -215,7 +238,7 @@ def check_resume(resume_checkpoint: str, train_root: str, resume_full_state: boo
     problems.fail(
         f"resume checkpoint was calibrated to DIFFERENT action stats: worst dim is "
         f"{dim} ({JOINT_NAMES[dim]}), rescaled by {float(ratio[where]):.3f}x "
-        f"(chunk step {int(where[0])}). "
+        f"({cell.format(int(where[0]))}). "
         f"Its action head emits in the old normalisation, so every predicted delta "
         f"would be mis-scaled. Cold-start from trex_midtrain instead, or re-fit "
         f"stats to match. Override with ALLOW_STATS_MISMATCH=1 if this is "
