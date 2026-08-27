@@ -1009,6 +1009,11 @@ def train(args):
         num_training_steps=num_training_steps,
         min_lr_ratio=args.min_lr_ratio,
     )
+    # accelerator.prepare() only wraps model/optimizer/dataloader below; without
+    # this, save_state()/load_state() never captures the scheduler's step count
+    # and a resume silently restarts the warmup from 0 (the LR falls back to
+    # near-zero instead of continuing the cosine decay).
+    accelerator.register_for_checkpointing(lr_scheduler)
 
     if val_dataloader is not None:
         model, optimizer, dataloader, val_dataloader = accelerator.prepare(
