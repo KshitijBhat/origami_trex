@@ -86,7 +86,8 @@ else
     # not spend the session on I/O.  At --save_steps 2000 a full-tier epoch
     # writes ~13 of them.
     EXTRA_ARGS+=(--save_steps "${SAVE_STEPS:-5000}" --save_optimizer_state 1
-                 --val_freq "${VAL_FREQ:-1000}" --max_val_batches 30)
+                 --val_freq "${VAL_FREQ:-1000}" --max_val_batches 30
+                 --capture_attn_every_n_val "${CAPTURE_ATTN_EVERY_N_VAL:-5}")
 fi
 if [ "${RESUME:-0}" = "1" ]; then
     LATEST="$(ls -dt "${OUTPUT_DIR}/${EXPERIMENT_NAME}"/*/checkpoint-* 2>/dev/null | head -1 || true)"
@@ -133,10 +134,13 @@ fi
 echo ">>> data   : ${ORIGAMI_ROOT}  (val ${ORIGAMI_VAL_ROOT})"
 echo ">>> resume : ${RESUME_CHECKPOINT}"
 echo ">>> output : ${OUTPUT_DIR}/${EXPERIMENT_NAME}/${RUN_NAME}"
-echo ">>> batch  : ${TRAIN_BSZ} x ${GRAD_ACCUM} = $((TRAIN_BSZ * GRAD_ACCUM))  lr=${LR}"
+echo ">>> batch  : ${TRAIN_BSZ} x ${GRAD_ACCUM} x ${NUM_GPUS:-1} gpu(s) = $((TRAIN_BSZ * GRAD_ACCUM * ${NUM_GPUS:-1}))  lr=${LR}"
 
+# NUM_GPUS defaults to 1 (unchanged single-A100/Colab behavior). Set it (and
+# scale LR yourself -- this script does not do that for you, see the paper's
+# effective-batch-128 note above) for a multi-GPU cluster node.
 accelerate launch \
-    --num_processes 1 --num_machines 1 --mixed_precision bf16 --dynamo_backend no \
+    --num_processes "${NUM_GPUS:-1}" --num_machines 1 --mixed_precision bf16 --dynamo_backend no \
     train.py \
     --model_path "${ORIGIN_MODEL_PATH}" \
     --data_format origami \

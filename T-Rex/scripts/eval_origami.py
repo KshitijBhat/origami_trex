@@ -607,7 +607,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--dataset_name", default="")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_eval_samples", type=int, default=2000,
-                        help="evenly spaced across the split (0 = all)")
+                        help="evenly spaced across the split (0 = all). Ignored "
+                             "when --first_k_episodes is set.")
+    parser.add_argument("--first_k_episodes", type=int, default=0,
+                        help="restrict to the first K episodes (by dataset.json "
+                             "order) instead of --num_eval_samples's evenly-spaced "
+                             "sampling over the whole split. 0 = disabled. Useful "
+                             "for a fast, reproducible sanity pass over a fixed, "
+                             "small slice while iterating on a notebook/analysis.")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--modes", nargs="+", default=["cascaded", "blind"],
                         choices=["cascaded", "blind"])
@@ -693,7 +700,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError(f"data is [{horizon}, {dim}] but the model is "
                          f"[{model.action_chunk}, {model.action_dim}]")
 
-    if args.num_eval_samples and args.num_eval_samples < len(dataset):
+    if args.first_k_episodes and args.first_k_episodes < len(dataset.episodes):
+        # `_build_index` appends every row of episode e before episode e+1
+        # (see OrigamiDataset._build_index), so this is a contiguous prefix of
+        # dataset.index, not a scan -- cheap even for a large split.
+        k = args.first_k_episodes
+        n_rows = sum(dataset.ep_rows[:k])
+        eval_set = Subset(dataset, list(range(n_rows)))
+        print(f"--first_k_episodes {k}: {n_rows} samples from episodes "
+              f"{[dataset.episodes[i]['file'] for i in range(k)]}")
+    elif args.num_eval_samples and args.num_eval_samples < len(dataset):
         # Evenly spaced rather than a prefix, so every held-out episode and every
         # phase of the fold contributes.
         indices = np.linspace(0, len(dataset) - 1, args.num_eval_samples).astype(int)
@@ -809,10 +825,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for n_rows in dataset.ep_rows:
             starts.append(offset)
             offset += n_rows
-        n_eps = min(args.trace_episodes, len(dataset.ep_rows))
-        picked = sorted(set(np.linspace(0, len(dataset.ep_rows) - 1,
-                                        n_eps).astype(int).tolist()))
-        print(f"tracing {len(picked)} of {len(dataset.ep_rows)} held-out episodes")
+        # Stay inside the --first_k_episodes prefix when it's set, so a trace
+        # never references an episode outside what was actually scored above.
+        pool = args.first_k_episodes if args.first_k_episodes else len(dataset.ep_rows)
+        n_eps = min(args.trace_episodes, pool)
+        picked = sorted(set(np.linspace(0, pool - 1, n_eps).astype(int).tolist()))
+        print(f"tracing {len(picked)} of {pool} held-out episodes")
         for ep_i in picked:
             n_trace = min(args.trace_samples, dataset.ep_rows[ep_i])
             trace_loader = DataLoader(
@@ -855,6 +873,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                         args.latency_samples).astype(int).tolist()),
             batch_size=1, shuffle=False, num_workers=0, collate_fn=dataset.collate_fn)
         for batch in single:
+            # t_data marks a batch already sitting in host memory (the
+            # DataLoader's job, same as a camera frame already having arrived
+            # off the wire) -- everything from here on is what the robot
+            # actually waits on for one slow+fast request. `build_embeds`
+            # runs the vision tower (`prepare_inputs_embeds`) plus the
+            # host->device transfer, so timing only forward_flow_action_partial
+            # / tactile_flow_continue (as this block used to) silently drops
+            # the ViT forward pass from "slow_tick" and "total" -- a real
+            # undercount, not a rounding difference, since vision embedding is
+            # not free for a multi-image (head + wrist) slow-tick input.
+            _sync(device)
+            t_data = time.time()
             slow, pos, fast, state_emb, mask = build_embeds(model, batch, device)
             noise = torch.randn(1, model.action_chunk, model.action_dim,
                                 dtype=torch.bfloat16, device=device, generator=generator)
@@ -875,9 +905,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 **_tactile_inputs(batch, device))
             _sync(device)
             t2 = time.time()
+            latency["vision_embed"].append(t0 - t_data)
             latency["slow_tick"].append(t1 - t0)
             latency["fast_tick"].append(t2 - t1)
-            latency["total"].append(t2 - t0)
+            # "total" now spans t_data -> t2, i.e. vision + slow + fast -- the
+            # real number the robot waits on. "total_compute_only" keeps the
+            # old (vision-excluded) definition around so a run measured before
+            # this fix is still comparable to one measured after it.
+            latency["total"].append(t2 - t_data)
+            latency["total_compute_only"].append(t2 - t0)
 
     # ── report ────────────────────────────────────────────────────────────────
     reports = {name: acc.report() for name, acc in accumulators.items()}
@@ -949,9 +985,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     n_plots = len([f for f in os.listdir(args.out_dir) if f.endswith(".png")])
     if latency["total"]:
         print(f"\nrequest latency at batch 1 (ms): "
+              f"vision {np.mean(latency['vision_embed']) * 1000:.0f}  "
               f"slow {np.mean(latency['slow_tick']) * 1000:.0f}  "
               f"fast {np.mean(latency['fast_tick']) * 1000:.0f}  "
-              f"total {np.mean(latency['total']) * 1000:.0f}   "
+              f"total {np.mean(latency['total']) * 1000:.0f} "
+              f"(compute-only, excl. vision: {np.mean(latency['total_compute_only']) * 1000:.0f})   "
               f"(kit's pi0.5 replay: ~540 ms/infer)")
     print(f"\nwrote {args.out_dir}/metrics.json, per_joint.csv and {n_plots} plots")
     return 0

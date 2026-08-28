@@ -590,8 +590,17 @@ class TrainingMetrics:
 
 @torch.no_grad()
 def run_validation(model, val_dataloader, accelerator, args,
-                   is_stage1, use_flare, K, T_per_frame, flare_layer_idx):
-    """Run validation and return averaged metrics (action + tactile + flare)."""
+                   is_stage1, use_flare, K, T_per_frame, flare_layer_idx,
+                   capture_attention=False, viz_dir=None, capture_n_samples=2):
+    """Run validation and return averaged metrics (action + tactile + flare).
+
+    capture_attention: only ever True for a handful of validation calls (see
+    train()'s --capture_attn_every_n_val), never during a training step --
+    it forces the slower eager attention path (see modeling_qwen3vl_mot.py)
+    for the batch-0 forward call below, purely to save real attention maps
+    via qwen_vla/attention_capture.py. Wrapped in try/except so a viz bug
+    can never fail real validation.
+    """
     model.eval()
     device = torch.cuda.current_device()
     val_act = torch.tensor(0.0, device=device)
@@ -603,6 +612,7 @@ def run_validation(model, val_dataloader, accelerator, args,
     for i, batch in enumerate(val_dataloader):
         if i >= max_batches:
             break
+        do_capture = capture_attention and i == 0 and accelerator.is_main_process
         raw_model = accelerator.unwrap_model(model)
 
         inputs_embeds = raw_model.prepare_inputs_embeds(
@@ -665,13 +675,27 @@ def run_validation(model, val_dataloader, accelerator, args,
                 slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
+            _latent_idx = torch.arange(0, L_latent, device=full_embeds.device)
+            _action_idx = torch.arange(L_latent, L_total, device=full_embeds.device)
+            _tactile_idx = torch.arange(0, 0, device=full_embeds.device)
             outputs = model.model(
                 inputs_embeds=full_embeds, position_ids=pos_ids,
                 attention_mask=batch["attention_mask"], use_cache=False,
-                output_hidden_states=use_flare,
-                latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
-                action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
-                tactile_indexes=torch.arange(0, 0, device=full_embeds.device))
+                output_hidden_states=use_flare, output_attentions=do_capture,
+                latent_indexes=_latent_idx, action_indexes=_action_idx,
+                tactile_indexes=_tactile_idx)
+            if do_capture:
+                try:
+                    from qwen_vla.attention_capture import save_attention_maps
+                    n_saved = save_attention_maps(
+                        outputs.attentions,
+                        {"latent": _latent_idx, "action": _action_idx, "tactile": _tactile_idx},
+                        out_dir=viz_dir, n_samples=capture_n_samples,
+                        tag_prefix="cascaded_",
+                    )
+                    logger.info(f"[viz] saved {n_saved} attention map(s) -> {viz_dir}")
+                except Exception as e:
+                    logger.warning(f"[viz] attention capture failed (validation continues): {e}")
             hidden = outputs.last_hidden_state
             act_start = L_latent + n_fast + n_state + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
@@ -720,13 +744,27 @@ def run_validation(model, val_dataloader, accelerator, args,
                 slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
+            _latent_idx = torch.arange(0, L_latent, device=full_embeds.device)
+            _action_idx = torch.arange(L_latent, L_total, device=full_embeds.device)
+            _tactile_idx = torch.arange(0, 0, device=full_embeds.device)
             outputs = model.model(
                 inputs_embeds=full_embeds, position_ids=pos_ids,
                 attention_mask=batch["attention_mask"], use_cache=False,
-                output_hidden_states=use_flare,
-                latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
-                action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
-                tactile_indexes=torch.arange(0, 0, device=full_embeds.device))
+                output_hidden_states=use_flare, output_attentions=do_capture,
+                latent_indexes=_latent_idx, action_indexes=_action_idx,
+                tactile_indexes=_tactile_idx)
+            if do_capture:
+                try:
+                    from qwen_vla.attention_capture import save_attention_maps
+                    n_saved = save_attention_maps(
+                        outputs.attentions,
+                        {"latent": _latent_idx, "action": _action_idx, "tactile": _tactile_idx},
+                        out_dir=viz_dir, n_samples=capture_n_samples,
+                        tag_prefix="stage1_",
+                    )
+                    logger.info(f"[viz] saved {n_saved} attention map(s) -> {viz_dir}")
+                except Exception as e:
+                    logger.warning(f"[viz] attention capture failed (validation continues): {e}")
             hidden = outputs.last_hidden_state
             act_start = L_latent + n_fast + n_state + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
@@ -1046,6 +1084,31 @@ def train(args):
             start_epoch = int(ts.get("epoch", 0))
             accelerator.print(f"Resuming at epoch {start_epoch}, step {global_step}")
 
+    # ── attention-map viz: saved beside this run's own checkpoints, under
+    #    <output_dir>/viz -- args.output_dir is already the per-run dir
+    #    (experiment_name/run_name), not the top-level OUTPUT_DIR. ──
+    viz_dir = os.path.join(args.output_dir, "viz")
+    val_call_count = 0
+    capture_attn_every_n_val = getattr(args, "capture_attn_every_n_val", 5)
+
+    # ── validate once BEFORE any training step, so viz/metrics exist right
+    #    away instead of waiting for the first --val_freq steps. Skipped on a
+    #    RESUME (global_step > 0): training has already progressed, so an
+    #    "initial" validation at this point would be misleading, not helpful. ──
+    if val_dataloader is not None and global_step == 0 and accelerator.is_main_process:
+        accelerator.print(">>> running one validation pass before training starts (see --capture_attn_every_n_val for the viz cadence after this)")
+    if val_dataloader is not None and global_step == 0:
+        val_m = run_validation(
+            model, val_dataloader, accelerator, args,
+            is_stage1, use_flare, K, T_per_frame, flare_layer_idx,
+            capture_attention=True, viz_dir=os.path.join(viz_dir, "step_0_pretrain"))
+        val_call_count += 1
+        if accelerator.is_main_process:
+            accelerator.print(
+                f"  [Val step=0 (pre-training)] "
+                f"act={val_m['val/action_loss']:.6f} tac={val_m['val/tactile_loss']:.6f}")
+            wandb.log(val_m, step=0)
+
     stop_training = False
     for epoch in range(start_epoch, args.n_epochs):
         if stop_training:
@@ -1325,9 +1388,18 @@ def train(args):
             if (val_dataloader is not None
                     and getattr(args, "val_freq", 0) > 0
                     and (global_step + 1) % args.val_freq == 0):
+                val_call_count += 1
+                # Every capture_attn_every_n_val-th validation call ALSO saves
+                # attention maps (never during the training step itself --
+                # only inside this already-periodic, already off-hot-path
+                # validation call). <=0 disables capture entirely.
+                do_capture = (capture_attn_every_n_val > 0
+                             and val_call_count % capture_attn_every_n_val == 0)
                 val_m = run_validation(
                     model, val_dataloader, accelerator, args,
-                    is_stage1, use_flare, K, T_per_frame, flare_layer_idx)
+                    is_stage1, use_flare, K, T_per_frame, flare_layer_idx,
+                    capture_attention=do_capture,
+                    viz_dir=os.path.join(viz_dir, f"step_{global_step + 1}"))
                 if accelerator.is_main_process:
                     accelerator.print(
                         f"  [Val step={global_step}] "
@@ -1450,6 +1522,10 @@ if __name__ == "__main__":
     parser.add_argument("--val_ratio", type=float, default=0.0, help="Fraction of samples for validation (0=disable)")
     parser.add_argument("--val_freq", type=int, default=0, help="Run validation every N steps (0=disable)")
     parser.add_argument("--max_val_batches", type=int, default=50, help="Max batches per validation run")
+    parser.add_argument("--capture_attn_every_n_val", type=int, default=5,
+                        help="Save attention maps (qwen_vla/attention_capture.py) on every Nth "
+                             "validation call, plus always on the pre-training validation pass. "
+                             "Never runs during a training step. <=0 disables capture entirely.")
 
     # ── origami-flat data path (Robotic Origami Challenge / Sharpa) ──
     parser.add_argument("--origami_root", type=str, default="",

@@ -73,8 +73,8 @@ python - <<PY
 import os
 from huggingface_hub import snapshot_download
 target = os.path.join("${DATA_ROOT}", "origami_flat")
-if not os.path.exists(os.path.join(target, "train", "meta", "dataset.json")):
-    snapshot_download("${DATA_REPO}", repo_type="dataset", local_dir=target, max_workers=8)
+# if not os.path.exists(os.path.join(target, "train", "meta", "dataset.json")):
+#     snapshot_download("${DATA_REPO}", repo_type="dataset", local_dir=target, max_workers=8)
 print("dataset at", target)
 PY
 else
