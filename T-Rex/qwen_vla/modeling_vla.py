@@ -780,6 +780,7 @@ class Qwen3VLVLAModel(nn.Module):
         tactile_f6_history: Optional[torch.Tensor] = None,
         num_steps_total: int = 10,
         split_step: int = 6,
+        output_attentions: bool = False,
     ) -> torch.Tensor:
         """Cascaded fast-tick: continue the flow from x_split at τ=tau_split
         down to τ=0 using the tactile expert.  Returns the final clean action
@@ -788,6 +789,15 @@ class Qwen3VLVLAModel(nn.Module):
 
         `cached_kv` is cloned so multiple fast ticks within one chunk window
         each start from the same slow-tick snapshot.
+
+        `output_attentions` is validation/viz-only (default False, matching
+        every real caller today — test.py, eval_origami.py, eval_robustness.py,
+        train.py's own tactile_flow_train_step path never pass it, so their
+        behavior and return value are unchanged). When explicitly True, also
+        captures the first Euler step's joint attention (query = this call's
+        n_tac_seq tactile tokens; keys = the full cached [latent | action] KV
+        plus this step's own tactile keys) and returns
+        (x, attentions, n_tac_seq) instead of just x.
         """
         cache = self._clone_dynamic_cache(cached_kv)
         device = x_split.device
@@ -813,6 +823,7 @@ class Qwen3VLVLAModel(nn.Module):
         time = torch.tensor(tau_split, dtype=dtype, device=device)
         remaining = num_steps_total - split_step
         x = x_split.to(dtype)
+        captured_attn = None
 
         for step in range(remaining):
             tau_emb = self.t_embedder(time.expand(B)).unsqueeze(1)
@@ -826,15 +837,20 @@ class Qwen3VLVLAModel(nn.Module):
                 attention_mask=attention_mask,
                 past_key_values=cache,
                 use_cache=True,
+                output_attentions=output_attentions,
                 latent_indexes=torch.arange(0, 0, device=device),
                 action_indexes=torch.arange(0, 0, device=device),
                 tactile_indexes=torch.arange(0, n_tac_seq, device=device),
             )
+            if step == 0 and output_attentions:
+                captured_attn = outputs.attentions
             hidden = outputs.last_hidden_state
             v = self.final_layer_tactile(hidden[:, -n_chunk:, :])
             x    = x + dt * v
             time = time + dt
 
+        if output_attentions:
+            return x, captured_attn, n_tac_seq
         return x
 
     def tactile_flow_train_step(

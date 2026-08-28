@@ -704,8 +704,11 @@ def run_validation(model, val_dataloader, accelerator, args,
             fe = fast_embeds if n_fast > 0 else None
             se = state_embeds if n_state > 0 else None
             ahat_noise = torch.randn_like(batch["noisy_actions"])
-            # cached_kv at τ=tau_split (matches inference).
-            _, cached_kv, n_action_in_cache, _ = (
+            # cached_kv at τ=tau_split (matches inference). x_split_slow is
+            # only consumed by the viz-only tactile_flow_continue capture call
+            # below -- the real loss path (tactile_flow_train_step) never
+            # reads it, it derives its own x_tau independently.
+            x_split_slow, cached_kv, n_action_in_cache, _ = (
                 raw_model.forward_flow_action_partial(
                     inputs_embeds=slow_embeds_ext,
                     position_ids=pos_ids,
@@ -738,6 +741,41 @@ def run_validation(model, val_dataloader, accelerator, args,
                 tactile_f6_history=batch.get("tactile_f6_history"),
             )
             loss_tac = nn.MSELoss()(v_pred_r, v_target_r)
+
+            # Viz-only, additive: tactile_flow_train_step (above) is the real
+            # loss path and never asks for attention. This is a separate call
+            # to tactile_flow_continue -- the actual fast-tick used at
+            # eval/deployment time -- purely to capture tactile_to_latent /
+            # tactile_to_action, which save_attention_maps structurally can't
+            # produce (see attention_capture.py's docstring). Reuses the
+            # cached_kv/x_split/tau_split already computed above; doesn't
+            # affect loss_tac or anything computed from it.
+            if do_capture:
+                try:
+                    from qwen_vla.attention_capture import save_tactile_attention_maps
+                    _, tac_attn, n_tac_seq = raw_model.tactile_flow_continue(
+                        cached_kv=cached_kv,
+                        latent_position_ids=pos_ids,
+                        n_action_in_cache=n_action_in_cache,
+                        x_split=x_split_slow,
+                        tau_split=tau_split,
+                        attention_mask=batch["attention_mask"],
+                        tactile_f6=batch.get("tactile_f6s_delayed"),
+                        tactile_deform=batch.get("tactile_deforms_delayed"),
+                        tactile_codes=batch.get("tactile_codes"),
+                        tactile_f6_history=batch.get("tactile_f6_history"),
+                        num_steps_total=args.cascaded_total_steps,
+                        split_step=args.cascaded_split_step,
+                        output_attentions=True,
+                    )
+                    n_saved_tac = save_tactile_attention_maps(
+                        tac_attn, n_action_in_cache, n_tac_seq,
+                        out_dir=viz_dir, n_samples=capture_n_samples,
+                        tag_prefix="cascaded_",
+                    )
+                    logger.info(f"[viz] saved {n_saved_tac} tactile attention map(s) -> {viz_dir}")
+                except Exception as e:
+                    logger.warning(f"[viz] tactile attention capture failed (validation continues): {e}")
         else:
             # Stage-1 / tactile-free validation: action expert only.
             full_embeds = torch.cat([

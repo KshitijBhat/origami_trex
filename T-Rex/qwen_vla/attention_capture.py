@@ -111,3 +111,72 @@ def save_attention_maps(
                     fig.savefig(os.path.join(out_dir, f"{tag}_sample{s}.png"), dpi=100)
                     plt.close(fig)
     return saved
+
+
+def save_tactile_attention_maps(
+    attentions: Tuple[torch.Tensor, ...],
+    n_action_in_cache: int,
+    n_tac_seq: int,
+    out_dir: str,
+    n_samples: int = 2,
+    layer_fractions: Sequence[float] = _LAYER_FRACTIONS,
+    tag_prefix: str = "",
+) -> int:
+    """The one map save_attention_maps can't produce: tactile queries against
+    the cached [latent | action] KV from the slow tick, from
+    tactile_flow_continue(output_attentions=True)'s first Euler step.
+
+    Rectangular, not square, unlike save_attention_maps: the query axis is
+    only this call's n_tac_seq tactile tokens (latent/action indexes are both
+    empty in tactile_flow_continue -- it reads their KV from cache, never
+    recomputes them), while the key axis is the full cache (latent + action
+    from the slow tick) plus this step's own tactile keys. One index tensor
+    can't serve both axes here the way it does in save_attention_maps, hence
+    a separate function rather than a generalization of it.
+
+    n_action_in_cache, n_tac_seq: the same values tactile_flow_continue was
+    called with / returned -- used to split the key axis into named ranges by
+    simple arithmetic (total_keys - n_action_in_cache - n_tac_seq = however
+    many latent keys must be at the front), not by guessing.
+    """
+    if not attentions:
+        return 0
+    os.makedirs(out_dir, exist_ok=True)
+    n_layers = len(attentions)
+    layer_idxs = _select_layers(n_layers, layer_fractions)
+    n = min(n_samples, attentions[0].shape[0])
+
+    saved = 0
+    for li in layer_idxs:
+        attn = attentions[li].float().mean(dim=1)[:n]  # [n, n_tac_seq, total_keys]
+        total_keys = attn.shape[-1]
+        n_latent_in_cache = total_keys - n_action_in_cache - n_tac_seq
+        if n_latent_in_cache < 0:
+            continue  # the assumed cache layout doesn't hold here -- skip rather than guess
+
+        key_ranges = {
+            "latent":  (0, n_latent_in_cache),
+            "action":  (n_latent_in_cache, n_latent_in_cache + n_action_in_cache),
+            "tactile": (n_latent_in_cache + n_action_in_cache, total_keys),
+        }
+        for k_name, (lo, hi) in key_ranges.items():
+            if hi <= lo:
+                continue
+            k_idx = torch.arange(lo, hi, device=attn.device)
+            sliced = attn.index_select(2, k_idx).detach().cpu().numpy()  # [n, n_tac_seq, hi-lo]
+
+            tag = f"{tag_prefix}layer{li}_tactile_to_{k_name}"
+            np.save(os.path.join(out_dir, f"{tag}.npy"), sliced)
+            saved += 1
+
+            for s in range(sliced.shape[0]):
+                fig, ax = plt.subplots(figsize=(4, 4))
+                im = ax.imshow(sliced[s], aspect="auto", cmap="viridis")
+                ax.set_title(f"{tag} sample{s}", fontsize=8)
+                ax.set_xlabel(f"{k_name} keys")
+                ax.set_ylabel("tactile queries")
+                fig.colorbar(im, ax=ax, fraction=0.046)
+                fig.tight_layout()
+                fig.savefig(os.path.join(out_dir, f"{tag}_sample{s}.png"), dpi=100)
+                plt.close(fig)
+    return saved

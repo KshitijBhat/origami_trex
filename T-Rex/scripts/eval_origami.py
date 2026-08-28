@@ -644,6 +644,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--cascaded_total_steps", type=int, default=10)
     parser.add_argument("--cascaded_split_step", type=int, default=6)
     args = parser.parse_args(argv)
+    
+    print('main called')
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -719,9 +721,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     loader = DataLoader(eval_set, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, collate_fn=dataset.collate_fn,
                         pin_memory=True)
+    # With --first_k_episodes, report the actual scored prefix, not the whole
+    # split's counts -- otherwise this misleadingly claims every held-out
+    # episode/season contributed when only the first K did.
+    scored_episodes = (dataset.episodes[:args.first_k_episodes] if args.first_k_episodes
+                       else dataset.episodes)
     print(f"evaluating {len(eval_set)} of {len(dataset)} samples "
-          f"({len(dataset.episodes)} episodes, "
-          f"{len({e['season'] for e in dataset.episodes})} held-out seasons)")
+          f"({len(scored_episodes)} episodes, "
+          f"{len({e['season'] for e in scored_episodes})} held-out seasons)")
 
     action_mask = dataset.action_mask
     action_min, action_max = dataset.action_min, dataset.action_max
