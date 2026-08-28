@@ -564,6 +564,51 @@ def write_plots(out_dir: str, reports: Dict[str, dict], per_joint: Dict[str, np.
         fig.savefig(os.path.join(out_dir, "parity_plot.png"), dpi=150)
         plt.close(fig)
 
+    # 8. per-joint MSE heatmap over time within an episode -- one figure per
+    # traced episode. The parity scatter (7) pools across episodes and loses
+    # *when* error happens; this keeps that axis, at full per-joint resolution.
+    # trace["pred"]/["gt"] are radians (see the parity scatter's own axis
+    # labels above); degrees here only to match every other MAE/RMSE number
+    # this script reports.
+    for i, trace in enumerate(traces or []):
+        err_deg = np.degrees(trace["pred"] - trace["gt"])
+        sq_err_deg = err_deg ** 2  # [n_rows, 65]
+        fig, ax = plt.subplots(figsize=(13, 4.5))
+        im = ax.imshow(sq_err_deg.T, aspect="auto", cmap="viridis", origin="lower",
+                       interpolation="nearest")
+        ax.set_yticks(np.arange(sq_err_deg.shape[1]))
+        ax.set_yticklabels(JOINT_NAMES, fontsize=5)
+        ax.set_xlabel("sample index within the episode")
+        ax.set_title(f"[{i + 1}/{len(traces)}] {trace.get('episode', '?')} "
+                     f"({trace.get('season', '?')}, {trace.get('mode', '')}): "
+                     f"per-joint MSE (deg²) as the episode proceeds",
+                     fontsize=9)
+        cbar = fig.colorbar(im, ax=ax, pad=0.01)
+        cbar.set_label("MSE (deg²)")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"joint_mse_heatmap_{i:02d}.png"), dpi=150)
+        plt.close(fig)
+
+    # 9. joint-averaged MSE over time, one line per traced episode -- the same
+    # data as (8) collapsed over joints, so multiple episodes' error
+    # trajectories are directly comparable on one axis (does error grow the
+    # same way across different fold attempts, or is one episode an outlier?).
+    if traces:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for i, trace in enumerate(traces):
+            err_deg = np.degrees(trace["pred"] - trace["gt"])
+            mean_mse_deg = (err_deg ** 2).mean(axis=1)  # [n_rows]
+            ax.plot(mean_mse_deg, lw=1.2, alpha=0.85,
+                   label=f"[{i}] {trace.get('episode', '?')}")
+        ax.set_xlabel("sample index within the episode")
+        ax.set_ylabel("mean MSE across 65 joints (deg²)")
+        ax.set_title("Joint-averaged MSE as each traced episode proceeds")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7, ncol=2)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "joint_avg_mse_trace.png"), dpi=150)
+        plt.close(fig)
+
 
 def write_per_joint_csv(path: str, per_joint: Dict[str, np.ndarray]) -> None:
     names = list(per_joint)
