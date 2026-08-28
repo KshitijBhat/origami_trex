@@ -60,6 +60,7 @@ Example from the repository root:
 ```bash
 docker build \
   --build-arg RUNTIME_IMAGE=<compatible-openpi-runtime-image> \
+  --build-arg EXECUTION_MODE=async \
   --build-context checkpoint=/absolute/path/to/checkpoint \
   --build-context python_packages=/absolute/path/to/python/site-packages \
   -f openpi-base-main/scripts/docker/submission-zenoh-bundled.Dockerfile \
@@ -70,3 +71,6 @@ docker build \
 The `python_packages` context must contain `zenoh/` and
 `eclipse_zenoh-1.9.0.dist-info/`. The checkpoint context must contain `params/`
 or `model.safetensors` plus `assets/**/norm_stats.json`.
+
+Use `EXECUTION_MODE=sync` for synchronous Gateway execution. The default is
+`async`, which enables the Gateway's asynchronous temporal-aggregation path.

@@ -25,6 +25,7 @@ from openpi.training import config as _config
 
 TRANSPORT_VERSION = "origami-zenoh-v1"
 SEMANTIC_VERSION = "origami-v1"
+INFERENCE_KIT = "origami-inference-kit-async"
 ACTION_DIM = 65
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
 REQUIRED_IMAGE_SPECS = {
@@ -88,6 +89,7 @@ if len(JOINT_NAMES) != ACTION_DIM or len(set(JOINT_NAMES)) != ACTION_DIM:
 class Args(_base.Args):
     zenoh_endpoint: str | None = None
     session_id: str | None = None
+    execution_mode: str = "async"
 
 
 def _pack_numpy(value: Any) -> Any:
@@ -172,11 +174,15 @@ class OpenPIZenohServer:
         endpoint: str,
         session_id: str,
         action_horizon: int,
+        execution_mode: str = "async",
     ) -> None:
         self.policy = policy
         self.endpoint = endpoint
         self.session_id = session_id
         self.action_horizon = int(action_horizon)
+        if execution_mode not in {"sync", "async"}:
+            raise ValueError("execution_mode must be 'sync' or 'async'")
+        self.execution_mode = execution_mode
         self._policy_lock = threading.Lock()
         self._stop = threading.Event()
         self._session: Any | None = None
@@ -188,6 +194,8 @@ class OpenPIZenohServer:
             "action_units": "radians",
             "action_horizon": self.action_horizon,
             "joint_names": JOINT_NAMES,
+            "execution_mode": self.execution_mode,
+            "inference_kit": INFERENCE_KIT,
         }
 
     def serve_forever(self) -> None:
@@ -208,11 +216,12 @@ class OpenPIZenohServer:
         signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
         signal.signal(signal.SIGINT, lambda *_: self._stop.set())
         logging.info(
-            "READY transport=%s endpoint=%s session=%s horizon=%d",
+            "READY transport=%s endpoint=%s session=%s horizon=%d execution_mode=%s",
             TRANSPORT_VERSION,
             self.endpoint,
             self.session_id,
             self.action_horizon,
+            self.execution_mode,
         )
         self._stop.wait()
         for queryable in self._queryables:
@@ -370,6 +379,7 @@ def main(args: Args) -> None:
         endpoint=endpoint,
         session_id=session_id,
         action_horizon=action_horizon,
+        execution_mode=args.execution_mode,
     )
     server.serve_forever()
 

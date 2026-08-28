@@ -4,6 +4,15 @@ set -euo pipefail
 checkpoint_dir="${CHECKPOINT_DIR:-/opt/policy/checkpoint}"
 config="${POLICY_CONFIG:-pi05_origami_fold_plane_v2_v0715}"
 prompt="${PROMPT:-north ces task}"
+execution_mode="${EXECUTION_MODE:-async}"
+
+case "${execution_mode}" in
+  sync|async) ;;
+  *)
+    echo "[submission][ERROR] EXECUTION_MODE must be sync or async, got: ${execution_mode}" >&2
+    exit 2
+    ;;
+esac
 
 : "${ORIGAMI_ZENOH_ENDPOINT:?ORIGAMI_ZENOH_ENDPOINT is required}"
 : "${ORIGAMI_SESSION_ID:?ORIGAMI_SESSION_ID is required}"
@@ -25,9 +34,10 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/origami-cache}"
 export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/tmp/origami-jax-cache}"
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$JAX_COMPILATION_CACHE_DIR"
 
-echo "[submission] transport=origami-zenoh-v1 config=${config} checkpoint=${checkpoint_dir}" >&2
+echo "[submission] transport=origami-zenoh-v1 execution_mode=${execution_mode} config=${config} checkpoint=${checkpoint_dir}" >&2
 exec /.venv/bin/python /app/scripts/serve_policy_zenoh.py \
   --default-prompt="${prompt}" \
+  --execution-mode="${execution_mode}" \
   policy:checkpoint \
   --policy.config="${config}" \
   --policy.dir="${checkpoint_dir}"

@@ -197,13 +197,17 @@ class OrigamiZenohServer:
         endpoint: str,
         session_id: str,
         action_horizon: int,
+        execution_mode: str = "async",
     ) -> None:
         if action_horizon < 1 or action_horizon > 1024:
             raise ValueError("action_horizon must be in [1, 1024]")
+        if execution_mode not in {"sync", "async"}:
+            raise ValueError("execution_mode must be 'sync' or 'async'")
         self.policy = policy
         self.endpoint = endpoint
         self.session_id = session_id
         self.action_horizon = action_horizon
+        self.execution_mode = execution_mode
         self._policy_lock = threading.Lock()
         self._stop = threading.Event()
         self._session: Any | None = None
@@ -215,6 +219,7 @@ class OrigamiZenohServer:
             "action_type": "absolute_joint_position",
             "action_units": "radians",
             "joint_names": JOINT_NAMES,
+            "execution_mode": execution_mode,
         }
 
     def serve_forever(self) -> None:
@@ -390,6 +395,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.environ.get("ORIGAMI_ACTION_HORIZON", "25")),
     )
+    parser.add_argument(
+        "--execution-mode",
+        choices=("sync", "async"),
+        default=os.environ.get("EXECUTION_MODE", "async"),
+    )
     return parser
 
 
@@ -405,6 +415,7 @@ def main() -> int:
         endpoint=args.endpoint,
         session_id=args.session_id,
         action_horizon=args.action_horizon,
+        execution_mode=args.execution_mode,
     )
     server.serve_forever()
     return 0

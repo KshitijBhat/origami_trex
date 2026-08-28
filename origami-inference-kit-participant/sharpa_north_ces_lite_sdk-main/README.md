@@ -1,70 +1,54 @@
-# Origami Participant SDK
+# sharpa_north_ces_lite_sdk
 
-This directory contains only public tools for competition teams:
+Public participant tools for the Origami inference kit, including the formal
+Zenoh server template and validator, read-only observation/evaluation clients,
+and a transport-independent async temporal-aggregation runtime.
 
-```text
-examples/
-  policy_server_template.py     # Production origami-zenoh-v1 server template
-  check_zenoh_policy.py         # Synthetic black-box validator
-  remote_observation_client.py  # Public, read-only observation client
+For the observation/action contract, data format, and wire protocol, see the
+top-level `docs/` in this kit.
 
-participant_local_evaluator/    # Local image Shadow/URDF evaluator
-scripts/docker/                 # Policy template, validator, and remote-client images
-tests/                          # Public, self-contained tests
-```
+The private robot transport/runtime is intentionally not included or required.
 
-## Installation and testing
+## Install and test
 
 ```bash
 uv sync --frozen --no-install-project
 uv run --no-sync python -m unittest discover -s tests -v
+uv run --no-sync python examples/check_async_time_aggregation.py
 ```
 
-## Implementing the image service
+## Layout
 
-Copy and modify:
-
-```text
-examples/policy_server_template.py
+```
+examples/
+  policy_server_template.py      # framework-independent production server
+  check_zenoh_policy.py          # public protocol validator
+  remote_observation_client.py   # public read-only observation client
+  openpi_origami_async.py        # self-contained async runtime (ensembler + loop)
+  check_async_time_aggregation.py# offline async smoke test
+participant_local_evaluator/     # read-only Shadow/URDF evaluator
+tests/
 ```
 
-Teams need to replace only the model loading logic, `reset()`, and `infer()` in `TeamPolicy`.
-Do not modify the public queryables, envelope, metadata, observation/action validation, or
-65-dimensional joint order.
+## Local async loop (temporal aggregation)
 
-At runtime, the production image reads:
+An asynchronous alternative to the sync loop, using rtac1-style temporal
+ensembling: an inference thread (`inference_hz`) pushes each action chunk into a
+scheduler with delay-compensating `offset_steps`, and a publish thread
+(`control_hz`) emits one *fused* step per tick (per-step ensembling over recent
+overlapping chunks). Inference jitter never stalls publishing, and overlapping
+predictions are blended for a smoother stream.
 
-```text
-ORIGAMI_ZENOH_ENDPOINT
-ORIGAMI_SESSION_ID
-```
-
-## Synthetic validator
-
-After starting the local Zenoh router and image, run:
+The async runtime is self-contained in `examples/openpi_origami_async.py` and is
+defined against a small environment interface, so it contains no private robot
+transport. The supplied checker uses only an in-process observation source and
+action sink.
 
 ```bash
-uv run --no-sync python examples/check_zenoh_policy.py \
-  --endpoint tcp/127.0.0.1:17447 \
-  --session-id local-contract-test \
-  --requests 3 \
-  --expected-horizon 25
+uv run --no-sync python examples/check_async_time_aggregation.py
 ```
 
-## Public, read-only observations
-
-After reserving a time slot, use the endpoint, session, token, and TLS CA sent separately by the organizer:
-
-```bash
-uv run --no-sync python examples/remote_observation_client.py
-```
-
-This client only reads observations identical to the production `infer` input. It does not provide actions or robot control.
-
-## Docker builds
-
-Build commands for the framework-neutral policy template, validator, and remote
-observation client are documented in `scripts/README.md`. OpenPI-specific
-submission Dockerfiles are under `../openpi-base-main/scripts/docker/`.
-
-For the complete workflow, see `PARTICIPANT_GUIDE.md` in the repository root.
+Key knobs (see `--help`): `--inference-hz`, `--control-hz`,
+`--compensation-steps` (`auto` or fixed offset), and temporal-ensembling params
+`--ta-agg-n` / `--ta-exp-k` / `--ta-max-chunks` / `--ta-smooth-alpha`
+(`--no-ta-hold-last` to disable the hold-last fallback).

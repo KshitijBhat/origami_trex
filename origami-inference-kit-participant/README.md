@@ -1,14 +1,17 @@
-# Origami Inference Kit
+# Origami Inference Kit Async
 
-This repository is the public development kit for Origami competition teams. Use it to:
+This repository is the complete public development kit for Origami competition
+teams, plus the asynchronous Gateway integration. Use it to:
 
-- Build a self-contained Docker/OCI inference image that implements `origami-zenoh-v1`;
-- Validate the image protocol with synthetic observations;
-- Retrieve observations from the physical robot through a public, read-only interface during a reserved time slot;
-- Run read-only Shadow/URDF image tests on the team's local machine;
-- Export a `.tar.zst` image archive and its SHA-256 checksum.
+- Build a self-contained Docker/OCI inference image implementing `origami-zenoh-v1`;
+- Choose `sync` or `async` Gateway execution at image build time;
+- Validate the image with synthetic observations and an offline async smoke test;
+- Retrieve read-only physical-robot observations during a reserved time slot;
+- Run read-only Shadow/URDF tests locally;
+- Export an immutable image archive and checksum.
 
 Start with [`PARTICIPANT_GUIDE.md`](PARTICIPANT_GUIDE.md).
+Changes in this tested release are summarized in [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
 ## Public contents
 
@@ -21,26 +24,25 @@ docs/
   container_submission.md
   remote_participant_development.md
 
-openpi-base-main/                   # OpenPI inference/model reference source
+openpi-base-main/                   # Complete OpenPI/pi inference reference
+  scripts/serve_policy_zenoh.py
+  scripts/docker/submission-zenoh-bundled.Dockerfile
 
 sharpa_north_ces_lite_sdk-main/
   examples/
     policy_server_template.py
     check_zenoh_policy.py
     remote_observation_client.py
+    openpi_origami_async.py
+    check_async_time_aggregation.py
   participant_local_evaluator/
   tests/
 ```
 
-Key components:
-
-- `policy_server_template.py`: Framework-independent production Zenoh server template;
-- `check_zenoh_policy.py`: Public black-box validator that does not connect to the robot;
-- `remote_observation_client.py`: Public, read-only observation client for use after reserving a time slot;
-- `participant_local_evaluator`: Sends real, read-only observations to the final image locally and visualizes
-  the predicted trajectory using the URDF.
-- `openpi-base-main`: OpenPI inference and model-adapter reference source. Teams using OpenPI must still
-  package their own checkpoint and runtime assets.
+The kit includes OpenPI model code, sync-compatible request/reply serving,
+asynchronous temporal aggregation, participant Docker templates, Zenoh protocol
+validation and the local evaluator. Teams still supply their own checkpoint,
+normalization assets, tokenizer and runtime dependencies.
 
 ## Quick start
 
@@ -48,55 +50,58 @@ Key components:
 cd sharpa_north_ces_lite_sdk-main
 uv sync --frozen --no-install-project
 uv run --no-sync python -m unittest discover -s tests -v
+uv run --no-sync python examples/check_async_time_aggregation.py
 ```
 
-Before your reserved time slot, you can build the image and run the synthetic validator. After reservation, the organizer will send the following values separately:
+These checks do not require robot hardware or the private North SDK.
 
-```text
-ORIGAMI_REMOTE_ENDPOINT=tls/<public-host>:<port>
-ORIGAMI_REMOTE_SESSION_ID=<assigned-team-session>
-ORIGAMI_REMOTE_TOKEN=<assigned-team-secret>
-ORIGAMI_REMOTE_TLS_CA=/path/to/organizer-ca.pem
+## Build sync or async
+
+Build from the repository root. For an asynchronous image:
+
+```bash
+docker build \
+  --build-arg RUNTIME_IMAGE=<compatible-openpi-runtime-image> \
+  --build-arg EXECUTION_MODE=async \
+  --build-context checkpoint=/absolute/path/to/checkpoint \
+  --build-context python_packages=/absolute/path/to/python/site-packages \
+  -f openpi-base-main/scripts/docker/submission-zenoh-bundled.Dockerfile \
+  -t team-name/origami-policy:submission \
+  openpi-base-main
 ```
 
-Never write these credentials to Git, source code, a Dockerfile, an image layer, or logs.
+Use `EXECUTION_MODE=sync` for synchronous execution; omitting it defaults to
+`async`. The server advertises `execution_mode` in metadata, and the organizer
+Gateway selects the corresponding strategy automatically. It also advertises
+`inference_kit=origami-inference-kit-async`, while the OCI image carries the
+matching source-kit label.
+
+The checkpoint must contain `params/` or `model.safetensors` and
+`assets/**/norm_stats.json`. The Python package context must contain the public
+Eclipse Zenoh 1.9 package.
 
 ## Public tensor contract
 
-The image receives:
-
-```python
-{
-    "observation/image/head_left":      uint8[224, 224, 3],
-    "observation/image/head_right":     uint8[224, 224, 3],
-    "observation/image/wrist_left":     uint8[224, 224, 3],
-    "observation/image/wrist_right":    uint8[224, 224, 3],
-    "observation/state":                float32[65],
-    "observation/state/joint_torque":   float32[65],
-    "observation/tactile":              float32[60],
-    "observation/image/tactile_deform": uint8[480, 1200, 3],
-    "observation/image/tactile_raw":    uint8[480, 1600, 3],  # optional
-    "prompt":                           str,
-}
-```
-
-The image returns:
+The image receives four `uint8[224,224,3]` RGB cameras, `float32[65]` joint
+state and torque, `float32[60]` tactile values, tactile images, and a string
+prompt. It returns:
 
 ```python
 {"actions": float32[T, 65]}
 ```
 
-Actions must be finite absolute joint-position targets in radians and must use the fixed
-65-dimensional order defined in `docs/robot_io_spec.md`.
+Actions must be finite absolute joint-position targets in radians in the fixed
+order defined by `docs/robot_io_spec.md`.
 
-## Security boundaries
+## Public/private boundary
 
-- The public observation interface is read-only and cannot send actions;
-- The production image may connect only to the isolated Zenoh router injected by the organizer;
-- The image must not contain the North SDK, robot IP addresses/topics, an action publisher, or public-development credentials;
-- The organizer is responsible for robot I/O, action safety checks, Shadow execution, and authorized Live execution.
+This repository intentionally contains no `Sharpa.py`, `NorthClient`, private
+`sharpa_north_ces_lite` transport implementation, robot IP/topic, or action
+publisher. The production image contains only the policy/OpenPI source, public
+Zenoh query/reply endpoint, dependencies and the team's model assets. Organizer
+Gateway code remains outside the participant image.
 
 ## License
 
-The code in this repository is licensed under the Apache License 2.0; see `LICENSE`.
-Licenses for vendored frontend dependencies and runtime dependencies are listed in `THIRD_PARTY_LICENSES.md`.
+OpenPI-derived code is Apache-2.0; see `openpi-base-main/LICENSE`. Vendored and
+runtime dependency notices are in `THIRD_PARTY_LICENSES.md`.
