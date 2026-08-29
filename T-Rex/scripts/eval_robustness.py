@@ -91,8 +91,9 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from qwen_vla.origami_dataset import (JOINT_GROUPS, OrigamiDataset, _contact_flag,
-                                      clamp_frozen_actions, denormalize,
+                                      clamp_frozen_absolute, denormalize,
                                       frozen_action_dims)
+from trex_origami.anchoring import build_anchor, describe as describe_anchor, to_absolute
 from trex_origami.seasons import JOINT_NAMES
 
 RAD2DEG = 180.0 / math.pi
@@ -343,9 +344,15 @@ def run_config(model, dataset, spec: PerturbSpec, indices: List[int], args,
     horizon = dataset.action_chunk
 
     for batch in loader:
-        gt_delta = batch["eval_action_raw"].numpy().astype(np.float64)
         state = batch["eval_state"].numpy().astype(np.float64)
+        prev_command = batch["eval_prev_command"].numpy().astype(np.float64)
         contact = batch["eval_contact"].numpy()
+        # Absolute radians throughout, reconstructed through the dataset's own
+        # anchoring rule.  The perturbations here move observations, never the
+        # anchor, so the anchor is the un-perturbed one either way.
+        anchor = build_anchor(state, prev_command, dataset.anchor_spec)
+        gt_abs = to_absolute(
+            batch["eval_action_raw"].numpy().astype(np.float64), anchor)
         noise = paired_noise(batch["_idx"], horizon, dataset.action_dim,
                              args.seed, device)
 
@@ -354,20 +361,22 @@ def run_config(model, dataset, spec: PerturbSpec, indices: List[int], args,
         _sync(device)
         # Same clamp the eval and serve paths apply, so a degradation reported
         # here is the perturbation and not the torso's un-normalised noise.
-        pred_delta = clamp_frozen_actions(
-            denormalize(normalised.float().cpu().numpy().astype(np.float64),
-                        dataset.action_mask, dataset.action_min,
-                        dataset.action_max),
-            dataset.action_mask)
-        acc.add(pred_delta - gt_delta, contact)
+        pred_abs = clamp_frozen_absolute(
+            to_absolute(denormalize(
+                normalised.float().cpu().numpy().astype(np.float64),
+                dataset.action_mask, dataset.action_min, dataset.action_max),
+                anchor),
+            dataset.action_mask, state)
+        acc.add(pred_abs - gt_abs, contact)
         if safety is not None:
-            for b in range(pred_delta.shape[0]):
-                acc.add_safety(safety.check(state[b], state[b] + pred_delta[b]))
+            for b in range(pred_abs.shape[0]):
+                acc.add_safety(safety.check(state[b], pred_abs[b]))
 
         if floors is not None:
-            floors["hold_state"].add(-gt_delta, contact)
-            floors["repeat_command"].add(
-                np.repeat(gt_delta[:, :1, :], horizon, axis=1) - gt_delta, contact)
+            const = lambda pose: np.repeat(np.asarray(pose)[:, None, :], horizon, axis=1)
+            floors["hold_state"].add(const(state) - gt_abs, contact)
+            floors["repeat_command"].add(const(gt_abs[:, 0]) - gt_abs, contact)
+            floors["oracle_prev_command"].add(const(prev_command) - gt_abs, contact)
     return acc
 
 
@@ -396,18 +405,24 @@ def receding_horizon(model, dataset, args, device) -> Optional[dict]:
                         collate_fn=view.collate_fn)
     preds, gts, states = [], [], []
     for batch in loader:
+        state_b = batch["eval_state"].numpy().astype(np.float64)
+        anchor = build_anchor(
+            state_b, batch["eval_prev_command"].numpy().astype(np.float64),
+            dataset.anchor_spec)
         noise = paired_noise(batch["_idx"], horizon, dataset.action_dim,
                              args.seed, device)
         normalised = predict_cascaded(model, batch, device, args.cascaded_total_steps,
                                       args.cascaded_split_step, noise)
-        preds.append(clamp_frozen_actions(
-            denormalize(normalised.float().cpu().numpy().astype(np.float64),
-                        dataset.action_mask, dataset.action_min,
-                        dataset.action_max),
-            dataset.action_mask))
-        gts.append(batch["eval_action_raw"].numpy().astype(np.float64))
-        states.append(batch["eval_state"].numpy().astype(np.float64))
-    pred = np.concatenate(preds)      # [N, T, D] deltas
+        preds.append(clamp_frozen_absolute(
+            to_absolute(denormalize(
+                normalised.float().cpu().numpy().astype(np.float64),
+                dataset.action_mask, dataset.action_min, dataset.action_max),
+                anchor),
+            dataset.action_mask, state_b))
+        gts.append(to_absolute(
+            batch["eval_action_raw"].numpy().astype(np.float64), anchor))
+        states.append(state_b)
+    pred = np.concatenate(preds)      # [N, T, D] absolute radians
     gt = np.concatenate(gts)
     state = np.concatenate(states)    # [N, D]
 
@@ -442,7 +457,7 @@ def receding_horizon(model, dataset, args, device) -> Optional[dict]:
             # policy shows is its own inconsistency across replans -- and it
             # lands as a single-step jump on the wire.
             pairs = [(p, p + r) for p in starts if p + r < pred.shape[0]]
-            seam = np.stack([(state[q] + pred[q, 0]) - (state[p] + pred[p, gap])
+            seam = np.stack([pred[q, 0] - pred[p, gap]
                              for p, q in pairs]) if pairs else np.zeros((0, dataset.action_dim))
             if len(seam):
                 entry["seam"] = {
@@ -659,8 +674,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               "numbers should be read as a sanity check, not a result.")
     frozen = frozen_action_dims(dataset.action_mask)
     if frozen.size:
-        print(f"frozen action dims {frozen.tolist()} -> delta clamped to 0, "
+        print(f"frozen action dims {frozen.tolist()} -> held at state[j], "
               f"matching eval_origami.py and the serve path")
+    print(f"action anchoring: {describe_anchor(dataset.anchor_spec)}")
+    _EVAL.check_anchor_consistency(args.checkpoint_path, dataset)
 
     ms_per_row = 1000.0 * dataset.sample_stride / 30.0
     print(f"sample_stride={dataset.sample_stride} -> one row of delay is "
@@ -696,8 +713,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     prefix_steps = [h for h in (1, 2, 3, 5, 8, 10, 15, 20, 25) if h <= horizon]
 
     # ── sweep ─────────────────────────────────────────────────────────────────
-    floor_accs = {"hold_state": ErrorAccumulator(horizon, dataset.action_dim),
-                  "repeat_command": ErrorAccumulator(horizon, dataset.action_dim)}
+    floor_accs = {name: ErrorAccumulator(horizon, dataset.action_dim)
+                  for name in ("hold_state", "repeat_command", "oracle_prev_command")}
     results: Dict[str, dict] = {}
     for i, spec_i in enumerate(specs):
         print(f"[{i + 1}/{len(specs)}] {spec_i.label}")
@@ -739,6 +756,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "use_tactile_vqvae": int(bool(dataset.use_tactile_vqvae)),
         "cascaded_total_steps": args.cascaded_total_steps,
         "cascaded_split_step": args.cascaded_split_step,
+        "action_anchor": list(dataset.anchor_spec),
         "prefix_steps": prefix_steps,
         "conditions": results,
         "floors": floors,

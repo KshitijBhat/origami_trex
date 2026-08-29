@@ -528,6 +528,12 @@ def save_checkpoint(model, processor, accelerator, args, epoch, global_step, sta
                 "vqvae_window": getattr(args, "vqvae_window", 16),
                 "phase_mode": getattr(args, "phase_mode", ""),
                 "data_format": getattr(args, "data_format", "json"),
+                # What the 65 outputs are measured from.  Serving has no dataset
+                # to read it off, and reconstructing with the wrong rule is a
+                # silent bias, not an error — so it travels with the weights.
+                "action_anchor": getattr(args, "action_anchor", None),
+                "anchor_noise_mode": getattr(args, "anchor_noise_mode", "none"),
+                "anchor_dropout": getattr(args, "anchor_dropout", 0.0),
             }, f, indent=2)
 
         with open(os.path.join(save_dir, "stats_data.json"), "w") as f:
@@ -972,6 +978,9 @@ def train(args):
     elif data_format == "origami":
         from qwen_vla.origami_dataset import OrigamiDataset
         dataset = OrigamiDataset(args, processor, accelerator)
+        # Record what the head is being trained to emit, so the checkpoint can
+        # be reconstructed without the dataset it was trained on.
+        args.action_anchor = list(dataset.anchor_spec)
     else:
         dataset = SftDataset(args, processor, accelerator)
 
@@ -1472,6 +1481,16 @@ if __name__ == "__main__":
                         choices=["none", "joint"],
                         help="state augmentation for --use_robot_state 1; the "
                              "T-Rex axis-angle noise model is invalid in joint space")
+    parser.add_argument("--anchor_noise_mode", type=str, default="none",
+                        choices=["none", "tracking"],
+                        help="perturb the previous-command anchor with the measured "
+                             "tracking-error statistics. Only affects dims the dataset "
+                             "anchors to the previous command; a no-op on an "
+                             "all-delta-from-state prep.")
+    parser.add_argument("--anchor_dropout", type=float, default=0.0,
+                        help="fraction of samples whose previous-command anchor is "
+                             "replaced by state[t], so the policy does not depend on "
+                             "an anchor it will only ever have approximately")
     parser.add_argument("--phase_mode", type=str, default="", choices=["", "none", "progress"],
                         help="'progress' appends '(fold k of N)' to the instruction. "
                              "Offline experiments only — the fold index is unknown at "

@@ -5,12 +5,20 @@
 # and deletes the source, so peak disk stays at "output so far + one season"
 # (~1 GB) instead of the ~300 GB the raw release would need.
 #
+# The `lerobot3.0` exports are mostly AV1 with some h264 seasons, and this script
+# decodes everything on the CPU, where AV1 costs roughly 2-4x more per frame.
+# `run_prepare_fast.sh` overlaps the downloads and puts the RGB streams on NVDEC
+# where the GPU supports the codec, and is what you want for the full tier.
+#
 # Usage:
 #   bash trex_origami/run_prepare.sh pilot      # 10 train + 3 val seasons, stride 5
 #   bash trex_origami/run_prepare.sh full       # 101 train + 25 val seasons, stride 20
 #   bash trex_origami/run_prepare.sh dense      # 30 train + 8 val seasons, stride 5
+#   ANCHOR_MODE=state PHASE_MODE=none bash ... full   # the attempt-2 prep
 #
 # Re-running is safe and resumable: already-converted episodes are skipped.
+# Changing ANCHOR_MODE, PHASE_MODE or the stride is not -- the prep refuses to
+# mix two contracts in one root, so use a fresh OUT_ROOT or --overwrite.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,6 +29,10 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 OUT_ROOT="${OUT_ROOT:-/home/kshitij/origami_trex/data/origami_flat}"
 CACHE_ROOT="${CACHE_ROOT:-/home/kshitij/origami_trex/data/_src}"
 # export HF_TOKEN=hf_...   # only needed if the dataset repo is gated
+
+# See trex_origami/anchoring.py and run_prepare_fast.sh for what these mean.
+ANCHOR_MODE="${ANCHOR_MODE:-hybrid}"
+PHASE_MODE="${PHASE_MODE:-none}"
 
 TIER="${1:-pilot}"
 case "${TIER}" in
@@ -34,11 +46,13 @@ TRAIN_ROOT="${OUT_ROOT}/${TIER}/train"
 VAL_ROOT="${OUT_ROOT}/${TIER}/val"
 
 echo ">>> tier=${TIER}  stride=${STRIDE}  train_limit=${TRAIN_LIMIT}  val_limit=${VAL_LIMIT}"
+echo ">>> anchor=${ANCHOR_MODE}  phase=${PHASE_MODE}"
 echo ">>> out=${OUT_ROOT}/${TIER}  cache=${CACHE_ROOT}"
 
 COMMON=(--cache-root "${CACHE_ROOT}" --sample-stride "${STRIDE}"
         --action-chunk 25 --chunk-stride 1 --image-size 224
-        --vqvae-window 16 --phase-mode none)
+        --vqvae-window 16 --phase-mode "${PHASE_MODE}"
+        --anchor-mode "${ANCHOR_MODE}")
 
 # A season that fails to download is not a reason to skip everything after it.
 # prepare exits 3 ("wrote a usable split, some seasons missing"), and we carry

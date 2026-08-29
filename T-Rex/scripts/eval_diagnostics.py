@@ -35,17 +35,22 @@ because the three plausible causes want three different fixes:
 
 Baselines
 ---------
-`hold_state` (zero delta) and `repeat_command` come from `eval_origami.py`.
-This script adds `oracle_prev_command`: repeat the action commanded one dataset
-row ago.  `repeat_command` is handed `action[t]`, which is the very thing the
-policy is being asked to produce, so it is a floor that cannot actually be
-reached; `oracle_prev_command` uses only what a deployed policy genuinely knows
-(what it last sent), and is therefore the honest version of that floor.
+`hold_state`, `repeat_command` and `oracle_prev_command` are the same three
+constant-chunk floors `eval_origami.py` reports, all in absolute radians.
+`repeat_command` is handed `action[t]`, which is the very thing the policy is
+being asked to produce, so it is a floor that cannot actually be reached;
+`oracle_prev_command` repeats `action[t-1]`, which a deployed policy genuinely
+does have (it sent it), and under the hybrid prep it is also precisely the arms'
+own anchor -- so it is what "predict zero" now buys, and the bar the policy has
+to clear to have earned anything.
+
+Everything is scored after reconstructing absolute radians through the dataset's
+declared anchoring rule, so these numbers are comparable across preps that
+anchor differently.
 
 Evaluation runs over *contiguous* stretches of held-out episodes rather than the
-strided subset `eval_origami.py` scores.  `oracle_prev_command` needs the
-preceding row to exist, and the smoothness and per-episode trace numbers are
-only meaningful within an episode.
+strided subset `eval_origami.py` scores, because the smoothness and per-episode
+trace numbers are only meaningful within an episode.
 
 Usage:
     python scripts/eval_diagnostics.py \\
@@ -75,8 +80,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from trex_origami.anchoring import build_anchor, describe as describe_anchor, to_absolute
 from qwen_vla.origami_dataset import (JOINT_GROUPS, OrigamiDataset,
-                                      clamp_frozen_actions, denormalize,
+                                      clamp_frozen_absolute, denormalize,
                                       frozen_action_dims)
 from trex_origami.seasons import JOINT_NAMES
 
@@ -112,9 +118,9 @@ def _anchor(chunk: np.ndarray) -> np.ndarray:
 def _jerk_deg(chunk: np.ndarray) -> float:
     """Mean |2nd difference| along the chunk, in degrees.
 
-    The chunk is a delta from a state that is constant over the chunk, so the
-    2nd difference is identical for the delta and for the absolute trajectory --
-    this measures the commanded trajectory's own smoothness, not the offset.
+    The anchor is constant over a chunk, so the 2nd difference is the same in
+    target space and in absolute radians -- this measures the commanded
+    trajectory's own smoothness, not the offset.
     """
     if chunk.shape[1] < 3:
         return 0.0
@@ -303,12 +309,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     frozen = frozen_action_dims(action_mask)
     clamp = args.clamp_frozen == "auto" and frozen.size > 0
     print(f"frozen action dims {frozen.tolist()} -> "
-          f"{'clamped' if clamp else 'not clamped'}")
+          f"{'held at state[j]' if clamp else 'not clamped'}")
+    anchor_spec = dataset.anchor_spec
+    print(f"action anchoring: {describe_anchor(anchor_spec)}")
+    ev.check_anchor_consistency(args.checkpoint_path, dataset)
 
     # Episodes are laid out contiguously in the global index (`_build_index`
     # appends every row of episode e before episode e+1), so an episode's rows
-    # are a slice.  Contiguity is required: `oracle_prev_command` needs row r-1,
-    # and a strided subset has no previous row.
+    # are a slice.  Contiguity is what makes the per-episode traces a trajectory
+    # rather than a scatter of unrelated frames.
     starts, offset = [], 0
     for n_rows in dataset.ep_rows:
         starts.append(offset)
@@ -340,10 +349,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             shuffle=False, num_workers=args.num_workers,
                             collate_fn=dataset.collate_fn)
 
-        ep_gt, ep_state, ep_pred_single, ep_pred_mean = [], [], [], []
+        ep_gt, ep_pred_single, ep_pred_mean = [], [], []
         for step, batch in enumerate(loader):
-            gt_delta = batch["eval_action_raw"].numpy().astype(np.float64)
             state = batch["eval_state"].numpy().astype(np.float64)
+            prev_command = batch["eval_prev_command"].numpy().astype(np.float64)
+            # Score in absolute radians so every row below means the same thing
+            # regardless of what the prep anchored each dim to.
+            anchor = build_anchor(state, prev_command, anchor_spec)
+            gt_abs = to_absolute(
+                batch["eval_action_raw"].numpy().astype(np.float64), anchor)
 
             draws = []
             for k in range(args.n_samples):
@@ -356,50 +370,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                         args.cascaded_total_steps,
                                         args.cascaded_split_step,
                                         generator=generator)
-                pred = denormalize(normalised.float().cpu().numpy().astype(np.float64),
-                                   action_mask, action_min, action_max)
+                pred = to_absolute(
+                    denormalize(normalised.float().cpu().numpy().astype(np.float64),
+                                action_mask, action_min, action_max), anchor)
                 if clamp:
-                    pred = clamp_frozen_actions(pred, action_mask)
+                    pred = clamp_frozen_absolute(pred, action_mask, state)
                 draws.append(pred)
-            draws = np.stack(draws)                       # [K, B, T, D]
+            draws = np.stack(draws)                       # [K, B, T, D] absolute
 
             single, mean_k = draws[0], draws.mean(axis=0)
-            row(args.mode).add(single, gt_delta)
-            row(f"{args.mode}_mean_of_{args.n_samples}").add(mean_k, gt_delta)
+            row(args.mode).add(single, gt_abs)
+            row(f"{args.mode}_mean_of_{args.n_samples}").add(mean_k, gt_abs)
             variance.add(draws)
 
-            row("hold_state").add(np.zeros_like(gt_delta), gt_delta)
-            row("repeat_command").add(
-                np.repeat(gt_delta[:, :1, :], horizon, axis=1), gt_delta)
+            const = lambda pose: np.repeat(np.asarray(pose)[:, None, :], horizon, axis=1)
+            row("hold_state").add(const(state), gt_abs)
+            row("repeat_command").add(const(gt_abs[:, 0]), gt_abs)
+            # The action commanded one row ago -- what a deployed policy has
+            # actually sent, and (under hybrid anchoring) the arms' own anchor.
+            # Unlike `repeat_command` it is not handed action[t], the very thing
+            # being predicted.  It comes straight off the row now rather than
+            # being reconstructed from the previous row, so a strided subset is
+            # no longer a problem for it.
+            row("oracle_prev_command").add(const(prev_command), gt_abs)
 
-            teleop_jerk_sum += _jerk_deg(gt_delta) * gt_delta.shape[0]
-            teleop_step_sum += _step_deg(gt_delta) * gt_delta.shape[0]
-            n_chunks_total += gt_delta.shape[0]
+            teleop_jerk_sum += _jerk_deg(gt_abs) * gt_abs.shape[0]
+            teleop_step_sum += _step_deg(gt_abs) * gt_abs.shape[0]
+            n_chunks_total += gt_abs.shape[0]
 
-            ep_gt.append(gt_delta)
-            ep_state.append(state)
+            ep_gt.append(gt_abs)
             ep_pred_single.append(single)
             ep_pred_mean.append(mean_k)
 
-        gt_ep = np.concatenate(ep_gt)                     # [R, T, D]
-        state_ep = np.concatenate(ep_state)               # [R, D]
-
-        # `oracle_prev_command`: repeat the action commanded one row ago,
-        # re-expressed as a delta from the current state.  Uses only what a
-        # deployed policy knows -- what it last sent -- unlike `repeat_command`,
-        # which is handed action[t], the very thing being predicted.  Row 0 has
-        # no predecessor and is dropped.
-        commanded_abs = state_ep + gt_ep[:, 0, :]         # [R, D] = action[t]
-        prev_abs = commanded_abs[:-1]
-        prev_delta = (prev_abs - state_ep[1:])[:, None, :].repeat(horizon, axis=1)
-        row("oracle_prev_command").add(prev_delta, gt_ep[1:])
+        gt_ep = np.concatenate(ep_gt)                     # [R, T, D] absolute
 
         episode_traces.append({
             "episode": dataset.episodes[ep_i]["file"],
             "season": dataset.episodes[ep_i]["season"],
-            "gt": state_ep + gt_ep[:, 0, :],
-            "pred": state_ep + np.concatenate(ep_pred_single)[:, 0, :],
-            "pred_mean": state_ep + np.concatenate(ep_pred_mean)[:, 0, :],
+            "gt": gt_ep[:, 0, :],
+            "pred": np.concatenate(ep_pred_single)[:, 0, :],
+            "pred_mean": np.concatenate(ep_pred_mean)[:, 0, :],
         })
         print(f"  ep {ep_i:3d} {os.path.basename(dataset.episodes[ep_i]['file'])}: "
               f"{gt_ep.shape[0]} rows")
@@ -459,6 +469,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rows_per_episode": args.rows_per_episode,
         "frozen_action_dims": frozen.tolist(),
         "clamp_frozen": bool(clamp),
+        "action_anchor": list(anchor_spec),
         "results": reports,
         "bias_variance": decomposition,
         "per_joint_vs_hold_state": {

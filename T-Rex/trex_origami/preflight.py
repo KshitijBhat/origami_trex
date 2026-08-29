@@ -13,11 +13,18 @@ Checks:
                       it is one edited list away from silently not holding, and
                       the cost of finding out afterwards is the whole run.
 
+  anchoring           What the 65 outputs are measured from, per dim.  Train
+                      and val must agree, the parquets must actually carry the
+                      columns the rule needs, and a warm start must not put a
+                      head trained under one rule on data prepared under
+                      another -- that failure has no shape mismatch to catch it
+                      and shows up only as a constant bias in every metric.
+
   frozen dims         Which action dims the refit stats declared frozen.  These
-                      are what `test.py:_clamp_frozen` zeroes at inference, so
-                      if the torso turns out to move in one of the 91 seasons
-                      the pilot never saw, the clamp must not be applied and
-                      this is where that shows up.
+                      are the dims eval/serve hold at the measured state, so if
+                      the torso turns out to move in one of the 91 seasons the
+                      pilot never saw, the clamp must not be applied and this is
+                      where that shows up.
 
   resume calibration  The action head's output scale is defined by the q01/q99
                       the model trained against.  Warm-starting the full run
@@ -50,6 +57,8 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
+from .anchoring import (ANCHOR_PREV_COMMAND, describe as describe_anchor,
+                        masks as anchor_masks, mode_of, spec_from_meta)
 from .seasons import JOINT_NAMES, select_seasons
 
 # `stats.MIN_NORM_RANGE_JOINT`, repeated so this stays runnable against a stats
@@ -138,8 +147,73 @@ def check_split_containment(val_root: str, pilot_val_limit: int,
                         f"({len(train_seasons)} train / {len(seasons)} val)")
 
 
+def check_anchoring(train_root: str, val_root: str, resume_checkpoint: str,
+                    resume_full_state: bool, problems: Problems) -> None:
+    print("\n[2] action anchoring")
+    train_meta = _load_meta(train_root)
+    if train_meta is None:
+        problems.fail(f"{train_root} has no meta/dataset.json — not prepared yet")
+        return
+    spec = spec_from_meta(train_meta)
+    problems.ok(f"train: {describe_anchor(spec)}")
+
+    val_meta = _load_meta(val_root)
+    if val_meta is not None:
+        val_spec = spec_from_meta(val_meta)
+        if tuple(val_spec) != tuple(spec):
+            problems.fail(
+                f"val is anchored '{mode_of(val_spec)}' but train is "
+                f"'{mode_of(spec)}'. The validation loss would be measured "
+                f"against targets in a different space than the model emits. "
+                f"Re-prepare both splits with the same --anchor-mode.")
+        else:
+            problems.ok("val split declares the same anchoring")
+
+    # The rule is only as good as the column it needs.  A `hybrid` dataset whose
+    # parquets predate the `prev_command` column would raise inside the
+    # dataloader -- but hours later, on a worker, mid-epoch.
+    if anchor_masks(spec)[ANCHOR_PREV_COMMAND].any():
+        import pyarrow.parquet as pq
+        entry = train_meta["episodes"][0]
+        path = os.path.join(train_root, entry["file"])
+        if os.path.exists(path):
+            names = set(pq.ParquetFile(path).schema_arrow.names)
+            if "prev_command" not in names:
+                problems.fail(
+                    f"{entry['file']} has no `prev_command` column but the split "
+                    f"anchors the arms to it — this data was written by an older "
+                    f"trex_origami. Re-prepare it.")
+            else:
+                problems.ok("parquets carry the `prev_command` column the rule needs")
+
+    # A checkpoint carries the anchoring its head was trained to emit.
+    if not resume_checkpoint or resume_full_state:
+        return
+    path = os.path.join(resume_checkpoint, "training_args.json")
+    if not os.path.exists(path):
+        return
+    with open(path) as handle:
+        saved = json.load(handle)
+    ckpt_anchor = saved.get("action_anchor")
+    if not ckpt_anchor:
+        # Pre-anchoring checkpoints and the released midtrain checkpoint (eef-62)
+        # both land here; the action head is re-initialised on a dim change
+        # anyway, and `check_resume` covers the same-action-space case.
+        return
+    if tuple(ckpt_anchor) != tuple(spec):
+        problems.fail(
+            f"{resume_checkpoint} was trained with anchoring "
+            f"'{mode_of(ckpt_anchor)}' but this data is '{mode_of(spec)}'. Its "
+            f"action head emits numbers measured from something else, and nothing "
+            f"downstream would raise — every arm joint would simply be off by the "
+            f"anchor difference. Cold-start from trex_midtrain instead.")
+    else:
+        problems.ok(f"resume checkpoint's anchoring matches the data "
+                    f"('{mode_of(spec)}')")
+
+
 def check_frozen_dims(train_root: str, problems: Problems) -> np.ndarray:
-    print("\n[2] frozen action dims (what the inference clamp will zero)")
+    print("\n[3] frozen action dims (held at the measured state at inference)")
     block = _action_block(os.path.join(train_root, "meta", "norm_stats.json"))
     if block is None:
         problems.fail(f"{train_root} has no meta/norm_stats.json — run "
@@ -157,7 +231,7 @@ def check_frozen_dims(train_root: str, problems: Problems) -> np.ndarray:
             "the inference clamp will correctly do nothing, but the head now has "
             "to learn those dims.")
     else:
-        problems.ok(f"{frozen.size} dim(s) frozen -> clamped to delta 0 at inference")
+        problems.ok(f"{frozen.size} dim(s) frozen -> commanded at state[j] at inference")
         for i in frozen:
             print(f"          dim {i:2d}  {JOINT_NAMES[i]:<22} "
                   f"spread {spread[i]:.2e} rad ({np.degrees(spread[i]):.4f} deg)")
@@ -173,7 +247,7 @@ def check_frozen_dims(train_root: str, problems: Problems) -> np.ndarray:
 
 def check_resume(resume_checkpoint: str, train_root: str, resume_full_state: bool,
                  problems: Problems) -> None:
-    print("\n[3] resume calibration")
+    print("\n[4] resume calibration")
     if not resume_checkpoint:
         problems.warning("no --resume-checkpoint given; skipping")
         return
@@ -247,7 +321,7 @@ def check_resume(resume_checkpoint: str, train_root: str, resume_full_state: boo
 
 def check_budget(train_root: str, batch_size: int, grad_accum: int, epochs: int,
                  sec_per_step: float, save_steps: int, problems: Problems) -> None:
-    print("\n[4] budget")
+    print("\n[5] budget")
     meta = _load_meta(train_root)
     if meta is None:
         problems.warning(f"{train_root} not prepared; skipping budget estimate")
@@ -304,6 +378,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"pre-flight: train={args.train_root}\n            val={args.val_root}")
     problems = Problems()
     check_split_containment(args.val_root, args.pilot_val_limit, problems)
+    check_anchoring(args.train_root, args.val_root, args.resume_checkpoint,
+                    args.resume_full_state, problems)
     check_frozen_dims(args.train_root, problems)
     check_resume(args.resume_checkpoint, args.train_root,
                  args.resume_full_state, problems)

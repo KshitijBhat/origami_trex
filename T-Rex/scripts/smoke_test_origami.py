@@ -7,8 +7,10 @@ key mismatch here rather than 20 minutes into a paid A100 session.
 
     python scripts/smoke_test_origami.py --root <split root>
 
-Checks the batch dict `train.py` consumes (all 23 keys, exact shapes for the
-configured chunk/dim), the flow-matching identity the loss is built on, that
+Checks the batch dict `train.py` consumes (all 24 keys, exact shapes for the
+configured chunk/dim), the flow-matching identity the loss is built on per
+anchoring group, that the declared anchoring rule actually reconstructs the wire
+contract, that anchor augmentation moves only the dims it is allowed to, that
 normalised values land in [-1, 1], that the F6 history reaches the model
 un-normalised, that state-noise augmentation perturbs rather than scrambles,
 and that BlockShuffleSampler emits a true permutation.
@@ -26,6 +28,14 @@ import torch
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)
+# `origami_dataset` imports `trex_origami.anchoring`, which is a real package
+# import even though the module itself is loaded by path below.
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+
+from trex_origami.anchoring import (ANCHOR_ABSOLUTE, ANCHOR_PREV_COMMAND,
+                                    build_anchor, describe as describe_anchor,
+                                    masks as anchor_masks, to_absolute)
 
 # The trainer consumes exactly these keys (train.py's loop + run_validation);
 # the last three are extras the offline evaluator reads and train.py ignores.
@@ -35,7 +45,7 @@ EXPECTED_KEYS = {
     "tactile_deforms", "tactile_f6s_delayed", "tactile_deforms_delayed",
     "tactile_codes", "tactile_f6_history", "time_r", "eps_r", "state_raw",
     "flare_pixel_values", "flare_grid_thw",
-    "eval_state", "eval_action_raw", "eval_contact",
+    "eval_state", "eval_action_raw", "eval_prev_command", "eval_contact",
 }
 
 
@@ -92,6 +102,7 @@ def build_config(args) -> types.SimpleNamespace:
         use_robot_state=1, use_tactile_vec=1, use_tactile_deform=1,
         use_tactile_vqvae=1, vqvae_window=args.vqvae_window,
         state_noise_mode="joint",
+        anchor_noise_mode=args.anchor_noise_mode, anchor_dropout=args.anchor_dropout,
         use_flare=0, flare_loss_weight=0.0, n_flare_steps=0, flare_frame_stride=4,
         phase_mode="", origami_sampler="block",
         origami_pool_groups=4, origami_cache_groups=4,
@@ -106,6 +117,9 @@ def main(argv=None) -> int:
     parser.add_argument("--action_chunk", type=int, default=25)
     parser.add_argument("--vqvae_window", type=int, default=16)
     parser.add_argument("--image_size", type=int, default=224)
+    parser.add_argument("--anchor_noise_mode", default="tracking",
+                        choices=["none", "tracking"])
+    parser.add_argument("--anchor_dropout", type=float, default=0.15)
     args = parser.parse_args(argv)
 
     module = _load_origami_dataset()
@@ -129,7 +143,8 @@ def main(argv=None) -> int:
         "timesteps": (b,), "time_r": (b,),
         "tactile_f6s": (b, 10, 6), "tactile_deforms": (b, 10, 1, 240, 240),
         "tactile_f6_history": (b, window, 10, 6), "state_raw": (b, dim),
-        "eval_state": (b, dim), "eval_action_raw": (b, chunk, dim), "eval_contact": (b,),
+        "eval_state": (b, dim), "eval_action_raw": (b, chunk, dim),
+        "eval_prev_command": (b, dim), "eval_contact": (b,),
     }
     for key, want in shapes.items():
         got = tuple(batch[key].shape)
@@ -148,6 +163,43 @@ def main(argv=None) -> int:
         f"flow-matching target inconsistent with noisy_actions (max |x_t - (A + t*u)| "
         f"= {residual:.4f}); x_t, target and timesteps disagree")
     print(f"flow-matching target consistent (max residual {residual:.2e})")
+    per_dim = (reconstructed - batch["noisy_actions"].float()).abs().amax(dim=(0, 1)).numpy()
+    for kind in (ANCHOR_PREV_COMMAND, ANCHOR_ABSOLUTE, "state"):
+        dims = np.where(anchor_masks(dataset.anchor_spec)[kind])[0]
+        if dims.size:
+            print(f"    {kind:<13} {dims.size:2d} dims, max residual "
+                  f"{per_dim[dims].max():.2e}")
+
+    # ── anchoring: the target the evaluator scores must reconstruct the wire ──
+    spec = dataset.anchor_spec
+    sel = anchor_masks(spec)
+    print(f"anchoring {describe_anchor(spec)}")
+    anchor = build_anchor(batch["eval_state"].numpy().astype(np.float64),
+                          batch["eval_prev_command"].numpy().astype(np.float64), spec)
+    absolute = to_absolute(batch["eval_action_raw"].numpy().astype(np.float64), anchor)
+    want_abs = np.stack([item["action_abs"] for item in items]).astype(np.float64)
+    err = np.abs(absolute[:, 0] - want_abs).max()
+    assert err < 1e-5, (
+        f"anchor + eval_action_raw[0] != action_abs (max |diff| {err:.2e} rad): the "
+        f"dataset's declared anchoring does not reconstruct the wire contract")
+    print(f"anchoring round-trip to absolute radians OK (max |diff| {err:.2e} rad)")
+    if sel[ANCHOR_ABSOLUTE].any():
+        raw_step0 = batch["eval_action_raw"].numpy()[:, 0][:, sel[ANCHOR_ABSOLUTE]]
+        assert np.allclose(raw_step0, want_abs[:, sel[ANCHOR_ABSOLUTE]], atol=1e-5), \
+            "absolute-anchored dims must already be joint angles, with no state added"
+        print(f"{int(sel[ANCHOR_ABSOLUTE].sum())} absolute dims are joint angles as stored")
+
+    # Anchor augmentation is allowed to move the previous-command dims and
+    # nothing else -- if it leaks into the absolute dims it is corrupting labels.
+    moved = np.abs(np.stack([item["action"] for item in items])
+                   - batch["eval_action_raw"].numpy()).max(axis=(0, 1))
+    leaked = np.where(moved[~sel[ANCHOR_PREV_COMMAND]] > 1e-6)[0]
+    assert leaked.size == 0, (
+        f"anchor augmentation moved {leaked.size} dim(s) that are not anchored to "
+        f"the previous command")
+    if sel[ANCHOR_PREV_COMMAND].any() and args.anchor_noise_mode != "none":
+        print(f"anchor augmentation confined to the {int(sel[ANCHOR_PREV_COMMAND].sum())} "
+              f"prev-command dims (max shift {moved.max():.4f} rad)")
 
     normed = batch["norm_actions"].float().numpy()
     mask = dataset.action_mask

@@ -6,6 +6,9 @@
 #   RESUME=1 bash scripts/train_origami.sh     # continue after a Colab pre-emption
 #   SMOKE=1  bash scripts/train_origami.sh     # 5 steps, proves the wiring
 #
+# Attempt-3 launch (see REIMPLEMENTATION_PLAN.md), on hybrid-anchored data:
+#   LR=1.5e-4 N_EPOCHS=3 TRAIN_BSZ=128 GRAD_ACCUM=4 bash scripts/train_origami.sh
+#
 # Everything below can be overridden from the environment, e.g.
 #   TRAIN_BSZ=4 GRAD_ACCUM=8 bash scripts/train_origami.sh
 set -euo pipefail
@@ -64,16 +67,37 @@ RUN_NAME="${RUN_NAME:-${EXPERIMENT_NAME}_$(date +%m%d_%H%M)}"
 ACTION_DIM=65
 ACTION_CHUNK=25
 
-# ── budget ────────────────────────────────────────────────────────────────────
-# The paper trains at effective batch 128 (16 x 8 GPUs) with LR 1e-4.  At
-# effective 32 on one GPU, LR is scaled down accordingly.
+# ── budget & schedule ─────────────────────────────────────────────────────────
+# The authors' own post-train launcher (scripts/train.sh) runs LR 1e-4 at
+# effective batch 128 with `--min_lr_ratio 0`, no warmup, for 100 epochs; the
+# paper's Table 4 is 1e-4 at 384.  Attempt 2 ran 5e-5 at effective 512 -- about
+# 8x below that recipe -- and its loss was flat by ~2k optimizer steps while
+# still losing to both naive baselines.  The default here is 1.5e-4, between the
+# paper-faithful 1e-4 and the 2e-4 that sqrt-scaling from 1e-4@128 to eff. 512
+# would give.  Higher is tolerable because the latent expert is mostly frozen;
+# if the first 200 steps look unstable, drop to LR=1e-4.
+#
+# `--min_lr_ratio 0` matches the authors: a single half-cosine decaying to zero,
+# not to 5% of peak.  Warmup stays at 3% (a deliberate deviation -- we cold-start
+# five head tensors for the 62->65 change and they do not).
+#
 # Rough A100-40GB planning numbers for the `pilot` tier (~160k samples at
 # stride 5): ~20k micro-steps per epoch at batch 8, so roughly 2-2.5 h/epoch.
-# Two epochs fits a single session with room for the eval pass.
 TRAIN_BSZ="${TRAIN_BSZ:-8}"
 GRAD_ACCUM="${GRAD_ACCUM:-4}"
-LR="${LR:-5e-5}"
-N_EPOCHS="${N_EPOCHS:-2}"
+LR="${LR:-1.5e-4}"
+MIN_LR_RATIO="${MIN_LR_RATIO:-0}"
+N_EPOCHS="${N_EPOCHS:-3}"
+
+# ── anchor augmentation ───────────────────────────────────────────────────────
+# Only bites on a dataset whose arms are anchored to the previous command
+# (`--anchor-mode hybrid`); a no-op on the old all-delta-from-state prep.  The
+# anchor is a textbook causal-confusion shortcut -- and the open-loop MAE metric
+# rewards copying it -- so training perturbs it with the measured tracking-error
+# statistics and re-anchors ANCHOR_DROPOUT of samples to state[t], which is also
+# what keeps the policy usable once its own command stream has drifted.
+ANCHOR_NOISE_MODE="${ANCHOR_NOISE_MODE:-tracking}"
+ANCHOR_DROPOUT="${ANCHOR_DROPOUT:-0.15}"
 
 EXTRA_ARGS=()
 if [ "${SMOKE:-0}" = "1" ]; then
@@ -134,6 +158,8 @@ echo ">>> data   : ${ORIGAMI_ROOT}  (val ${ORIGAMI_VAL_ROOT})"
 echo ">>> resume : ${RESUME_CHECKPOINT}"
 echo ">>> output : ${OUTPUT_DIR}/${EXPERIMENT_NAME}/${RUN_NAME}"
 echo ">>> batch  : ${TRAIN_BSZ} x ${GRAD_ACCUM} = $((TRAIN_BSZ * GRAD_ACCUM))  lr=${LR}"
+echo ">>> sched  : cosine -> ${MIN_LR_RATIO} x peak, warmup 3%, ${N_EPOCHS} epochs"
+echo ">>> anchor : noise=${ANCHOR_NOISE_MODE} dropout=${ANCHOR_DROPOUT}"
 
 accelerate launch \
     --num_processes 1 --num_machines 1 --mixed_precision bf16 --dynamo_backend no \
@@ -149,7 +175,7 @@ accelerate launch \
     --action_dim ${ACTION_DIM} --action_chunk ${ACTION_CHUNK} \
     --image_size 224 224 \
     --train_bsz_per_gpu "${TRAIN_BSZ}" --gradient_accumulation_steps "${GRAD_ACCUM}" \
-    --learning_rate "${LR}" --min_lr_ratio 0.05 --warmup_rates 0.03 \
+    --learning_rate "${LR}" --min_lr_ratio "${MIN_LR_RATIO}" --warmup_rates 0.03 \
     --weight_decay 0 --max_grad_norm 1.0 \
     --optim adamw8bit --gradient_checkpointing 1 \
     --freeze_latent_expert 1 --train_latent_last_n "${TRAIN_LATENT_LAST_N:-4}" \
@@ -157,6 +183,7 @@ accelerate launch \
     --use_robot_state 1 \
     --use_tactile_vec 1 --use_tactile_deform 1 --use_tactile_vqvae 1 \
     --state_noise_mode joint \
+    --anchor_noise_mode "${ANCHOR_NOISE_MODE}" --anchor_dropout "${ANCHOR_DROPOUT}" \
     --tactile_intermediate_size 1536 \
     --training_stage 2 \
     --cascaded_total_steps 10 --cascaded_split_step 6 \

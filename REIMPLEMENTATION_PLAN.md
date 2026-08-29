@@ -4,6 +4,41 @@ Consolidated plan from the checkpoint-2-8000 post-mortem (2026-08-28/29). One fu
 fine-tune budget remains, so every training-side change ships in a single run;
 everything else is prep-time (CPU) or inference-time (no retraining).
 
+## Status (2026-08-29)
+
+Sections 1-5 are **implemented in the tree**; nothing here has been *run* yet.
+What landed, and where:
+
+| item | where |
+|---|---|
+| 3a/3b hybrid anchoring + previous-command anchor | `trex_origami/anchoring.py` (new, single source of truth), `prepare.py` (`--anchor-mode`, new `prev_command` column, `action_anchor` in `meta/dataset.json`) |
+| 3b anchor noise + anchor dropout | `origami_dataset.reanchor_chunk`, `--anchor_noise_mode` / `--anchor_dropout` |
+| 3c phase conditioning | `--phase-mode progress` is now the prep default; `median_episode_frames` recorded so serving can reproduce the prompt from elapsed time |
+| 3d stats + verify gates | anchoring round-trip in `verify.py`, anchoring check in `preflight.py`, prep refuses to mix two contracts in one root |
+| 2/4 LR + schedule | `train_origami.sh`: LR 1.5e-4, `--min_lr_ratio 0`, 3 epochs, warmup 3% kept |
+| 5 per-dim anchoring in every consumer | `eval_origami.py`, `eval_diagnostics.py`, `eval_robustness.py`, `eval_smoothed.py`, `test.py` all reconstruct absolute radians through the declared rule and hard-exit on a checkpoint/data mismatch |
+| 5 motion-only metric | `ErrorAccumulator` `motion` block (step-0 removed) in `eval_origami` and `eval_smoothed`; the three constant baselines collapse onto one static floor there |
+| AV1/h264 mix | `accel.py` probes NVDEC per codec and retires a decoder that fails on a real file; `prepare_fast.py` logs the verdict once instead of warning per file |
+| stride-5 val slice (§6.2) | `run_prepare_fast.sh full` also writes `full/val_stride5` |
+
+Two deviations from the text below, both deliberate:
+
+- **The frozen-dim clamp is expressed on the absolute chunk**, not as "zero the
+  delta". Under hybrid anchoring a frozen dim is an *absolute* dim, so zeroing it
+  would command 0 rad — a full-travel move — instead of holding. On the legacy
+  all-delta prep the two are the same operation, so nothing changes there.
+- **§5's motion-only metric is defined as step-0 removal**, not `pred_abs - anchor`
+  vs `gt_abs - anchor`: subtracting the same anchor from both sides is algebraically
+  identical to raw MAE and would measure nothing. Removing each chunk's *own* step 0
+  is what actually denies credit for copying the anchor.
+
+Open, and flagged rather than silently resolved: `--phase-mode progress` bakes
+`(t - s) / (N - 1)`, which needs the episode's total length — a number the robot
+does not have. `scripts/test.py --phase_mode progress --phase_episode_seconds`
+approximates it from elapsed wall-clock against the training median, which
+degrades gracefully but is not the identical signal. `PHASE_MODE=none` remains
+the conservative choice.
+
 ## 0. Why the last run underperformed — the evidence
 
 Checkpoint `trex_origami_full_0827_2005/checkpoint-2-8000` (99 seasons, 410k samples,

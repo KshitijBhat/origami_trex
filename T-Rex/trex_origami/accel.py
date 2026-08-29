@@ -25,6 +25,14 @@ device-to-host copy of full 1200x480 frames costs more than NVDEC saves.
 `decode_frames` therefore routes per stream rather than flipping one global
 switch.
 
+Which codecs the GPU can actually take is a *second* per-box question, and it
+does not follow from "NVDEC works here": NVDEC only gained AV1 on Ampere, so an
+A100 / V100 / T4 decodes the h264 seasons on the GPU and has to send the AV1
+ones to libdav1d.  `usable_decoders()` probes each codec end-to-end once at
+startup, and `install()` additionally retires a decoder for the rest of the
+process the first time a real file fails on it — otherwise every AV1 file in the
+sweep pays a failed NVDEC attempt before falling back.
+
 Fidelity: `-resize` uses the decoder's own scaler, not lanczos.  Against the CPU
 path, mean absolute error is ~1.0/255 with a pixel correlation of 0.9993 (frames
 0/500/1042 of a 1043-frame sample), i.e. below JPEG quantisation noise.  Frame
@@ -37,7 +45,8 @@ import functools
 import logging
 import os
 import subprocess
-from typing import List, Optional, Sequence, Tuple
+import threading
+from typing import Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +58,23 @@ CUVID_DECODERS = {
     "hevc": "hevc_cuvid",
     "vp9": "vp9_cuvid",
 }
+
+#: Encoders used to synthesise a throwaway clip when probing a codec end-to-end,
+#: best-effort in order.  A codec with no available encoder cannot be probed
+#: ahead of time; `install()` then finds out on the first real file and retires
+#: the decoder if it fails.
+PROBE_ENCODERS = {
+    "h264": ("libx264",),
+    "av1": ("libsvtav1", "librav1e", "libaom-av1"),
+    "hevc": ("libx265",),
+    "vp9": ("libvpx-vp9",),
+}
+
+#: Decoders that failed on a real file in this process.  Per-process by design:
+#: conversion runs in a `spawn` pool, so each worker learns once and the cost of
+#: learning is one failed decode rather than one per file.
+_RETIRED: set = set()
+_RETIRED_LOCK = threading.Lock()
 
 
 @functools.lru_cache(maxsize=512)
@@ -91,26 +117,81 @@ def _compiled_decoders() -> frozenset:
 def cuvid_decoder(video_path: str) -> Optional[str]:
     """The NVDEC decoder to use for this file, or None to stay on the CPU.
 
-    Two conditions: we map the codec to a cuvid decoder, and this ffmpeg build
-    actually has it compiled in.  `-decoders` alone is not proof the *device*
-    works (see `gpu_decode_available`), which is why that end-to-end probe
-    still gates the whole path and `decode_frames` keeps its CPU fallback.
+    Three conditions: we map the file's codec to a cuvid decoder, this box
+    provably (or plausibly — see `usable_decoders`) decodes that codec on the
+    GPU, and the decoder has not already been retired after failing on a real
+    file in this process.  `-decoders` alone is not proof the *device* works,
+    which is why the end-to-end probes gate the path and `decode_frames` keeps
+    its CPU fallback regardless.
     """
-    name = CUVID_DECODERS.get(probe_codec(video_path))
-    return name if name and name in _compiled_decoders() else None
+    codec = probe_codec(video_path)
+    name = CUVID_DECODERS.get(codec)
+    if not name or name in _RETIRED:
+        return None
+    return name if codec_decode_available(codec) is not False else None
+
+
+def retire_decoder(decoder: str, reason: str) -> None:
+    """Stop trying `decoder` in this process after it failed on a real file."""
+    with _RETIRED_LOCK:
+        if decoder in _RETIRED:
+            return
+        _RETIRED.add(decoder)
+    logger.warning("[accel] retiring %s for this process after: %s", decoder, reason)
 
 
 @functools.lru_cache(maxsize=1)
-def gpu_decode_available() -> bool:
-    """True if ffmpeg can actually complete the exact GPU decode we intend to run.
+def _compiled_encoders() -> frozenset:
+    """Encoder names this ffmpeg build knows about (used only for probing)."""
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=60)
+        names = set()
+        for line in out.stdout.decode("utf-8", "replace").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0][:1] in "VAS":
+                names.add(parts[1])
+        return frozenset(names)
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
 
-    Probed end-to-end -- encode a throwaway h264 clip, then decode it through
-    `h264_cuvid -resize` and require real JPEG output -- rather than by parsing
-    `-decoders` or poking `-init_hw_device`.  Both of those report success on
-    this box even with no usable device (`-init_hw_device cuda` exits 0 and
-    prints nothing), so a lighter check would send every worker down a path
-    that only fails once it reaches the first real video.
+
+def _encode_probe_clip(codec: str, path: str) -> bool:
+    """Write ~3 frames of `codec` to `path`.  False if no encoder can do it."""
+    available = _compiled_encoders()
+    for encoder in PROBE_ENCODERS.get(codec, ()):
+        if encoder not in available:
+            continue
+        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y",
+               "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.1",
+               "-c:v", encoder, "-pix_fmt", "yuv420p"]
+        # libaom is glacial at its default speed and this clip is throwaway.
+        if encoder == "libaom-av1":
+            cmd += ["-cpu-used", "8", "-strict", "experimental"]
+        elif encoder == "libsvtav1":
+            cmd += ["-preset", "12"]
+        try:
+            made = subprocess.run(cmd + [path], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=180)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if made.returncode == 0 and os.path.getsize(path) > 0:
+            return True
+    return False
+
+
+@functools.lru_cache(maxsize=8)
+def codec_decode_available(codec: str) -> Optional[bool]:
+    """Can NVDEC decode `codec` *on this box*, through the exact command we run?
+
+    Returns True/False, or None when the question could not be settled offline
+    because this ffmpeg has no encoder for the codec.  The distinction matters:
+    None means "try it on the first real file", False means "do not bother".
     """
+    decoder = CUVID_DECODERS.get(codec)
+    if not decoder or decoder not in _compiled_decoders():
+        return False
     if os.environ.get("ORIGAMI_GPU", "1") == "0":
         return False
     tmp = None
@@ -118,16 +199,10 @@ def gpu_decode_available() -> bool:
         import tempfile
         fd, tmp = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
-        made = subprocess.run(
-            ["ffmpeg", "-nostdin", "-v", "error", "-y",
-             "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=1",
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", tmp],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
-        if made.returncode != 0:
-            return False
+        if not _encode_probe_clip(codec, tmp):
+            return None
         out = subprocess.run(
-            build_cmd(tmp, "not(mod(n\\,10))", scale=224, quality=3,
-                      decoder="h264_cuvid"),
+            build_cmd(tmp, "gte(n\\,0)", scale=224, quality=3, decoder=decoder),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
         return out.returncode == 0 and out.stdout.startswith(b"\xff\xd8\xff")
     except (OSError, subprocess.SubprocessError, ImportError):
@@ -135,6 +210,47 @@ def gpu_decode_available() -> bool:
     finally:
         if tmp and os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def usable_decoders() -> Dict[str, str]:
+    """codec -> cuvid decoder, for the codecs this box provably decodes on the GPU.
+
+    Codecs whose probe was inconclusive (no local encoder to make a test clip)
+    are included optimistically: `install()`'s per-file fallback still covers
+    them, and excluding them would forfeit NVDEC on a box that can do it.
+    """
+    out: Dict[str, str] = {}
+    for codec, decoder in CUVID_DECODERS.items():
+        verdict = codec_decode_available(codec)
+        if verdict is None:
+            logger.info("[accel] %s: cannot probe (no local encoder); will try "
+                        "%s on the first file and fall back if it fails",
+                        codec, decoder)
+            out[codec] = decoder
+        elif verdict:
+            out[codec] = decoder
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def gpu_decode_available() -> bool:
+    """True if NVDEC can serve *at least one* of the codecs in this release.
+
+    Probed end-to-end per codec (`codec_decode_available`) -- encode a throwaway
+    clip, decode it through `<codec>_cuvid -resize`, require real JPEG output --
+    rather than by parsing `-decoders` or poking `-init_hw_device`.  Both of
+    those report success on this box even with no usable device
+    (`-init_hw_device cuda` exits 0 and prints nothing), so a lighter check would
+    send every worker down a path that only fails once it reaches the first real
+    video.
+
+    "At least one" is the right bar because the release mixes codecs: on a box
+    whose NVDEC predates AV1, the h264 seasons should still take the GPU while
+    the AV1 ones go to libdav1d, and `cuvid_decoder` makes that call per file.
+    """
+    if os.environ.get("ORIGAMI_GPU", "1") == "0":
+        return False
+    return bool(usable_decoders())
 
 
 # A wedged GPU decode would otherwise hold a converter process forever; the CPU
@@ -213,6 +329,10 @@ def install() -> bool:
                 # sessions) must not lose the season -- redo it on the CPU.
                 logger.warning("[accel] %s failed on %s, using CPU: %s",
                                decoder, context, str(exc)[:200])
+                # A decoder this GPU does not implement (the AV1-on-A100 case)
+                # fails on *every* file of that codec.  Retire it rather than
+                # paying the failed attempt once per file for the whole sweep.
+                retire_decoder(decoder, f"{context}: {str(exc)[:160]}")
         blob = _run(build_cmd(video_path, select, scale=scale,
                               quality=quality), video_path)
         return prep._split_jpegs(blob, expected, context)

@@ -15,6 +15,16 @@ growing without bound just because the downloaders got ahead.
 Conversion runs in processes, not threads, because `prepare` is CPU-bound
 between ffmpeg calls; downloads run in threads because they are socket-bound and
 `huggingface_hub` releases the GIL.
+
+Codec note: the `lerobot3.0` exports are *mostly AV1*, with some h264 seasons
+(the dataset card puts it as "lerobot3.0 is primarily AV1, lerobotv2.1 is
+primarily H.264"), so the decode budget is set by AV1 rather than h264 -- roughly
+2-4x more CPU per frame through libdav1d, and NVDEC only decodes AV1 on Ampere
+and later.  `accel.usable_decoders()` settles that per codec at startup and this
+module logs the answer, so a run on a box that cannot GPU-decode AV1 says so on
+line 2 instead of emitting one fallback warning per video file.  When most
+seasons land on the CPU, `--converters` is the knob that matters: it is the only
+thing keeping the cores busy.
 """
 from __future__ import annotations
 
@@ -28,10 +38,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import get_context
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .anchoring import ANCHOR_MODES, anchor_spec, describe as describe_anchor
 from .prepare import (
     EXIT_PARTIAL,
     PrepConfig,
     _merge_entries,
+    check_config_compatible,
     prepare_season,
     season_already_done,
     write_dataset_meta,
@@ -179,6 +191,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--rgb-quality", type=int, default=PrepConfig.rgb_quality)
     parser.add_argument("--deform-quality", type=int, default=PrepConfig.deform_quality)
     parser.add_argument("--phase-mode", choices=["none", "progress"], default="none")
+    parser.add_argument("--anchor-mode", choices=list(ANCHOR_MODES),
+                        default=PrepConfig.anchor_mode,
+                        help="see trex_origami.anchoring; 'hybrid' anchors the arms "
+                             "to the previous command and leaves hands/motor absolute")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", "") or None)
     parser.add_argument("--downloaders", type=int, default=3,
                         help="concurrent season downloads")
@@ -188,6 +204,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="max seasons resident on disk (~1 GB each)")
     parser.add_argument("--cpu-only", action="store_true",
                         help="disable GPU decoding (same as ORIGAMI_GPU=0)")
+    parser.add_argument("--probe-codecs", type=int, default=1,
+                        help="probe NVDEC once per codec before starting (the release "
+                             "mixes AV1 and h264 and not every GPU decodes AV1)")
     parser.add_argument("--stats", action="store_true")
     parser.add_argument("--stats-subsample", type=int, default=4)
     args = parser.parse_args(argv)
@@ -201,19 +220,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sample_stride=args.sample_stride, chunk_stride=args.chunk_stride,
         action_chunk=args.action_chunk, vqvae_window=args.vqvae_window,
         image_size=args.image_size, rgb_quality=args.rgb_quality,
-        deform_quality=args.deform_quality, phase_mode=args.phase_mode)
+        deform_quality=args.deform_quality, phase_mode=args.phase_mode,
+        anchor_mode=args.anchor_mode)
 
     seasons = args.seasons or select_seasons(args.split, args.limit)
     cache_root = args.cache_root or os.path.join(
         os.path.dirname(os.path.abspath(args.out_root)), "_src")
     os.makedirs(args.out_root, exist_ok=True)
+    check_config_compatible(args.out_root, cfg, args.overwrite)
 
     from . import accel
-    gpu = accel.gpu_decode_available()
+    # `lerobot3.0` is primarily AV1 with some h264 seasons, and NVDEC only gained
+    # AV1 on Ampere -- an A100/T4/V100 box decodes the h264 seasons on the GPU and
+    # must fall back to libdav1d for the rest.  Probing once here turns that into
+    # one startup line instead of a per-file warning from every worker.
+    live = accel.usable_decoders() if args.probe_codecs else {}
+    if args.probe_codecs:
+        gpu_desc = (", ".join(f"{codec}->{dec}" for codec, dec in sorted(live.items()))
+                    if live else "off (cpu for every codec)")
+    else:
+        gpu_desc = "on (rgb only)" if accel.gpu_decode_available() else "off (cpu)"
     logger.info("[fast] %s: %d seasons -> %s", args.split, len(seasons), args.out_root)
-    logger.info("[fast] gpu=%s  downloaders=%d  converters=%d  disk_budget=%d seasons",
-                "h264_cuvid (rgb only)" if gpu else "off (cpu)",
+    logger.info("[fast] nvdec: %s  |  deform strip always cpu", gpu_desc)
+    logger.info("[fast] downloaders=%d  converters=%d  disk_budget=%d seasons",
                 args.downloaders, args.converters, args.disk_budget)
+    logger.info("[fast] action anchoring %s", describe_anchor(anchor_spec(cfg.anchor_mode)))
 
     failures = run(seasons, args.out_root, cache_root, cfg,
                    downloaders=args.downloaders, converters=args.converters,

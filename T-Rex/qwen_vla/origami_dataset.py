@@ -16,6 +16,23 @@ instead bakes the chunk and the 30 Hz F6 window into each row and stores the
 frames as JPEG blobs, which decouples the *sample* rate from the *action* rate
 and turns one sample into one parquet row read + 4 JPEG decodes.
 
+Action anchoring
+----------------
+What the 65 predicted numbers are measured from is a property of the *dataset*,
+recorded per dim in `meta/dataset.json` and read here through
+`trex_origami.anchoring`.  Under the default `hybrid` prep the 14 arm dims are
+deltas from the previous command and the 51 hand/motor dims are absolute joint
+angles; a dataset prepared before that existed declares nothing and is treated
+as the old all-delta-from-state rule.  Consumers reconstruct absolute radians
+with `build_anchor(state, prev_command, spec)` — never by adding the state.
+
+Because the previous command is a nuisance shortcut the policy could simply copy
+(de Haan et al., causal confusion), it enters only additively at the output, and
+training perturbs it: `anchor_noise_mode=tracking` adds per-dim noise with the
+measured command-minus-state statistics, and `anchor_dropout` re-anchors a
+fraction of samples to `state[t]` so the policy stays usable when its own
+command stream has drifted.
+
 Batch contract (identical to TRexLeRobotDataset.collate_fn):
     input_ids, attention_mask, pixel_values, image_grid_thw, n_slow_images,
     noisy_actions, target, timesteps, norm_actions, tactile_f6s,
@@ -34,6 +51,9 @@ import numpy as np
 import PIL.Image
 import torch
 import torch.nn.functional as F
+
+from trex_origami.anchoring import (ANCHOR_PREV_COMMAND, describe as describe_anchor,
+                                    masks as anchor_masks, spec_from_meta)
 
 # The origami robot is commanded in 65-D joint space, not T-Rex's eef-62:
 # `observation.state.tcp` is identically zero in the release, and the
@@ -91,18 +111,24 @@ def frozen_action_dims(mask) -> np.ndarray:
     return np.where(~np.asarray(mask, dtype=bool))[0]
 
 
-def clamp_frozen_actions(delta, mask):
-    """Zero a delta chunk on the frozen dims -- i.e. command `state[j]` and hold.
+def clamp_frozen_absolute(absolute, mask, state):
+    """Hold the measured position on the frozen dims of an *absolute* chunk.
 
-    `delta` is [..., D] in raw radians.  The wire contract is `state + delta`,
-    so zeroing is exactly "hold the measured position", which is what the
-    teleoperator did on those dims for every frame of every season.
+    `absolute` is [..., T, D] in raw radians (already reconstructed through the
+    anchoring rule) and `state` is [..., D].  Commanding `state[j]` for the whole
+    chunk is what the teleoperator did on those dims for every frame of every
+    season.
+
+    Deliberately expressed in absolute space rather than as "zero the delta":
+    under hybrid anchoring a frozen dim is an *absolute* dim, so zeroing its
+    prediction would command 0 rad — a full-travel move — instead of holding.
+    In the legacy all-delta prep the two are the same operation.
     """
     dims = frozen_action_dims(mask)
     if dims.size == 0:
-        return delta
-    out = np.array(delta, copy=True)
-    out[..., dims] = 0.0
+        return absolute
+    out = np.array(absolute, copy=True)
+    out[..., dims] = np.asarray(state)[..., None, dims]
     return out
 
 
@@ -126,6 +152,41 @@ def add_joint_state_noise(state, te_mean, te_std, action_dim):
     d = min(action_dim, noisy.shape[0], len(te_mean), len(te_std))
     noisy[:d] += np.random.normal(te_mean[:d], te_std[:d]).astype(np.float32)
     return noisy
+
+
+def reanchor_chunk(chunk, prev_command, state, prev_dims, te_mean, te_std,
+                   noise_mode="none", dropout=0.0, rng=None):
+    """Move a chunk's anchor off the true previous command, for the delta dims.
+
+    The stored target is `action[t+k] - prev_command[t]` on `prev_dims`.  This
+    rewrites it as `action[t+k] - anchor'` for a perturbed anchor, without ever
+    touching the absolute dims:
+
+        anchor' = state[t] + eps      with probability `dropout`
+        anchor' = prev_command[t] + eps  otherwise
+
+    Why bother: at deployment the anchor is the policy's *own* last emitted
+    command, which drifts from the demonstrator's.  Training exclusively against
+    the true previous command produces a policy that is only correct while it is
+    already correct (the DAgger compounding-error setting), and rewards copying
+    the anchor rather than predicting motion.  `eps` uses the prep's measured
+    tracking-error statistics, so the perturbation is the size of the servo lag
+    the anchor really carries.
+    """
+    if prev_dims.size == 0 or (noise_mode == "none" and dropout <= 0.0):
+        return chunk
+    rng = rng or np.random
+    base = prev_command
+    if dropout > 0.0 and rng.random() < dropout:
+        base = state
+    shift = (prev_command[prev_dims] - base[prev_dims]).astype(np.float32)
+    if noise_mode == "tracking":
+        shift = shift - rng.normal(te_mean[prev_dims], te_std[prev_dims]).astype(np.float32)
+    if not shift.any():
+        return chunk
+    out = np.array(chunk, copy=True)
+    out[:, prev_dims] += shift
+    return out
 
 
 class BlockShuffleSampler(torch.utils.data.Sampler):
@@ -195,6 +256,10 @@ class OrigamiDataset(torch.utils.data.Dataset):
         self.action_dim = int(g("action_dim", ACTION_DIM))
         self.action_chunk = int(g("action_chunk", ACTION_CHUNK))
         self.state_noise_mode = str(g("state_noise_mode", "none"))
+        # Anchor augmentation only ever touches dims anchored to the previous
+        # command, so it is a no-op on a legacy all-delta-from-state dataset.
+        self.anchor_noise_mode = str(g("anchor_noise_mode", "none"))
+        self.anchor_dropout = float(g("anchor_dropout", 0.0))
         self.phase_mode = str(g("phase_mode", "") or cfg.get("phase_mode", "none"))
         self.n_phases = int(cfg.get("n_phases", 6))
         self.instruction = cfg.get("instruction", "")
@@ -209,6 +274,15 @@ class OrigamiDataset(torch.utils.data.Dataset):
                 raise ValueError(
                     f"{self.root} was prepared with {name}={got} but training was launched "
                     f"with --{name} {want}. Re-prepare the data or fix the flag.")
+
+        # ── action anchoring ──
+        # Read from the dataset, never assumed: a split prepared with a different
+        # rule than the one this process expects would train a head whose output
+        # means something else, with no shape error anywhere to catch it.
+        self.anchor_spec = spec_from_meta(self.meta)
+        sel = anchor_masks(self.anchor_spec)
+        self.anchor_prev_dims = np.where(sel[ANCHOR_PREV_COMMAND])[0]
+        self.needs_prev_command = bool(self.anchor_prev_dims.size)
 
         # ── normalisation ──
         self.stats_data = _stats if _stats is not None else self._load_stats()
@@ -244,6 +318,9 @@ class OrigamiDataset(torch.utils.data.Dataset):
                 f"sample {self.sample_fps:.1f} Hz, chunk horizon "
                 f"{self.action_chunk * self.chunk_stride / self.src_fps:.2f} s | "
                 f"flare={'on' if self.bake_flare else 'off'}")
+            accelerator.print(
+                f"[origami] anchoring {describe_anchor(self.anchor_spec)} | "
+                f"anchor noise={self.anchor_noise_mode}, dropout={self.anchor_dropout:.2f}")
 
     # ── index ──────────────────────────────────────────────────────────────
     def _load_stats(self):
@@ -334,11 +411,35 @@ class OrigamiDataset(torch.utils.data.Dataset):
         r = self._read_row(ei, row)
         n_rows = self.ep_rows[ei]
 
+        state = np.asarray(r["state"].as_py(), dtype=np.float32)
+        chunk = np.asarray(r["action_chunk"].as_py(),
+                           dtype=np.float32).reshape(self.action_chunk, self.action_dim)
+        if "prev_command" in r:
+            prev_command = np.asarray(r["prev_command"].as_py(), dtype=np.float32)
+        elif self.needs_prev_command:
+            raise KeyError(
+                f"{self.root} anchors {self.anchor_prev_dims.size} dim(s) to the "
+                f"previous command but its parquets have no `prev_command` column "
+                f"— it was prepared by an older trex_origami. Re-prepare it, or "
+                f"every arm joint would be reconstructed off by the tracking offset.")
+        else:
+            # Legacy all-delta-from-state dataset: nothing is anchored to the
+            # previous command, so this is only carried for the evaluator's
+            # `oracle_prev_command` row and the command at t is the honest stand-in.
+            prev_command = np.asarray(r["action_abs"].as_py(), dtype=np.float32)
+
         item = {
-            "state": np.asarray(r["state"].as_py(), dtype=np.float32),
-            "action": np.asarray(r["action_chunk"].as_py(),
-                                 dtype=np.float32).reshape(self.action_chunk, self.action_dim),
+            "state": state,
+            # `action` is the training target and may be re-anchored below;
+            # `action_eval` keeps the stored, true-anchor target so the offline
+            # evaluator never scores against an augmented label.
+            "action_eval": chunk,
+            "action": reanchor_chunk(
+                chunk, prev_command, state, self.anchor_prev_dims,
+                self.te_mean, self.te_std,
+                noise_mode=self.anchor_noise_mode, dropout=self.anchor_dropout),
             "action_abs": np.asarray(r["action_abs"].as_py(), dtype=np.float32),
+            "prev_command": prev_command,
             "task": self._task_text(ep, float(r["phase"].as_py())),
             "head": self._pil(r["head"]),
             "wrist_left": self._pil(r["wrist_left"]),
@@ -363,13 +464,27 @@ class OrigamiDataset(torch.utils.data.Dataset):
         return item
 
     # ── val split ──────────────────────────────────────────────────────────
+    def _as_val(self, val):
+        """Turn a dataset into a validation view: label augmentation off.
+
+        Anchor noise and anchor dropout rewrite the *target*, so leaving them on
+        would make the validation loss a moving target rather than a measurement
+        — a run could look like it was improving because it drew milder anchors.
+        (State noise perturbs an input, not a label, and is left alone so this
+        run's val curve stays comparable with the previous one's.)
+        """
+        val.anchor_noise_mode = "none"
+        val.anchor_dropout = 0.0
+        return val
+
     def create_val_split(self, val_ratio=0.05, seed=42):
         """Prefer a separate root (held-out seasons).  Falls back to an
         episode-level split of this root so `--val_ratio` keeps working."""
         val_root = getattr(self.config, "origami_val_root", "") or ""
         if val_root:
-            val = OrigamiDataset(self.config, self.processor, self.accelerator,
-                                 root=val_root, _stats=self.stats_data, _quiet=True)
+            val = self._as_val(OrigamiDataset(
+                self.config, self.processor, self.accelerator,
+                root=val_root, _stats=self.stats_data, _quiet=True))
             self.accelerator.print(
                 f"[origami] val root {val_root}: {len(val)} samples / "
                 f"{len(val.episodes)} episodes / "
@@ -393,7 +508,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
         self._build_index()
         self.accelerator.print(f"[origami] episode split: "
                                f"{len(train_eps)} train / {len(val_eps)} val episodes")
-        return val
+        return self._as_val(val)
 
     # ── collate (parity with TRexLeRobotDataset.collate_fn) ────────────────
     def collate_fn(self, batch: List[Dict]) -> Dict:
@@ -503,7 +618,13 @@ class OrigamiDataset(torch.utils.data.Dataset):
             # extras used only by the offline evaluator (ignored by train.py)
             "eval_state": torch.tensor(np.stack([b["state"] for b in batch]),
                                        dtype=torch.float32),
-            "eval_action_raw": torch.tensor(actions, dtype=torch.float32),
+            # The *stored* target (true anchor, no augmentation) — the label the
+            # evaluator has to score against, and the one it reconstructs
+            # absolute radians from together with `eval_prev_command`.
+            "eval_action_raw": torch.tensor(
+                np.stack([b["action_eval"] for b in batch]), dtype=torch.float32),
+            "eval_prev_command": torch.tensor(
+                np.stack([b["prev_command"] for b in batch]), dtype=torch.float32),
             "eval_contact": torch.tensor(
                 np.stack([_contact_flag(b) for b in batch]), dtype=torch.bool)
             if "tacf6_hist" in batch[0] else None,

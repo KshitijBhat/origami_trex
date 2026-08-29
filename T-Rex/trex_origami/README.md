@@ -41,45 +41,124 @@ At source frame `t` of an episode of length `N`:
 | column | shape | contents |
 |---|---|---|
 | `state` | 65 | `observation.state[t]` |
-| `action_chunk` | 25×65 | `action[min(t+k, N-1)] - state[t]`, k = 0..24 |
+| `action_chunk` | 25×65 | `action[min(t+k, N-1)] - anchor[t]`, k = 0..24 |
 | `action_abs` | 65 | `action[t]` |
+| `prev_command` | 65 | `action[t-1]` (`action[t]` at an episode start) |
 | `phase` | — | episode progress in [0, 1] |
 | `tacf6_hist` | 16×10×6 | `tactile[clip(t-15+i, 0, t)]`, **at the native 30 Hz** |
 | `head`, `wrist_left`, `wrist_right` | — | JPEG, 224×224 RGB |
 | `deform` | — | JPEG, 1200×480 grayscale |
 
-Two deliberate choices:
+### What the 65 numbers are measured from
 
-- **Actions are deltas from the current state on all 65 dims.** Absolute radians are
-  recovered at inference by adding `observation/state`, which is what the wire
-  contract wants. This matches the pi0.5 baseline that is known to work on this data,
-  and keeps the flow-matching target near zero-mean.
+`anchor[t]` is **per dimension**, defined in `anchoring.py` and recorded in
+`meta/dataset.json` as a 65-entry `action_anchor` list. Under the default
+`--anchor-mode hybrid`:
+
+| dims | group | anchor | target is |
+|---|---|---|---|
+| 0–6, 29–35 | arms (14) | `prev_command[t]` | delta from the previous command |
+| 7–28, 36–57 | hands (44) | 0 | the absolute joint angle |
+| 58–64 | torso/neck motor (7) | 0 | the absolute joint angle |
+
+This matches the paper's own per-group anchoring (§5.1, and the released
+`…deltabase_axis_eef…` stats): arms relative, fingers absolute. The first
+fine-tune used `--anchor-mode state` — every dim a delta from `observation.state[t]`
+— which cost it two ways. The constant part of every target became the
+command-minus-state tracking offset (~0.74°), which is not observable from any
+model input because it lives in the *command* history, so `hold_state` was
+unbeatable by construction; and q01/q99 over near-static delta dims spanned little
+more than that jitter, so normalisation stretched it to the full [-1, 1] range and
+the flow head's residual sampling noise denormalised back into degrees of finger
+wobble. `--anchor-mode state` still reproduces that prep exactly, and a dataset
+written before this existed declares no rule and is read as `state`.
+
+Absolute radians — the wire contract — come back the same way everywhere:
+
+```python
+from trex_origami.anchoring import build_anchor, spec_from_meta, to_absolute
+spec   = spec_from_meta(meta)                          # from meta/dataset.json
+anchor = build_anchor(state, prev_command, spec)       # [..., 65]
+absolute = to_absolute(predicted_chunk, anchor)        # [..., 25, 65]
+```
+
+At deployment `prev_command` is the policy's own last emitted command, which it
+always has; `scripts/test.py` tracks it and serves absolute radians directly,
+because the rule is per-dim and no client can do the reconstruction for us.
+
+Because that anchor is a nuisance shortcut the policy could simply copy (de Haan
+et al., causal confusion) — and open-loop MAE *rewards* copying it — it enters only
+additively at the output, never as a network input, and training perturbs it:
+`--anchor_noise_mode tracking` adds per-dim noise with the measured tracking-error
+statistics, and `--anchor_dropout 0.15` re-anchors a fraction of samples to
+`state[t]` so the policy stays usable once its own command stream has drifted.
+The acceptance metric is correspondingly the **motion** metric (MAE with each
+chunk's own step 0 removed), not raw MAE.
+
+Two other deliberate choices:
+
 - **The F6 history stays at 30 Hz** regardless of `sample_stride`, because the
   embedded VQ-VAE was trained on 30 Hz windows.
+- **Frozen dims are held at `state[j]`, not zeroed.** `stats.py` masks off any dim
+  whose q01..q99 spread is degenerate (the torso's `lower_body_joint_1/2`), and
+  `_normalize` passes those through un-scaled, so the flow head's residual noise
+  reaches the wire in raw radians. Eval and serving clamp them — but on the
+  *absolute* chunk, since under hybrid anchoring those dims are absolute and
+  zeroing one would command 0 rad, a full-travel move.
 
 ## Usage
 
 ```bash
-bash trex_origami/run_prepare.sh pilot   # 10 train + 3 val seasons, stride 5 (6 Hz)
-bash trex_origami/run_prepare.sh dense   # 30 train + 8 val seasons, stride 5
-bash trex_origami/run_prepare.sh full    # 101 train + 25 val seasons, stride 20
+bash trex_origami/run_prepare_fast.sh pilot   # 10 train + 3 val seasons, stride 5 (6 Hz)
+bash trex_origami/run_prepare_fast.sh dense   # 30 train + 8 val seasons, stride 5
+bash trex_origami/run_prepare_fast.sh full    # 101 train + 25 val seasons, stride 20
 ```
 
+`run_prepare_fast.sh` overlaps the downloads with the conversions and puts the RGB
+streams on NVDEC; `run_prepare.sh` is the serial, CPU-only equivalent and produces
+the same bytes. Both default to `ANCHOR_MODE=hybrid PHASE_MODE=progress`; set
+`ANCHOR_MODE=state PHASE_MODE=none` to reproduce the first fine-tune's prep.
+
+The `full` tier writes **three** roots: `train` and `val` at stride 20, plus
+`val_stride5` — the first 5 val seasons re-prepared at stride 5. One dataset row is
+one delay quantum and one replan period, so at stride 20 `eval_robustness.py` can
+only resolve 667 ms and consecutive chunks overlap by 5 of 25 steps; the delay sweep
+and the temporal-ensemble rollout both need the finer root to measure what they claim.
+
 Seasons stream from the hub one at a time and are deleted after conversion, so peak
-disk is `output-so-far + one season` rather than the ~300 GB the raw release needs.
-Only `head_left`, `wrist_left`, `wrist_right` and `tactile_deform` are fetched —
-skipping `tactile_raw` alone drops 73% of the bytes. Reruns are resumable.
+disk is `output-so-far + disk_budget seasons` rather than the ~300 GB the raw release
+needs. Only `head_left`, `wrist_left`, `wrist_right` and `tactile_deform` are fetched
+— skipping `tactile_raw` alone drops 73% of the bytes.
+
+Reruns are resumable, but only for the *same* contract: changing `--anchor-mode`,
+`--phase-mode`, the stride or the chunk shape is refused against an existing root,
+because already-converted seasons would be skipped and the split would end up
+half in one target space and half in the other with a `dataset.json` claiming one
+of them. Use a fresh `--out-root` or `--overwrite`.
+
+**Codecs.** The `lerobot3.0` exports are *mostly AV1*, with some h264 seasons
+(the dataset card: "lerobot3.0 is primarily AV1, lerobotv2.1 is primarily H.264").
+AV1 costs roughly 2–4× more CPU per frame through libdav1d, and NVDEC only decodes
+AV1 from Ampere on — so on an A100/V100/T4 the h264 seasons take the GPU and the
+AV1 ones fall back to the CPU. `accel.py` probes each codec end-to-end once at
+startup, prints which decoders are live, and retires a decoder for the rest of the
+process the first time a real file fails on it, so a GPU that cannot do AV1 costs
+one failed decode rather than one per file. The deform strip always stays on the
+CPU: it is not downscaled, so reading full 1200×480 frames back off the GPU costs
+more than NVDEC saves. When most seasons land on the CPU, `CONVERTERS` is the knob
+that matters.
 
 Individual stages:
 
 ```bash
-python -m trex_origami.prepare --split train --limit 10 --out-root <dir> --sample-stride 5
-python -m trex_origami.stats   --root <train dir> --copy-to <val dir>
+python -m trex_origami.prepare --split train --limit 10 --out-root <dir> \
+       --sample-stride 5 --anchor-mode hybrid --phase-mode progress
+python -m trex_origami.stats   --root <train dir> --copy-to <val dir> <val_stride5 dir>
 python -m trex_origami.verify  --root <train dir> --src-root <raw seasons> --montage m.png
 ```
 
-`stats` fits normalisation on **train only** and copies it to val, so the two splits
-scale identically and their losses stay comparable.
+`stats` fits normalisation on **train only** and copies it to every val root, so the
+splits scale identically and their losses stay comparable.
 
 ## Verification
 
@@ -96,8 +175,12 @@ scale identically and their losses stay comparable.
   grid would pair one finger's image with another's wrench and nothing downstream
   would complain, since the shapes are identical either way. On correct data the
   diagonal sits near 0.9 against an off-diagonal near 0.05.
+- **anchoring round-trip**: `anchor + action_chunk[0]` must reproduce `action_abs` on
+  every dim, and the dims declared absolute must equal `action_abs` at step 0 *without*
+  anyone adding the state. A mis-declared `action_anchor` fails here rather than
+  surfacing as a constant bias in every metric days later.
 - with `--src-root`, one episode's numeric columns are re-derived from the raw season
-  and compared exactly
+  under the declared anchoring rule and compared exactly
 
 Then check the batch contract the trainer actually consumes:
 
@@ -240,8 +323,10 @@ Defaults, all overridable from the environment:
 | | value | why |
 |---|---|---|
 | `TRAIN_BSZ` × `GRAD_ACCUM` | 8 × 4 = 32 | the paper's Table 4 is effective 384 (16/device × 24 H100) |
-| `LR` | 5e-5 | scaled down from the paper's 1e-4 for the smaller batch |
-| `N_EPOCHS` | 2 | ~161 k pilot samples; two epochs plus eval fits one session |
+| `LR` | 1.5e-4 | the authors' own post-train launcher is 1e-4 at effective 128 and Table 4 is 1e-4 at 384. The first fine-tune ran 5e-5 at effective 512 — ~8× under-scaled — and its loss was flat by ~2k optimizer steps. 1.5e-4 sits between the paper-faithful 1e-4 and the 2e-4 sqrt-scaling gives; drop to 1e-4 if the first 200 steps look unstable |
+| `MIN_LR_RATIO` | 0 | single half-cosine to zero, as in the authors' `scripts/train.sh`. Warmup stays at 3% — a deliberate deviation from their 0, because we cold-start five head tensors for the 62→65 change and they do not |
+| `N_EPOCHS` | 3 | the authors post-train for 100; two was short even before the LR problem |
+| `ANCHOR_NOISE_MODE` / `ANCHOR_DROPOUT` | `tracking` / 0.15 | keep the policy from simply copying the previous-command anchor, and keep it usable once its own command stream has drifted. Both touch only the dims anchored to the previous command, so they are no-ops on a `--anchor-mode state` dataset |
 | `--image_size` | 224 224 | 49 vision tokens/image × 3 cameras |
 | `--freeze_latent_expert 1`, `TRAIN_LATENT_LAST_N=4` | | the latent expert only encodes RGB+language; the action and tactile experts are what adapt. Freezing all but the top 4 layers is what makes 40 GB work |
 | `--optim adamw8bit` | | 2 B/param of optimiser state instead of 4, and better behaved than AdamW's bf16 moments |
@@ -356,13 +441,28 @@ Reports MAE/RMSE in radians and degrees per joint group, the per-step horizon
 curve over k = 0..24, a contact-only split, latency, and the URDF/velocity
 safety checks.
 
-Read three numbers first:
+Everything is scored in **absolute radians**, reconstructed through the
+dataset's declared anchoring rule, and the script hard-exits if the checkpoint
+was trained under a different one. That keeps the baselines meaning the same
+thing across preps that anchor differently.
 
-1. **vs the naive baselines** (hold-current-state, repeat-current-command). On a
-   0.83 s horizon these are not weak. A policy that does not beat them has
-   learned nothing, and they are the only floor available — the released
-   midtrain checkpoint cannot serve as a zero-shot baseline, because its 62-D eef
-   action head cannot emit a valid 65-D joint action for this task.
+Read four numbers first:
+
+0. **`motion`** — MAE with each chunk's own step-0 value removed, i.e. the shape
+   of the coming movement rather than the pose it starts from. This is the
+   acceptance metric: with the arms anchored to the previous command, step 0 is
+   nearly free, so a policy that emits a constant chunk equal to its anchor
+   scores a respectable raw MAE having predicted nothing. All three constant
+   baselines collapse to one identical `motion` score — the static floor — and
+   beating it is the only evidence of motion skill.
+1. **vs the naive baselines** (`hold_state`, `oracle_prev_command`,
+   `repeat_command`). On a 0.83 s horizon these are not weak. A policy that does
+   not beat them has learned nothing, and they are the only floor available — the
+   released midtrain checkpoint cannot serve as a zero-shot baseline, because its
+   62-D eef action head cannot emit a valid 65-D joint action for this task.
+   `oracle_prev_command` is the one to watch: it repeats what the policy last
+   sent, which under hybrid anchoring is precisely the arms' own anchor, so it is
+   what "predict zero" now buys.
 2. **`cascaded` vs `blind`** on the *contact* split. `blind` is
    `forward_flow_action_full`, the action expert alone. The gap on contact frames
    is what the tactile expert buys; averaged over the whole split it is diluted,
@@ -388,11 +488,18 @@ run the rollout pass on a stride-5 split for the full ensembling effect.
 
 In expected-value order:
 
-1. **`--phase_mode progress` at prep time.** A 6-minute, 6-fold task conditioned
-   on one static sentence is badly under-specified, and the dataset's only task
-   string is literally `north ces task`. Appending the fold index gives the
-   policy a phase signal it can also get at deployment (elapsed time is known).
-   This is the largest untested lever in the pipeline.
+1. **`--phase-mode progress` at prep time** — now the default. A 6-minute,
+   6-fold task conditioned on one static sentence is badly under-specified, and
+   the dataset's only task string is literally `north ces task`; appending the
+   fold index gives the policy a phase signal. Note the deployment caveat: the
+   baked fraction is `(t − s) / (N − 1)`, which needs the episode's *total*
+   length, and the robot only knows how long it has been folding. The prep
+   therefore records `median_episode_frames` in `meta/dataset.json`, and
+   `scripts/test.py --phase_mode progress --phase_episode_seconds <median/30>`
+   reproduces the same prompt online from elapsed wall-clock. It degrades
+   gracefully — a slow attempt just reaches the later folds late — but the
+   train/deploy signals are not identical, so `PHASE_MODE=none` remains the
+   conservative choice.
 2. **More seasons before more epochs** — `run_prepare.sh dense`. Ten seasons is
    ten lighting/paper/operator conditions; the split is by season precisely
    because episodes within one are near-duplicates.

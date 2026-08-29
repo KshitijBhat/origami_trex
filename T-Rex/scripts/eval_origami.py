@@ -21,16 +21,32 @@ What it reports and why:
   tactile ablation      the same metrics from `forward_flow_action_full`, which
                         runs the action expert alone over the full flow.  The
                         gap is what the tactile expert buys.
-  naive baselines       hold-current-state (zero delta) and repeat-current-
-                        command.  A policy that cannot beat these has learned
-                        nothing, and on a 0.83 s horizon they are not weak.
-                        These are the floor to compare against -- the released
-                        midtrain checkpoint cannot serve as a zero-shot baseline
-                        because its action head is 62-D eef and this task is
-                        65-D joint, so it has no way to emit a valid action.
+  naive baselines       hold-current-state, repeat-current-command, and
+                        repeat-previous-command.  A policy that cannot beat
+                        these has learned nothing, and on a 0.83 s horizon they
+                        are not weak.  All three are defined in *absolute*
+                        radians, so they stay comparable across preps with
+                        different anchoring.  These are the floor to compare
+                        against -- the released midtrain checkpoint cannot serve
+                        as a zero-shot baseline because its action head is 62-D
+                        eef and this task is 65-D joint, so it has no way to
+                        emit a valid action.
+  motion metric         the same error with each chunk's own step-0 value
+                        removed, i.e. how well the *shape* of the coming motion
+                        is predicted.  This is the acceptance metric once the
+                        arms are anchored to the previous command: a policy that
+                        does nothing but copy its anchor scores a perfect step 0
+                        and gets no credit at all here.  `oracle_prev_command`
+                        and `hold_state` collapse onto the same motion score by
+                        construction -- both are constant chunks.
   safety                the local Shadow evaluator's own checks -- URDF position
                         limits, per-group step jumps and velocity at 30 Hz --
                         so a submission-blocking trajectory shows up here.
+
+Absolute radians are reconstructed through the dataset's declared per-dim
+anchoring rule (`trex_origami.anchoring`), never by adding the state: under the
+hybrid prep only the 14 arm dims are deltas from the previous command, and the
+other 51 are already joint angles.
 
 Usage:
     python scripts/eval_origami.py \
@@ -63,8 +79,9 @@ from torch.utils.data import DataLoader, Subset
 
 from qwen_vla import extend_position_ids_for_flare, split_slow_fast_embeds
 from qwen_vla.origami_dataset import (JOINT_GROUPS, OrigamiDataset,
-                                      clamp_frozen_actions, denormalize,
+                                      clamp_frozen_absolute, denormalize,
                                       frozen_action_dims)
+from trex_origami.anchoring import build_anchor, describe as describe_anchor, to_absolute
 from trex_origami.seasons import JOINT_NAMES
 
 RAD2DEG = 180.0 / math.pi
@@ -161,6 +178,11 @@ class ErrorAccumulator:
         self.horizon, self.dim = horizon, dim
         self.abs = np.zeros((horizon, dim), dtype=np.float64)
         self.sq = np.zeros((horizon, dim), dtype=np.float64)
+        # Motion-only: the same error after removing each chunk's own step-0
+        # value.  Anchor-copying is worth nothing here, which is the point.
+        self.abs_motion = np.zeros((horizon, dim), dtype=np.float64)
+        self.sq_motion = np.zeros((horizon, dim), dtype=np.float64)
+        self.n_motion = 0
         self.n = 0
         self.abs_contact = np.zeros((horizon, dim), dtype=np.float64)
         self.sq_contact = np.zeros((horizon, dim), dtype=np.float64)
@@ -169,11 +191,19 @@ class ErrorAccumulator:
         self.n_chunks_with_violation = 0
         self.throughput: List[float] = []      # amortised seconds/sample, batched
 
-    def add(self, error: np.ndarray, contact: Optional[np.ndarray] = None) -> None:
-        """error [B, T, D] in radians."""
+    def add(self, error: np.ndarray, contact: Optional[np.ndarray] = None,
+            motion_error: Optional[np.ndarray] = None) -> None:
+        """error [B, T, D] in radians; `motion_error` the step-0-removed version."""
         a, s = np.abs(error), error ** 2
         self.abs += a.sum(axis=0)
         self.sq += s.sum(axis=0)
+        if motion_error is not None:
+            self.abs_motion += np.abs(motion_error).sum(axis=0)
+            self.sq_motion += (motion_error ** 2).sum(axis=0)
+            # Counted separately from `n`: a row scored without a motion term
+            # (teleop_gt) must report no motion block rather than a zeroed one,
+            # and a hypothetical perfect predictor must still report its zero.
+            self.n_motion += motion_error.shape[0]
         self.n += error.shape[0]
         if contact is not None and contact.any():
             self.abs_contact += a[contact].sum(axis=0)
@@ -224,6 +254,8 @@ class ErrorAccumulator:
 
     def report(self) -> dict:
         out = {"overall": self._summary(self.abs, self.sq, self.n)}
+        if self.n_motion:
+            out["motion"] = self._summary(self.abs_motion, self.sq_motion, self.n_motion)
         if self.n_contact:
             out["contact"] = self._summary(self.abs_contact, self.sq_contact, self.n_contact)
             no_abs = self.abs - self.abs_contact
@@ -384,6 +416,10 @@ def dataset_config_from_checkpoint(checkpoint: str, overrides: dict) -> SimpleNa
         # Never augment at eval, and never bake FLARE future frames: they cost
         # extra parquet reads and the loss they serve is not computed here.
         state_noise_mode="none",
+        # Anchor augmentation rewrites the *label*; scoring against an augmented
+        # label would measure the augmentation, not the policy.
+        anchor_noise_mode="none",
+        anchor_dropout=0.0,
         use_flare=0,
         flare_loss_weight=0.0,
         n_flare_steps=0,
@@ -397,6 +433,33 @@ def dataset_config_from_checkpoint(checkpoint: str, overrides: dict) -> SimpleNa
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+def check_anchor_consistency(checkpoint: str, dataset) -> None:
+    """Refuse a checkpoint whose head was trained against a different anchoring.
+
+    There is no shape mismatch to catch this: a head trained to emit
+    `action - state` evaluated on data anchored to the previous command simply
+    reports a constant bias on the arms and nonsense on the 51 absolute dims,
+    with every plot looking plausible.
+    """
+    path = os.path.join(checkpoint, "training_args.json")
+    if not os.path.exists(path):
+        return
+    with open(path) as handle:
+        saved = json.load(handle)
+    if not saved.get("action_anchor"):
+        print("NOTE: this checkpoint records no `action_anchor` (trained before "
+              "per-dim anchoring existed), so it is assumed all-delta-from-state. "
+              "That matches this data only if the data was prepared that way.")
+        return
+    if tuple(saved["action_anchor"]) != tuple(dataset.anchor_spec):
+        raise SystemExit(
+            f"anchoring mismatch: the checkpoint was trained with "
+            f"'{describe_anchor(saved['action_anchor'])}' but "
+            f"{dataset.root} declares '{describe_anchor(dataset.anchor_spec)}'. "
+            f"Nothing downstream would raise -- the numbers would just be wrong. "
+            f"Evaluate on data prepared with the same --anchor-mode.")
 
 
 # ── plots ─────────────────────────────────────────────────────────────────────
@@ -720,14 +783,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if frozen.size:
         names = ", ".join(JOINT_NAMES[i] for i in frozen)
         print(f"frozen action dims from norm-stats: {frozen.tolist()} ({names}) "
-              f"-> {'clamped to delta 0' if clamp_frozen else 'NOT clamped (--clamp_frozen off)'}")
+              f"-> {'held at state[j]' if clamp_frozen else 'NOT clamped (--clamp_frozen off)'}")
     else:
         print("frozen action dims from norm-stats: none — nothing to clamp")
+
+    anchor_spec = dataset.anchor_spec
+    print(f"action anchoring: {describe_anchor(anchor_spec)}")
+    check_anchor_consistency(args.checkpoint_path, dataset)
 
     accumulators = {mode: ErrorAccumulator(horizon, dim) for mode in args.modes}
     if not args.no_baselines:
         accumulators["hold_state"] = ErrorAccumulator(horizon, dim)
         accumulators["repeat_command"] = ErrorAccumulator(horizon, dim)
+        # What the policy could get for free by echoing its own last command --
+        # the honest floor once the arms are anchored to exactly that.
+        accumulators["oracle_prev_command"] = ErrorAccumulator(horizon, dim)
 
     safety = None
     if os.path.exists(args.urdf):
@@ -741,11 +811,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # ── evaluation loop ───────────────────────────────────────────────────────
     generator = torch.Generator(device=device).manual_seed(args.seed)
     started = time.time()
+    def motion(chunk: np.ndarray) -> np.ndarray:
+        """Chunk re-expressed as motion from its own step 0."""
+        return chunk - chunk[:, :1, :]
+
     for step, batch in enumerate(loader):
-        gt_delta = batch["eval_action_raw"].numpy().astype(np.float64)   # [B, T, D]
+        gt_target = batch["eval_action_raw"].numpy().astype(np.float64)  # [B, T, D]
         state = batch["eval_state"].numpy().astype(np.float64)           # [B, D]
+        prev_command = batch["eval_prev_command"].numpy().astype(np.float64)
         contact = batch.get("eval_contact")
         contact = None if contact is None else contact.numpy()
+
+        # Everything below is scored in absolute radians -- the wire contract --
+        # so the baselines mean the same thing whatever the prep anchored to.
+        anchor = build_anchor(state, prev_command, anchor_spec)          # [B, D]
+        gt_abs = to_absolute(gt_target, anchor)                          # [B, T, D]
+        gt_motion = motion(gt_abs)
 
         for mode in args.modes:
             began = time.time()
@@ -760,38 +841,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _sync(device)
             elapsed = (time.time() - began) / max(1, normalised.shape[0])
 
-            pred_delta = denormalize(normalised.float().cpu().numpy().astype(np.float64),
-                                     action_mask, action_min, action_max)
+            pred_abs = to_absolute(
+                denormalize(normalised.float().cpu().numpy().astype(np.float64),
+                            action_mask, action_min, action_max), anchor)
             if clamp_frozen:
-                pred_delta = clamp_frozen_actions(pred_delta, action_mask)
+                pred_abs = clamp_frozen_absolute(pred_abs, action_mask, state)
             accumulator = accumulators[mode]
-            accumulator.add(pred_delta - gt_delta, contact)
+            accumulator.add(pred_abs - gt_abs, contact, motion(pred_abs) - gt_motion)
             # Amortised throughput, not request latency: batching hides the
             # per-call cost the robot actually waits on. `--latency_samples`
             # measures that separately at batch size 1.
             accumulator.throughput += [elapsed] * normalised.shape[0]
 
             if safety is not None:
-                # The wire contract is absolute radians, so safety is judged on
-                # state + delta, not on the delta itself.
-                for b in range(pred_delta.shape[0]):
-                    accumulator.add_safety(
-                        safety.check(state[b], state[b] + pred_delta[b]))
+                for b in range(pred_abs.shape[0]):
+                    accumulator.add_safety(safety.check(state[b], pred_abs[b]))
 
         if safety is not None:
             reference = accumulators["teleop_gt"]
-            reference.add(np.zeros_like(gt_delta))
-            for b in range(gt_delta.shape[0]):
-                reference.add_safety(safety.check(state[b], state[b] + gt_delta[b]))
+            reference.add(np.zeros_like(gt_abs))
+            for b in range(gt_abs.shape[0]):
+                reference.add_safety(safety.check(state[b], gt_abs[b]))
 
         if not args.no_baselines:
-            # Hold the current measured state for the whole chunk.
-            accumulators["hold_state"].add(np.zeros_like(gt_delta) - gt_delta, contact)
-            # Repeat the target already commanded at t (gt_delta[:, 0] by
-            # construction) for every step of the chunk.  Uses the current
-            # command, which the robot does know, so it is a fair reference.
-            repeat = np.repeat(gt_delta[:, :1, :], horizon, axis=1)
-            accumulators["repeat_command"].add(repeat - gt_delta, contact)
+            # Three constant chunks, all in absolute radians.  Each has zero
+            # motion by construction, so their `motion` rows are the static floor
+            # every real policy has to beat.
+            def constant(pose):
+                return np.repeat(np.asarray(pose)[:, None, :], horizon, axis=1)
+
+            for name, chunk in (
+                    # Hold the current measured state for the whole chunk.
+                    ("hold_state", constant(state)),
+                    # Repeat the target already commanded at t.  Uses the current
+                    # command, which the robot does know, so it is fair.
+                    ("repeat_command", constant(gt_abs[:, 0])),
+                    # Repeat the *previous* command -- the arms' own anchor, i.e.
+                    # exactly what "predict zero" now buys.
+                    ("oracle_prev_command", constant(prev_command))):
+                accumulators[name].add(chunk - gt_abs, contact,
+                                       motion(chunk) - gt_motion)
 
         if step % 20 == 0:
             done = (step + 1) * args.batch_size
@@ -821,17 +910,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 num_workers=args.num_workers, collate_fn=dataset.collate_fn)
             preds, gts = [], []
             for batch in trace_loader:
-                gt_delta = batch["eval_action_raw"].numpy().astype(np.float64)
+                gt_target = batch["eval_action_raw"].numpy().astype(np.float64)
                 state = batch["eval_state"].numpy().astype(np.float64)
+                anchor = build_anchor(
+                    state, batch["eval_prev_command"].numpy().astype(np.float64),
+                    anchor_spec)
                 normalised = predict(model, batch, device, args.modes[0],
                                      total_steps, split_step, generator=generator)
-                pred_delta = denormalize(
+                pred_abs = to_absolute(denormalize(
                     normalised.float().cpu().numpy().astype(np.float64),
-                    action_mask, action_min, action_max)
+                    action_mask, action_min, action_max), anchor)
                 if clamp_frozen:
-                    pred_delta = clamp_frozen_actions(pred_delta, action_mask)
-                preds.append(state + pred_delta[:, 0])
-                gts.append(state + gt_delta[:, 0])
+                    pred_abs = clamp_frozen_absolute(pred_abs, action_mask, state)
+                preds.append(pred_abs[:, 0])
+                gts.append(to_absolute(gt_target, anchor)[:, 0])
             traces.append({
                 "pred": np.concatenate(preds), "gt": np.concatenate(gts),
                 "episode": dataset.episodes[ep_i]["file"],
@@ -901,6 +993,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "frozen_action_dims": frozen.tolist(),
         "frozen_action_joints": [JOINT_NAMES[i] for i in frozen],
         "clamp_frozen": bool(clamp_frozen),
+        "action_anchor": list(anchor_spec),
         "results": reports,
         "request_latency_ms": {
             phase: {
@@ -922,29 +1015,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rates = report.get("safety", {}).get("violation_rate_per_value")
         return None if rates is None else 100 * sum(rates.values())
 
-    print(f"\n{'model':<16} {'MAE(deg)':>10} {'RMSE(deg)':>10} {'MSE':>10} "
-          f"{'MAE contact':>12} {'unsafe%':>9}")
-    print("-" * 74)
+    print(f"\n{'model':<20} {'MAE(deg)':>10} {'motion':>9} {'RMSE(deg)':>10} "
+          f"{'MSE':>10} {'MAE contact':>12} {'unsafe%':>9}")
+    print("-" * 87)
     for name, report in reports.items():
         if name == "teleop_gt":
             continue
         overall = report.get("overall", {})
         contact = report.get("contact", {})
         unsafe = _unsafe(report)
-        print(f"{name:<16} {overall.get('mae_deg', float('nan')):>10.3f} "
+        print(f"{name:<20} {overall.get('mae_deg', float('nan')):>10.3f} "
+              f"{report.get('motion', {}).get('mae_deg', float('nan')):>9.3f} "
               f"{overall.get('rmse_deg', float('nan')):>10.3f} "
               f"{overall.get('mse', float('nan')):>10.5f} "
               f"{contact.get('mae_deg', float('nan')):>12.3f} "
               f"{'' if unsafe is None else f'{unsafe:>8.3f}%'}")
     if "teleop_gt" in reports:
         rate = _unsafe(reports["teleop_gt"]) or 0.0
-        print(f"{'teleop_gt':<16} {'-':>10} {'-':>10} {'-':>10} {'-':>12} "
+        print(f"{'teleop_gt':<20} {'-':>10} {'-':>9} {'-':>10} {'-':>10} {'-':>12} "
               f"{rate:>8.3f}%   <- reference floor: the demonstrations' own rate, "
               f"since the URDF's finger limits are tighter than the hardware")
+    print("\n`motion` is MAE after removing each chunk's own step 0: the constant "
+          "baselines\nscore the static floor there, so a policy only beats them by "
+          "predicting movement.")
     for baseline in baselines:
         overall = baseline["overall"]
-        print(f"{baseline['source'][:16]:<16} {overall['mae_deg']:>10.3f} "
-              f"{overall['rmse_deg']:>10.3f} {overall['mse']:>10.5f}"
+        print(f"{baseline['source'][:20]:<20} {overall['mae_deg']:>10.3f} "
+              f"{'-':>9} {overall['rmse_deg']:>10.3f} {overall['mse']:>10.5f}"
               f"{'':>12} {'  (kit replay)':>8}")
     n_plots = len([f for f in os.listdir(args.out_dir) if f.endswith(".png")])
     if latency["total"]:

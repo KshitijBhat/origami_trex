@@ -75,8 +75,9 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from qwen_vla.origami_dataset import (JOINT_GROUPS, OrigamiDataset,
-                                      clamp_frozen_actions, denormalize,
+                                      clamp_frozen_absolute, denormalize,
                                       frozen_action_dims)
+from trex_origami.anchoring import build_anchor, describe as describe_anchor, to_absolute
 from trex_origami.seasons import JOINT_NAMES
 
 RAD2DEG = 180.0 / math.pi
@@ -341,7 +342,8 @@ def write_plots(out_dir: str, chunk_reports: Dict[str, dict],
                 marker="o", color=f"C{i}", label=f"{mode} (raw)")
         ax.plot(draws, [overall(f"{mode}_k{k}_safe", "mae_deg") for k in draws],
                 marker="s", ls="--", color=f"C{i}", label=f"{mode} (safety-projected)")
-    for name, color in (("hold_state", "gray"), ("repeat_command", "black")):
+    for name, color in (("hold_state", "gray"), ("repeat_command", "black"),
+                        ("oracle_prev_command", "tab:brown")):
         value = overall(name, "mae_deg")
         if math.isfinite(value):
             ax.axhline(value, color=color, lw=1, ls=":", alpha=0.8)
@@ -394,7 +396,7 @@ def write_plots(out_dir: str, chunk_reports: Dict[str, dict],
             "overall", {}).get("per_horizon_step_mae_deg")
         if curve:
             ax.plot(range(len(curve)), curve, marker="o", ms=3, label=f"K={k}")
-    for name in ("hold_state", "repeat_command"):
+    for name in ("hold_state", "repeat_command", "oracle_prev_command"):
         curve = chunk_reports.get(name, {}).get("overall", {}).get(
             "per_horizon_step_mae_deg")
         if curve:
@@ -551,7 +553,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     frozen = frozen_action_dims(action_mask)
     clamp = args.clamp_frozen == "auto" and frozen.size > 0
     print(f"frozen action dims {frozen.tolist()} -> "
-          f"{'clamped' if clamp else 'not clamped'}")
+          f"{'held at state[j]' if clamp else 'not clamped'}")
+    anchor_spec = dataset.anchor_spec
+    print(f"action anchoring: {describe_anchor(anchor_spec)}")
+    EV.check_anchor_consistency(args.checkpoint_path, dataset)
 
     checker = projector = None
     if os.path.exists(args.urdf):
@@ -561,10 +566,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"WARNING: URDF not found at {args.urdf}; safety checks and the "
               f"safety projection are disabled")
 
-    def denorm(normalised: torch.Tensor) -> np.ndarray:
+    def to_abs(normalised: torch.Tensor, anchor: np.ndarray,
+               state: np.ndarray) -> np.ndarray:
+        """Denormalise and reconstruct absolute radians for every draw.
+
+        `normalised` is [B, K, T, D] (or [B, T, D]); `anchor` is [B, D], so it
+        broadcasts across the draw axis.  Averaging draws afterwards is safe
+        because both denormalisation and the anchor add are affine — the mean of
+        K absolute chunks is the absolute chunk of the mean.
+        """
         pred = denormalize(normalised.float().cpu().numpy().astype(np.float64),
                            action_mask, action_min, action_max)
-        return clamp_frozen_actions(pred, action_mask) if clamp else pred
+        extra = pred.ndim - 2 - anchor.ndim + 1        # draw axes to insert
+        a = anchor.reshape(anchor.shape[0], *([1] * extra), 1, anchor.shape[-1])
+        out = pred + a
+        return clamp_frozen_absolute(
+            out, action_mask,
+            state.reshape(state.shape[0], *([1] * extra), state.shape[-1])
+        ) if clamp else out
 
     # ═══════════════════ pass 1: chunk-level, strided ═════════════════════════
     if args.num_eval_samples and args.num_eval_samples < len(dataset):
@@ -591,43 +610,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     started = time.time()
     k_chunk = max(draws)
     for step, batch in enumerate(loader):
-        gt_delta = batch["eval_action_raw"].numpy().astype(np.float64)
         state = batch["eval_state"].numpy().astype(np.float64)
+        prev_command = batch["eval_prev_command"].numpy().astype(np.float64)
         contact = batch.get("eval_contact")
         contact = None if contact is None else contact.numpy()
+        anchor = build_anchor(state, prev_command, anchor_spec)
+        gt_abs = to_absolute(
+            batch["eval_action_raw"].numpy().astype(np.float64), anchor)
+        # Motion-only: each chunk against its own step 0, so a variant is not
+        # credited for an anchor it was handed.  See eval_origami.ErrorAccumulator.
+        motion = lambda c: c - c[:, :1, :]
+        gt_motion = motion(gt_abs)
 
         for mode in args.modes:
             # Same seed for both modes: paired noise, so the cascaded-vs-blind
             # gap is the tactile expert's effect, not sampling variance.
             generator.manual_seed(args.seed * 1_000_003 + step)
-            pred_all = denorm(predict_draws(
+            pred_all = to_abs(predict_draws(
                 model, batch, device, mode, total_steps, split_step,
-                k_chunk, generator=generator, max_flow_batch=args.max_flow_batch))
+                k_chunk, generator=generator, max_flow_batch=args.max_flow_batch),
+                anchor, state)
 
             for k in draws:
                 pred = pred_all[:, :k].mean(axis=1)
                 name = f"{mode}_k{k}"
-                acc(name).add(pred - gt_delta, contact)
+                acc(name).add(pred - gt_abs, contact, motion(pred) - gt_motion)
                 smooths[name].add(pred)
                 if projector is not None:
-                    safe = projector.project(state, state + pred) - state
-                    acc(f"{name}_safe").add(safe - gt_delta, contact)
+                    safe = projector.project(state, pred)
+                    acc(f"{name}_safe").add(safe - gt_abs, contact,
+                                            motion(safe) - gt_motion)
                     smooths[f"{name}_safe"].add(safe)
                     for b in range(pred.shape[0]):
-                        accs[name].add_safety(
-                            checker.check(state[b], state[b] + pred[b]))
+                        accs[name].add_safety(checker.check(state[b], pred[b]))
                         accs[f"{name}_safe"].add_safety(
-                            checker.check(state[b], state[b] + safe[b]))
+                            checker.check(state[b], safe[b]))
 
-        acc("hold_state").add(np.zeros_like(gt_delta) - gt_delta, contact)
-        acc("repeat_command").add(
-            np.repeat(gt_delta[:, :1, :], horizon, axis=1) - gt_delta, contact)
-        acc("teleop_gt").add(np.zeros_like(gt_delta))
-        smooths["teleop_gt"].add(gt_delta)
+        const = lambda pose: np.repeat(np.asarray(pose)[:, None, :], horizon, axis=1)
+        for name, chunk in (("hold_state", const(state)),
+                            ("repeat_command", const(gt_abs[:, 0])),
+                            ("oracle_prev_command", const(prev_command))):
+            acc(name).add(chunk - gt_abs, contact, motion(chunk) - gt_motion)
+        acc("teleop_gt").add(np.zeros_like(gt_abs))
+        smooths["teleop_gt"].add(gt_abs)
         if checker is not None:
-            for b in range(gt_delta.shape[0]):
-                accs["teleop_gt"].add_safety(
-                    checker.check(state[b], state[b] + gt_delta[b]))
+            for b in range(gt_abs.shape[0]):
+                accs["teleop_gt"].add_safety(checker.check(state[b], gt_abs[b]))
 
         if step % 10 == 0:
             print(f"  {(step + 1) * args.batch_size}/{len(eval_set)} samples | "
@@ -678,20 +706,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for bstep, batch in enumerate(ep_loader):
                 generator.manual_seed(args.seed * 1_000_003
                                       + ep_i * 10_007 + bstep * 101)
-                ep_pred.append(denorm(predict_draws(
+                b_state = batch["eval_state"].numpy().astype(np.float64)
+                b_anchor = build_anchor(
+                    b_state,
+                    batch["eval_prev_command"].numpy().astype(np.float64),
+                    anchor_spec)
+                ep_pred.append(to_abs(predict_draws(
                     model, batch, device, args.rollout_mode, total_steps,
                     split_step, args.rollout_draws, generator=generator,
-                    max_flow_batch=args.max_flow_batch)))
-                ep_gt.append(batch["eval_action_raw"].numpy().astype(np.float64))
-                ep_state.append(batch["eval_state"].numpy().astype(np.float64))
-            pred = np.concatenate(ep_pred)              # [R, K, T, D] deltas
-            gt = np.concatenate(ep_gt)                  # [R, T, D]
+                    max_flow_batch=args.max_flow_batch), b_anchor, b_state))
+                ep_gt.append(to_absolute(
+                    batch["eval_action_raw"].numpy().astype(np.float64), b_anchor))
+                ep_state.append(b_state)
+            pred = np.concatenate(ep_pred)              # [R, K, T, D] absolute
+            gt = np.concatenate(ep_gt)                  # [R, T, D] absolute
             state = np.concatenate(ep_state)            # [R, D]
 
-            plans_single = state[:, None, :] + pred[:, 0]
-            plans_mean = state[:, None, :] + pred.mean(axis=1)
+            plans_single = pred[:, 0]
+            plans_mean = pred.mean(axis=1)
             gt_stream = np.concatenate(
-                [state[r] + gt[r, :gap] for r in range(gt.shape[0])])
+                [gt[r, :gap] for r in range(gt.shape[0])])
             stitched = {
                 "single_draw": np.concatenate(
                     [plans_single[r, :gap] for r in range(gt.shape[0])]),
@@ -772,6 +806,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "cascaded_total_steps": total_steps,
         "cascaded_split_step": split_step,
         "clamp_frozen": bool(clamp),
+        "action_anchor": list(anchor_spec),
         "safety_projection": {
             "position_mode": args.clamp_positions,
             "rate_margin": args.rate_margin,
@@ -793,11 +828,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return None if rates is None else 100 * sum(rates.values())
 
     print(f"\nchunk pass ({len(eval_set)} samples)")
-    print(f"{'config':<22} {'MAE(deg)':>9} {'RMSE(deg)':>10} {'MAE contact':>12} "
-          f"{'jerk(deg)':>10} {'unsafe%':>9}")
-    print("-" * 78)
+    print(f"{'config':<22} {'MAE(deg)':>9} {'motion':>9} {'RMSE(deg)':>10} "
+          f"{'MAE contact':>12} {'jerk(deg)':>10} {'unsafe%':>9}")
+    print("-" * 87)
     order = ([f"{m}_k{k}{s}" for m in args.modes for k in draws
-              for s in ("", "_safe")] + ["hold_state", "repeat_command", "teleop_gt"])
+              for s in ("", "_safe")]
+             + ["hold_state", "repeat_command", "oracle_prev_command", "teleop_gt"])
     for name in order:
         if name not in chunk_reports:
             continue
@@ -806,6 +842,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         jerk = smooth_reports.get(name, {}).get("mean_abs_2nd_diff_deg", float("nan"))
         unsafe = _unsafe(chunk_reports[name])
         print(f"{name:<22} {overall.get('mae_deg', float('nan')):>9.3f} "
+              f"{chunk_reports[name].get('motion', {}).get('mae_deg', float('nan')):>9.3f} "
               f"{overall.get('rmse_deg', float('nan')):>10.3f} "
               f"{contact.get('mae_deg', float('nan')):>12.3f} "
               f"{jerk:>10.3f} "
