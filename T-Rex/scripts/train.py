@@ -1577,6 +1577,11 @@ if __name__ == "__main__":
                         help="row groups mixed per block-shuffle window")
     parser.add_argument("--origami_cache_groups", type=int, default=8,
                         help="row groups held per dataloader worker")
+    parser.add_argument("--head_crop_box", type=str, default="",
+                        help="'top,bottom,left,right' pixels to crop the head "
+                             "camera to before the vision processor (empty = "
+                             "off, full frame). Same box must be applied in "
+                             "TeamPolicy.infer() at serving.")
     parser.add_argument("--state_noise_mode", type=str, default="none",
                         choices=["none", "joint"],
                         help="state augmentation for --use_robot_state 1; the "

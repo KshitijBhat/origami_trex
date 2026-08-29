@@ -59,10 +59,15 @@ RUN_NAME="${RUN_NAME:-${EXPERIMENT_NAME}_$(date +%m%d_%H%M)}"
 # ── action space ──────────────────────────────────────────────────────────────
 # 65-D absolute-radian joints is the competition's wire contract, and the
 # dataset has no eef poses (observation.state.tcp is identically zero), so
-# T-Rex's native eef-62 is unavailable.  Chunk 25 == the kit's action_horizon;
-# no weight depends on chunk length, only the number of action tokens.
+# T-Rex's native eef-62 is unavailable.  ACTION_DIM is fixed by that contract.
+# ACTION_CHUNK is NOT kit-fixed -- `action_horizon` is a participant-declared
+# metadata value in [1, 1024] (participant_zenoh_submission.md:148); 25 was
+# just this team's choice (0.83s @ 30Hz). Reference T-Rex trains at chunk 16
+# (scripts/train.sh); changing this requires re-running `prepare_fast.py`
+# with a matching --action-chunk (baked into the data at prep time) and
+# updating the served action_horizon/TeamPolicy(action_chunk=...) to match.
 ACTION_DIM=65
-ACTION_CHUNK=25
+ACTION_CHUNK="${ACTION_CHUNK:-25}"
 
 # ── budget ────────────────────────────────────────────────────────────────────
 # The paper trains at effective batch 128 (16 x 8 GPUs) with LR 1e-4.  At
@@ -147,6 +152,7 @@ accelerate launch \
     --origami_root "${ORIGAMI_ROOT}" \
     --origami_val_root "${ORIGAMI_VAL_ROOT}" \
     --origami_sampler block --origami_pool_groups 32 --origami_cache_groups 8 \
+    --head_crop_box "${HEAD_CROP_BOX:-}" \
     --output_dir "${OUTPUT_DIR}" --log_dir "${OUTPUT_DIR}" \
     --experiment_name "${EXPERIMENT_NAME}" --run_name "${RUN_NAME}" \
     --n_epochs "${N_EPOCHS}" --save_freq 1 --max_ckpts 3 \

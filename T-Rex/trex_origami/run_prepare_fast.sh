@@ -55,8 +55,10 @@ echo ">>> tier=${TIER}  stride=${STRIDE}  train_limit=${TRAIN_LIMIT}  val_limit=
 echo ">>> out=${OUT_ROOT}/${TIER}  cache=${CACHE_ROOT}"
 echo ">>> downloaders=${DOWNLOADERS}  converters=${CONVERTERS}  disk_budget=${DISK_BUDGET} seasons"
 
+ACTION_CHUNK="${ACTION_CHUNK:-25}"
+
 COMMON=(--cache-root "${CACHE_ROOT}" --sample-stride "${STRIDE}"
-        --action-chunk 25 --chunk-stride 1 --image-size 224
+        --action-chunk "${ACTION_CHUNK}" --chunk-stride 1 --image-size 224
         --vqvae-window 16 --phase-mode none
         --downloaders "${DOWNLOADERS}" --converters "${CONVERTERS}"
         --disk-budget "${DISK_BUDGET}")

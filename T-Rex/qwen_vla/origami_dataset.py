@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import os
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import PIL.Image
@@ -43,7 +43,7 @@ import torch.nn.functional as F
 # everything else — the MoT backbone, the tactile expert, the VQ-VAE and the
 # deform encoder — transfers unchanged.
 ACTION_DIM = 65
-ACTION_CHUNK = 25          # == the kit's action_horizon (0.83 s at 30 Hz)
+ACTION_CHUNK = 25          # served as action_horizon (0.83 s at 30 Hz); participant-chosen, not kit-fixed
 N_FINGERS = 10
 F6_PER_FINGER = 6
 F6_DIM = 60
@@ -60,6 +60,20 @@ JOINT_GROUPS = (
     ("right_hand", 36, 58),
     ("motor", 58, 65),
 )
+
+
+def _parse_crop_box(spec: str) -> Optional[Tuple[int, int, int, int]]:
+    """"top,bottom,left,right" (pixels, in the stored image) -> a 4-tuple, or
+    None when empty. Same box convention as `reprep_seasons_filtered.ipynb`'s
+    `HEAD_CROP_BOX` and the wire contract's square frames -- crop only, no
+    resize here, so the vision processor's own `smart_resize` does the (single)
+    upscale back to its token-count floor instead of a second, redundant one.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return None
+    top, bottom, left, right = (int(v) for v in spec.split(","))
+    return top, bottom, left, right
 
 
 def _normalize(values, mask, vmin, vmax):
@@ -182,6 +196,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
         # ── flags (mirror SftDataset / TRexLeRobotDataset) ──
         g = lambda k, d=0: getattr(config, k, d)
         self.image_size = tuple(config.image_size) if g("image_size", None) else None
+        self.head_crop_box = _parse_crop_box(g("head_crop_box", ""))
         self.use_flare = bool(g("use_flare", 0))
         self.flare_weight = float(g("flare_loss_weight", 0.5))
         self.n_flare_steps = int(g("n_flare_steps", 0)) if self.use_flare else 0
@@ -308,9 +323,12 @@ class OrigamiDataset(torch.utils.data.Dataset):
         return {k: tbl[k][off] for k in tbl.column_names}
 
     # ── decode helpers ─────────────────────────────────────────────────────
-    def _pil(self, blob) -> PIL.Image.Image:
+    def _pil(self, blob, field: str = "") -> PIL.Image.Image:
         import io
         img = PIL.Image.open(io.BytesIO(blob.as_py())).convert("RGB")
+        if field == "head" and self.head_crop_box is not None:
+            top, bottom, left, right = self.head_crop_box
+            return img.crop((left, top, right, bottom))
         if self.image_size is not None and img.size != self.image_size:
             img = img.resize(self.image_size, PIL.Image.LANCZOS)
         return img
@@ -340,7 +358,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
                                  dtype=np.float32).reshape(self.action_chunk, self.action_dim),
             "action_abs": np.asarray(r["action_abs"].as_py(), dtype=np.float32),
             "task": self._task_text(ep, float(r["phase"].as_py())),
-            "head": self._pil(r["head"]),
+            "head": self._pil(r["head"], field="head"),
             "wrist_left": self._pil(r["wrist_left"]),
             "wrist_right": self._pil(r["wrist_right"]),
         }
@@ -358,7 +376,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
             for k in range(self.n_flare_steps):
                 nxt = min(row + (k + 1) * self.flare_stride, n_rows - 1)
                 rr = r if nxt == row else self._read_row(ei, nxt)
-                flare.append(self._pil(rr["head"]))
+                flare.append(self._pil(rr["head"], field="head"))
             item["flare"] = flare
         return item
 

@@ -71,7 +71,7 @@ F6_PER_FINGER = 6
 class PrepConfig:
     sample_stride: int = 5        # emit every Nth source frame (5 -> 6 Hz samples)
     chunk_stride: int = 1         # spacing *inside* the action chunk, in source frames
-    action_chunk: int = 25        # == the kit's action_horizon
+    action_chunk: int = 25        # served as action_horizon; participant-chosen, not kit-fixed (docs allow [1, 1024])
     action_dim: int = ACTION_DIM  # 65
     vqvae_window: int = 16        # F6 history length, at the native 30 Hz
     image_size: int = 224         # square, matching the 224x224 the wire delivers
