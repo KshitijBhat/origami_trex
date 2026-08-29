@@ -252,6 +252,16 @@ def check_resume(resume_checkpoint: str, train_root: str, resume_full_state: boo
         problems.warning("no --resume-checkpoint given; skipping")
         return
     if resume_full_state:
+        # The trainer hard-exits on this too, but only after the model is on the
+        # GPU -- minutes into a session that a pre-emption already cost.
+        state_dir = os.path.join(resume_checkpoint, "state")
+        if not os.path.isdir(state_dir):
+            problems.fail(
+                f"--resume-full-state but {state_dir} is missing: this "
+                f"checkpoint was written without --save_optimizer_state 1 and "
+                f"carries no optimizer/scheduler/RNG state. Resuming from it "
+                f"would restart the LR warmup from zero.")
+            return
         problems.ok("--resume-full-state: continuing the same run after a "
                     "pre-emption, so the stats are the ones it trained on")
         return

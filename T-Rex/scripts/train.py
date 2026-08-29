@@ -39,7 +39,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import LambdaLR
-from accelerate import Accelerator
+from accelerate import Accelerator, skip_first_batches
 from transformers import AutoProcessor, set_seed
 from datasets import Dataset as HFDataset
 
@@ -107,7 +107,12 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
     def lr_lambda(step):
         if step < num_warmup_steps:
             return float(step) / float(max(1, num_warmup_steps))
-        progress = float(step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        # Clamped at 1: a resumed run replays the head of an epoch (see
+        # --resume_full_state), so the optimizer can take more steps than
+        # num_training_steps -- and past progress 1 this cosine turns back *up*
+        # toward the peak LR instead of holding the min_lr_ratio floor.
+        progress = min(1.0, float(step - num_warmup_steps)
+                       / float(max(1, num_training_steps - num_warmup_steps)))
         cosine = 0.5 * (1.0 + math.cos(math.pi * 2 * num_cycles * progress))
         return (1 - min_lr_ratio) * cosine + min_lr_ratio
     return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
@@ -1047,18 +1052,40 @@ def train(args):
     model.train()
 
     # ── optional full-state resume (Colab sessions get pre-empted) ──
+    skip_batches = 0
     if args.resume_full_state and args.resume_checkpoint:
         state_dir = os.path.join(args.resume_checkpoint, "state")
         ts_path = os.path.join(args.resume_checkpoint, "training_state.json")
-        if os.path.isdir(state_dir):
-            accelerator.load_state(state_dir)
-            accelerator.print(f"Restored optimizer/scheduler/RNG from {state_dir}")
+        if not os.path.isdir(state_dir):
+            # Carrying on here would restore global_step but neither the
+            # optimizer nor the scheduler: the run prints "Resuming at epoch N"
+            # while actually restarting warmup from zero on fresh AdamW moments.
+            raise SystemExit(
+                f"--resume_full_state given but {state_dir} does not exist. "
+                f"Only checkpoints written with --save_optimizer_state 1 carry "
+                f"optimizer/scheduler/RNG state -- resume from one of those, or "
+                f"drop --resume_full_state to warm-start from the weights alone.")
+        accelerator.load_state(state_dir)
+        accelerator.print(f"Restored optimizer/scheduler/RNG from {state_dir}")
         if os.path.exists(ts_path):
             with open(ts_path) as f:
                 ts = json.load(f)
             global_step = int(ts.get("global_step", 0))
             start_epoch = int(ts.get("epoch", 0))
-            accelerator.print(f"Resuming at epoch {start_epoch}, step {global_step}")
+            # The dataloader carries no position of its own, and
+            # BlockShuffleSampler is seeded from (seed, epoch) -- so re-entering
+            # an epoch replays the *identical* batches with the LR and optimizer
+            # already advanced past them.  A full-tier epoch is ~51k micro-steps
+            # (~32 h), longer than a Colab session, so without this skip a
+            # pre-empted run never leaves the head of epoch 0.
+            per_epoch = len(dataloader)
+            skip_batches = max(0, global_step - start_epoch * per_epoch)
+            if skip_batches >= per_epoch:      # checkpoint sits on an epoch boundary
+                start_epoch += skip_batches // per_epoch
+                skip_batches %= per_epoch
+            accelerator.print(
+                f"Resuming at epoch {start_epoch}, step {global_step} "
+                f"({skip_batches} batches into the epoch)")
 
     stop_training = False
     for epoch in range(start_epoch, args.n_epochs):
@@ -1067,8 +1094,18 @@ def train(args):
         from tqdm import tqdm
         if sampler is not None and hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
-        it = (tqdm(dataloader, total=len(dataloader))
-              if accelerator.is_main_process else dataloader)
+        # Only the first epoch of a resumed run skips.  skip_first_batches keeps
+        # the sampler's order, so what it drops is exactly what already trained.
+        epoch_loader, n_batches = dataloader, len(dataloader)
+        if skip_batches:
+            accelerator.print(
+                f"Skipping the first {skip_batches} batches of epoch {epoch} "
+                f"(already trained before the pre-emption)")
+            epoch_loader = skip_first_batches(dataloader, skip_batches)
+            n_batches -= skip_batches
+            skip_batches = 0
+        it = (tqdm(epoch_loader, total=n_batches)
+              if accelerator.is_main_process else epoch_loader)
 
         for batch in it:
             raw_model = accelerator.unwrap_model(model)
