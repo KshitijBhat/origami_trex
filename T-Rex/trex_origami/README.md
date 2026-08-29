@@ -375,6 +375,15 @@ and a recorded episode cannot react, so none of them is a folding success rate;
 they rank checkpoints and localise failures. Success comes from the challenge's
 real-world lab or an Isaac Sim rollout.
 
+**Inference-time smoothing** (`scripts/eval_smoothed.py`) scores the three
+deployment-side fixes that need no retraining: batched mean-of-K flow draws
+(sampling variance falls as 1/K — K=4 removes ~75% of the removable MSE),
+ACT-style temporal ensembling over overlapping chunks in a receding-horizon
+rollout, and a safety projection that clamps the absolute command stream to
+the Shadow evaluator's own position/step/velocity limits so the violation rate
+goes to zero by construction. Chunks overlap by `25 − sample_stride` steps, so
+run the rollout pass on a stride-5 split for the full ensembling effect.
+
 ### 9. If the first run underperforms
 
 In expected-value order:
