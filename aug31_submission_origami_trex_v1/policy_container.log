@@ -1,0 +1,15 @@
+==============================================
+T-Rex Policy Server
+==============================================
+  Action horizon: 25
+  Checkpoint:     /app/checkpoints/model
+  Execution mode: async
+==============================================
+2026-08-29 20:39:54,731 INFO root: READY transport=origami-zenoh-v1 endpoint=tcp/origami-contract-router:7447 horizon=25
+2026-08-29 20:46:00,116 ERROR root: request failed operation=reset error_id=703d3ebedb834170b01ef5d98dfa974a type=ValueError
+Traceback (most recent call last):
+  File "/app/trex_policy_server.py", line 486, in _handle_query
+    response = self.process(operation, request)
+  File "/app/trex_policy_server.py", line 513, in process
+    raise ValueError("session_id does not match assigned session")
+ValueError: session_id does not match assigned session

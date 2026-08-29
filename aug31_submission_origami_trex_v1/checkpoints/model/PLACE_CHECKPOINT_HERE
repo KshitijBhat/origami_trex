@@ -1,0 +1,13 @@
+Copy the chosen checkpoint's contents directly into this checkpoints/model/
+directory (not a subdirectory) before `docker build`:
+
+  model.pt
+  config.json
+  training_args.json
+  stats_data.json
+  processor/...
+
+These are exactly what a training run directory already contains (see
+origami_trex/T-Rex/scripts/train_origami.sh's OUTPUT_DIR). Delete this file
+once the real checkpoint is in place -- entrypoint.sh checks for the five
+items above, not for this placeholder.
