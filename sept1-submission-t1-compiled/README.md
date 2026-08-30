@@ -60,5 +60,13 @@ rebuild + recreate -- `docker cp` into the running container silently does
 not persist (confirmed the hard way: a `trex_policy_server.py` patch applied
 via `docker cp` + restart did not survive, only a full image rebuild did).
 
-Final image digest, Docker Hub reference, and archive checksum are recorded
-in `manifest.json` once pushed.
+Pushed to Docker Hub as `orvizkar/origami-policy-t1:sept1-compiled`
+(digest `sha256:2516298c4e013fc2fdb182ae075d66bce4d0b514eb6d15a18d8615454be9720b`,
+image ID `sha256:69ee0390e9bc34a309556805140e4dded0bb58445fbbbcb25b7064a01405f43c`).
+See `manifest.json` for the full submission record.
+
+**Not yet final**: `licenses/THIRD_PARTY_LICENSES.txt` is an interim
+placeholder carried over from an earlier submission. Once proper license
+notices are written, the image must be rebuilt (new `image_id`/digest) and
+re-pushed before this is submission-ready -- update `manifest.json`
+accordingly at that point.

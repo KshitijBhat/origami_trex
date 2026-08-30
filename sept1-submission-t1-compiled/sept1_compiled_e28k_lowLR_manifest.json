@@ -1,0 +1,18 @@
+{
+  "submission_format": "origami-oci-registry-v1",
+  "submission_format_note": "Image pushed directly to Docker Hub and identified by the immutable registry digest below, per participant_zenoh_submission.md section 10 ('The OCI/Docker image and immutable digest or archive checksum are supplied'). A .tar.zst archive (competition_participant_complete_guide.md section 16 format) is also provided as archive_* fields below, generated via `docker save | zstd -T0 -3` on the same host and image.",
+  "team_id": "orvizkar",
+  "image": "orvizkar/origami-policy-t1:sept1-compiled",
+  "image_id": "sha256:69ee0390e9bc34a309556805140e4dded0bb58445fbbbcb25b7064a01405f43c",
+  "image_digest": "orvizkar/origami-policy-t1@sha256:2516298c4e013fc2fdb182ae075d66bce4d0b514eb6d15a18d8615454be9720b",
+  "image_size_bytes": 21028462657,
+  "archive": "orvizkar-origami-policy-t1-sept1-compiled.tar.zst",
+  "archive_size_bytes": 13114207592,
+  "archive_sha256": "5534a8ac67816a6b7e175a168c65b9de88ee4c0151a2780188b948d6fb5f5752",
+  "protocol": "origami-zenoh-v1",
+  "action_dim": 65,
+  "action_horizon": 25,
+  "execution_mode": "async",
+  "checkpoint": "checkpoint-2-8000 (epoch 2)",
+  "built_on": "RTX 4090 host, 2026-08-30/31"
+}
