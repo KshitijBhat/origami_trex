@@ -102,6 +102,37 @@ def add_tracking_error_noise(state, te_mean, te_std, action_dim):
     return noisy
 
 
+def prepare_dataloader_fds() -> None:
+    """Make the DataLoader survive 8 persistent workers x prefetch 4.
+
+    Two independent fd consumers blow the default 1024 soft limit and surface as
+    `OSError: [Errno 24] Too many open files` inside `reduce_storage`:
+      * torch's default `file_descriptor` sharing sends *one fd per tensor* to
+        the main process, and our collate emits ~10 tensors per sample;
+      * every worker holds an open ParquetFile per episode it has touched
+        (bounded in OrigamiDataset, but still up to `origami_file_cache` each).
+    Raising the soft limit to the hard limit is free; `file_system` sharing drops
+    the per-tensor fd entirely, at the cost of /dev/shm entries that leak if the
+    process is SIGKILLed.  Set TREX_SHARING_STRATEGY=file_descriptor to opt out
+    (do that if /dev/shm is small -- containers often default to 64 MB).
+    """
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = 1_048_576 if hard == resource.RLIM_INFINITY else hard
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            logger.info(f"RLIMIT_NOFILE raised {soft} -> {target}")
+    except Exception as exc:                       # non-POSIX, or a locked-down container
+        logger.warning(f"could not raise RLIMIT_NOFILE: {exc}")
+    strategy = os.environ.get("TREX_SHARING_STRATEGY", "file_system")
+    try:
+        torch.multiprocessing.set_sharing_strategy(strategy)
+        logger.info(f"torch multiprocessing sharing strategy: {strategy}")
+    except Exception as exc:
+        logger.warning(f"could not set sharing strategy {strategy!r}: {exc}")
+
+
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps,
                                      min_lr_ratio=0.0, num_cycles=0.5):
     def lr_lambda(step):
@@ -484,79 +515,253 @@ class SftDataset(Dataset):
         }
 
 
+# ── checkpoint disk accounting ────────────────────────────────────────────
+# One checkpoint costs roughly 3x the model: model.pt (bf16 weights), a second
+# copy of the weights that accelerate writes under state/, and the optimizer
+# moments.  When the volume runs out mid-write torch fails deep inside the zip
+# writer ("file write failed" / "unexpected pos NNN vs NNN") -- thousands of
+# steps into a run, leaving a half-written directory behind.  The space is
+# therefore budgeted up front at startup and re-checked before every save.
+_CKPT_MARKER = "SAVE_COMPLETE"
+
+
+def _fmt_bytes(n):
+    return f"{n / 1024**3:.1f} GiB"
+
+
+def _free_bytes(path):
+    """Free bytes on the filesystem holding `path`, walking up to the nearest
+    existing parent (output_dir may not have been created yet)."""
+    p = os.path.abspath(path)
+    while p != os.path.dirname(p) and not os.path.exists(p):
+        p = os.path.dirname(p)
+    return shutil.disk_usage(p).free
+
+
+def _dir_bytes(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for fn in files:
+            try:
+                total += os.path.getsize(os.path.join(root, fn))
+            except OSError:
+                pass
+    return total
+
+
+def estimate_checkpoint_bytes(model, args):
+    """Expected on-disk size of one checkpoint directory."""
+    params = list(model.parameters())
+    n_all   = sum(p.numel() for p in params)
+    n_train = sum(p.numel() for p in params if p.requires_grad)
+    weights = n_all * 2                        # bf16 model.pt
+    total = weights
+    if getattr(args, "save_optimizer_state", 0):
+        total += weights                       # state/ holds the weights again
+        # AdamW8bit keeps 1 B per moment; torch AdamW on bf16 params keeps 2 B.
+        per_moment = 1 if "8bit" in str(getattr(args, "optim", "")).lower() else 2
+        total += n_train * per_moment * 2      # exp_avg + exp_avg_sq
+    return int(total * 1.10)                   # processor/config/json + slack
+
+
+def _checkpoint_dirs(output_dir):
+    if not os.path.isdir(output_dir):
+        return []
+    out = [os.path.join(output_dir, f) for f in os.listdir(output_dir)
+           if f.startswith("checkpoint-")]
+    return [d for d in out if os.path.isdir(d)]
+
+
+def _is_usable_checkpoint(d):
+    """A directory that at least carries weights.  Older checkpoints predate the
+    marker file, so the weights themselves are the fallback test -- an aborted
+    save that never got as far as model.pt is pure garbage and goes first."""
+    return (os.path.exists(os.path.join(d, _CKPT_MARKER))
+            or os.path.exists(os.path.join(d, "model.pt")))
+
+
+def _prune_checkpoints(output_dir, keep):
+    """Delete checkpoints until at most `keep` remain (`keep` < 0 keeps all).
+    Unusable leftovers from a crashed save go first, then oldest by ctime."""
+    ckpts = _checkpoint_dirs(output_dir)
+    junk    = [d for d in ckpts if not _is_usable_checkpoint(d)]
+    usable  = sorted((d for d in ckpts if _is_usable_checkpoint(d)),
+                     key=os.path.getctime)
+    for d in junk:
+        logger.warning(f"Removing unusable checkpoint {d} "
+                       f"({_fmt_bytes(_dir_bytes(d))} reclaimed).")
+        shutil.rmtree(d, ignore_errors=True)
+    while keep >= 0 and len(usable) > keep:
+        d = usable.pop(0)
+        logger.info(f"Pruning old checkpoint {d} ({_fmt_bytes(_dir_bytes(d))} reclaimed).")
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def preflight_checkpoint_space(model, args, accelerator):
+    """Fail (or warn) at startup rather than after the first thousand steps."""
+    est = estimate_checkpoint_bytes(model, args)
+    args.ckpt_bytes_estimate = est
+    if not accelerator.is_main_process:
+        return est
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    existing = _checkpoint_dirs(args.output_dir)
+    existing_bytes = sum(_dir_bytes(d) for d in existing)
+    free = _free_bytes(args.output_dir)
+    keep = args.max_ckpts if args.max_ckpts > 0 else 1
+    # Rotation reclaims the checkpoints already on disk, so they count as budget.
+    budget = free + existing_bytes
+
+    accelerator.print(
+        f"[disk] checkpoint ~= {_fmt_bytes(est)} each "
+        f"(save_optimizer_state={int(bool(getattr(args, 'save_optimizer_state', 0)))}); "
+        f"free {_fmt_bytes(free)} on {args.output_dir}, "
+        f"{len(existing)} existing checkpoint(s) holding {_fmt_bytes(existing_bytes)}; "
+        f"--max_ckpts {args.max_ckpts} needs ~{_fmt_bytes(est * keep)}.")
+
+    if budget < est:
+        raise SystemExit(
+            f"Not enough disk for a single checkpoint: {_fmt_bytes(est)} needed, "
+            f"{_fmt_bytes(free)} free on {args.output_dir} "
+            f"(+{_fmt_bytes(existing_bytes)} reclaimable from existing checkpoints). "
+            f"Free space, point --output_dir at a larger volume, or drop "
+            f"--save_optimizer_state (halves the cost, at the price of full-state resume).")
+    if budget < est * keep:
+        fits = max(1, int(budget // est))
+        logger.warning(
+            f"[disk] {args.output_dir} holds only ~{fits} checkpoint(s) of "
+            f"{_fmt_bytes(est)} ({_fmt_bytes(budget)} usable), but --max_ckpts is "
+            f"{args.max_ckpts}. Saves will fail once it fills -- rerun with "
+            f"--max_ckpts {fits} or free space now.")
+    elif args.max_ckpts <= 0:
+        logger.warning(
+            f"[disk] --max_ckpts {args.max_ckpts} keeps every checkpoint; "
+            f"{_fmt_bytes(budget)} usable fits ~{int(budget // est)} of them.")
+    return est
+
+
 def save_checkpoint(model, processor, accelerator, args, epoch, global_step, stats_data):
     save_dir = os.path.join(args.output_dir, f"checkpoint-{epoch}-{global_step}")
+    need = (getattr(args, "ckpt_bytes_estimate", 0)
+            or estimate_checkpoint_bytes(accelerator.unwrap_model(model), args))
 
     if accelerator.is_main_process:
-        ckpts = [f for f in os.listdir(args.output_dir) if f.startswith("checkpoint-")]
-        if args.max_ckpts > 0 and len(ckpts) >= args.max_ckpts:
-            oldest = min(ckpts, key=lambda f: os.path.getctime(os.path.join(args.output_dir, f)))
-            shutil.rmtree(os.path.join(args.output_dir, oldest))
+        # Make room *before* writing: a loop, not a single delete, so a run that
+        # starts with more checkpoints than --max_ckpts still converges.
+        _prune_checkpoints(args.output_dir,
+                           keep=(args.max_ckpts - 1) if args.max_ckpts > 0 else -1)
+
+        free = _free_bytes(args.output_dir)
+        if free < need:
+            raise RuntimeError(
+                f"Refusing to start checkpoint {epoch}-{global_step}: needs "
+                f"~{_fmt_bytes(need)}, only {_fmt_bytes(free)} free on "
+                f"{args.output_dir}. Writing anyway would abort mid-file and "
+                f"leave a corrupt checkpoint. Free space, lower --max_ckpts, or "
+                f"set --save_optimizer_state 0.")
 
         os.makedirs(save_dir, exist_ok=True)
 
-        sd = accelerator.get_state_dict(model)
-        torch.save(sd, os.path.join(save_dir, "model.pt"))
+        try:
+            sd = accelerator.get_state_dict(model)
+            torch.save(sd, os.path.join(save_dir, "model.pt"))
 
-        processor.save_pretrained(os.path.join(save_dir, "processor"))
+            processor.save_pretrained(os.path.join(save_dir, "processor"))
 
-        src_config = os.path.join(args.model_path, "config.json")
-        if os.path.exists(src_config):
-            shutil.copy(src_config, os.path.join(save_dir, "config.json"))
+            src_config = os.path.join(args.model_path, "config.json")
+            if os.path.exists(src_config):
+                shutil.copy(src_config, os.path.join(save_dir, "config.json"))
 
-        with open(os.path.join(save_dir, "training_args.json"), "w") as f:
-            json.dump({
-                "model_path": args.model_path,
-                "action_dim": args.action_dim,
-                "action_chunk": args.action_chunk,
-                "use_robot_state": args.use_robot_state,
-                "use_tactile_deform": args.use_tactile_deform,
-                "use_tactile_vec": getattr(args, "use_tactile_vec", 0),
-                "tactile_intermediate_size": getattr(args, "tactile_intermediate_size", 0),
-                "training_stage": args.training_stage,
-                "use_flare": args.use_flare,
-                "n_flare_tokens_per_frame": args.n_flare_tokens_per_frame,
-                "n_flare_steps": args.n_flare_steps,
-                "flare_layer_index": args.flare_layer_index,
-                "use_tactile_code": getattr(args, "use_tactile_code", 0),
-                "vqvae_codebook_size": getattr(args, "vqvae_codebook_size", 64),
-                "use_tactile_vqvae": getattr(args, "use_tactile_vqvae", 0),
-                "vqvae_config": getattr(args, "vqvae_config_dict", None),
-                "paradigm": "cascaded",
-                "cascaded_total_steps": getattr(args, "cascaded_total_steps", 10),
-                "cascaded_split_step":  getattr(args, "cascaded_split_step", 6),
-                "flare_frame_stride": getattr(args, "flare_frame_stride", 2),
-                # Needed to rebuild the *dataloader* the same way at eval time:
-                # feeding a different resolution or F6 window than training
-                # silently changes the model's input without any shape error.
-                "image_size": getattr(args, "image_size", None),
-                "vqvae_window": getattr(args, "vqvae_window", 16),
-                "phase_mode": getattr(args, "phase_mode", ""),
-                "data_format": getattr(args, "data_format", "json"),
-                # What the 65 outputs are measured from.  Serving has no dataset
-                # to read it off, and reconstructing with the wrong rule is a
-                # silent bias, not an error — so it travels with the weights.
-                "action_anchor": getattr(args, "action_anchor", None),
-                "anchor_noise_mode": getattr(args, "anchor_noise_mode", "none"),
-                "anchor_dropout": getattr(args, "anchor_dropout", 0.0),
-            }, f, indent=2)
+            with open(os.path.join(save_dir, "training_args.json"), "w") as f:
+                json.dump({
+                    "model_path": args.model_path,
+                    "action_dim": args.action_dim,
+                    "action_chunk": args.action_chunk,
+                    "use_robot_state": args.use_robot_state,
+                    "use_tactile_deform": args.use_tactile_deform,
+                    "use_tactile_vec": getattr(args, "use_tactile_vec", 0),
+                    "tactile_intermediate_size": getattr(args, "tactile_intermediate_size", 0),
+                    "training_stage": args.training_stage,
+                    "use_flare": args.use_flare,
+                    "n_flare_tokens_per_frame": args.n_flare_tokens_per_frame,
+                    "n_flare_steps": args.n_flare_steps,
+                    "flare_layer_index": args.flare_layer_index,
+                    "use_tactile_code": getattr(args, "use_tactile_code", 0),
+                    "vqvae_codebook_size": getattr(args, "vqvae_codebook_size", 64),
+                    "use_tactile_vqvae": getattr(args, "use_tactile_vqvae", 0),
+                    "vqvae_config": getattr(args, "vqvae_config_dict", None),
+                    "paradigm": "cascaded",
+                    "cascaded_total_steps": getattr(args, "cascaded_total_steps", 10),
+                    "cascaded_split_step":  getattr(args, "cascaded_split_step", 6),
+                    "flare_frame_stride": getattr(args, "flare_frame_stride", 2),
+                    # Needed to rebuild the *dataloader* the same way at eval time:
+                    # feeding a different resolution or F6 window than training
+                    # silently changes the model's input without any shape error.
+                    "image_size": getattr(args, "image_size", None),
+                    "vqvae_window": getattr(args, "vqvae_window", 16),
+                    "phase_mode": getattr(args, "phase_mode", ""),
+                # The prompt every sample was trained with.  It is a constant the
+                # policy has effectively memorised as a prefix, and the robot
+                # sends its own `prompt` field, so serving has to inject this
+                # exact string back rather than trust the client's.
+                "instruction": getattr(args, "instruction", ""),
+                    "data_format": getattr(args, "data_format", "json"),
+                    # What the 65 outputs are measured from.  Serving has no dataset
+                    # to read it off, and reconstructing with the wrong rule is a
+                    # silent bias, not an error — so it travels with the weights.
+                    "action_anchor": getattr(args, "action_anchor", None),
+                    "anchor_noise_mode": getattr(args, "anchor_noise_mode", "none"),
+                    "anchor_dropout": getattr(args, "anchor_dropout", 0.0),
+                }, f, indent=2)
 
-        with open(os.path.join(save_dir, "stats_data.json"), "w") as f:
-            json.dump(stats_data, f, indent=2)
+            with open(os.path.join(save_dir, "stats_data.json"), "w") as f:
+                json.dump(stats_data, f, indent=2)
 
-        with open(os.path.join(save_dir, "training_state.json"), "w") as f:
-            json.dump({"epoch": epoch, "global_step": global_step,
-                       "learning_rate": args.learning_rate,
-                       "warmup_rates": args.warmup_rates,
-                       "min_lr_ratio": args.min_lr_ratio}, f, indent=2)
+            with open(os.path.join(save_dir, "training_state.json"), "w") as f:
+                json.dump({"epoch": epoch, "global_step": global_step,
+                           "learning_rate": args.learning_rate,
+                           "warmup_rates": args.warmup_rates,
+                           "min_lr_ratio": args.min_lr_ratio}, f, indent=2)
+
+        except Exception as e:
+            shutil.rmtree(save_dir, ignore_errors=True)
+            raise RuntimeError(
+                f"Checkpoint {epoch}-{global_step} failed while writing weights "
+                f"({type(e).__name__}: {e}); partial directory removed. "
+                f"{_fmt_bytes(_free_bytes(args.output_dir))} free on "
+                f"{args.output_dir}, ~{_fmt_bytes(need)} needed per checkpoint."
+            ) from e
 
     accelerator.wait_for_everyone()
     # Optimizer + scheduler + RNG, so a pre-empted Colab session resumes
     # exactly where it stopped instead of restarting the LR schedule.
     if getattr(args, "save_optimizer_state", 0):
         os.makedirs(save_dir, exist_ok=True)
-        accelerator.save_state(os.path.join(save_dir, "state"))
-    logger.info(f"Checkpoint {epoch}-{global_step} saved.")
+        state_dir = os.path.join(save_dir, "state")
+        try:
+            accelerator.save_state(state_dir)
+        except Exception as e:
+            # The weights are already on disk and still warm-startable, so only
+            # the truncated state/ goes -- dropping it also frees the most space.
+            if accelerator.is_main_process:
+                shutil.rmtree(state_dir, ignore_errors=True)
+            raise RuntimeError(
+                f"Checkpoint {epoch}-{global_step}: optimizer/scheduler state "
+                f"failed to write ({type(e).__name__}: {e}). The truncated "
+                f"state/ was removed; {os.path.join(save_dir, 'model.pt')} is "
+                f"intact -- resume from it without --resume_full_state "
+                f"(weights only). {_fmt_bytes(_free_bytes(args.output_dir))} "
+                f"free on {args.output_dir}, ~{_fmt_bytes(need)} needed per "
+                f"checkpoint -- free space or lower --max_ckpts before retrying."
+            ) from e
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        # Written last: its absence marks a directory an abort left behind.
+        open(os.path.join(save_dir, _CKPT_MARKER), "w").close()
+        logger.info(f"Checkpoint {epoch}-{global_step} saved "
+                    f"({_fmt_bytes(_dir_bytes(save_dir))}; "
+                    f"{_fmt_bytes(_free_bytes(args.output_dir))} free).")
 
 
 def _world_size():
@@ -986,6 +1191,9 @@ def train(args):
         # Record what the head is being trained to emit, so the checkpoint can
         # be reconstructed without the dataset it was trained on.
         args.action_anchor = list(dataset.anchor_spec)
+        args.instruction = getattr(dataset, "effective_instruction",
+                                   getattr(args, "instruction", ""))
+        accelerator.print(f"[origami] prompt: {args.instruction!r}")
     else:
         dataset = SftDataset(args, processor, accelerator)
 
@@ -1028,6 +1236,10 @@ def train(args):
     # and a resume silently restarts the warmup from 0 (the LR falls back to
     # near-zero instead of continuing the cosine decay).
     accelerator.register_for_checkpointing(lr_scheduler)
+
+    # Budget the disk before the first step: a full volume otherwise only
+    # announces itself at the first save, an hour or more into the run.
+    preflight_checkpoint_space(model, args, accelerator)
 
     if val_dataloader is not None:
         model, optimizer, dataloader, val_dataloader = accelerator.prepare(
@@ -1397,6 +1609,13 @@ def train(args):
                 stop_training = True
                 break
 
+        # skip_first_batches builds a *second* DataLoader over the same dataset;
+        # with persistent_workers it keeps its own 8 workers alive.  Drop both
+        # references here so that pool is shut down before the next epoch opens
+        # a new one, rather than overlapping it.
+        if epoch_loader is not dataloader:
+            it = epoch_loader = None
+
         if stop_training or (epoch + 1) % args.save_freq == 0 or epoch == args.n_epochs - 1:
             accelerator.wait_for_everyone()
             save_checkpoint(model, processor, accelerator, args,
@@ -1512,6 +1731,11 @@ if __name__ == "__main__":
                         help="block = shuffle at parquet row-group granularity")
     parser.add_argument("--origami_pool_groups", type=int, default=32,
                         help="row groups mixed per block-shuffle window")
+    parser.add_argument("--instruction", type=str, default="",
+                        help="language prompt for every sample; overrides the "
+                             "string baked into meta/dataset.json at prep time "
+                             "(empty = use the dataset's). The parquet rows hold "
+                             "no text, so changing it needs no re-prep.")
     parser.add_argument("--origami_cache_groups", type=int, default=8,
                         help="row groups held per dataloader worker")
     parser.add_argument("--state_noise_mode", type=str, default="none",
@@ -1565,6 +1789,9 @@ if __name__ == "__main__":
             parser.error("--data_format origami requires --origami_root")
     elif not args.data_path:
         parser.error("--data_format json requires --data_path")
+
+    # Before the Accelerator and any DataLoader worker fork.
+    prepare_dataloader_fds()
 
     args.log_dir = os.path.join(args.log_dir, args.experiment_name)
     args.output_dir = os.path.join(args.output_dir, args.experiment_name, args.run_name)
