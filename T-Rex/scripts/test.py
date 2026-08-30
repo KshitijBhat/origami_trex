@@ -211,7 +211,8 @@ def model_load(args):
                              ("vqvae_codebook_size", 64),
                              ("use_tactile_vqvae", 0),
                              ("cascaded_total_steps", 10),
-                             ("cascaded_split_step", 6)]:
+                             ("cascaded_split_step", 6),
+                             ("instruction", "")]:
             saved = ta.get(key, default)
             cli_val = getattr(args, key, default)
             if saved and cli_val == default:
@@ -465,6 +466,21 @@ class CascadedServer:
         # median episode duration (`median_episode_frames` in the prep's
         # dataset.json).  It is the same prompt for most of the attempt and it
         # degrades gracefully: a slow attempt just reaches the later folds late.
+        # ── the language prompt ──
+        # The policy trained on one constant string (--instruction, recorded in
+        # training_args.json).  The robot sends its own `prompt` field, which the
+        # competition spec says "may be empty" and the kit's example fills with
+        # "fold the plane" -- neither is what the weights saw.  Serving the
+        # client's text would put an unseen token span in front of every
+        # observation, so the trained string wins unless asked otherwise.
+        self.instruction = str(getattr(args, "instruction", "") or "")
+        self.use_client_prompt = bool(getattr(args, "use_client_prompt", 0))
+        if self.instruction and not self.use_client_prompt:
+            print(f"Prompt pinned to the trained instruction: {self.instruction!r}")
+        elif not self.instruction:
+            print("WARNING: checkpoint records no instruction; using the client's "
+                  "prompt verbatim, which may not be what the policy trained on.")
+
         self.phase_mode = str(getattr(args, "phase_mode", "none") or "none")
         self.phase_seconds = float(getattr(args, "phase_episode_seconds", 0.0))
         self.n_phases = int(getattr(args, "n_phases", 6))
@@ -597,6 +613,8 @@ class CascadedServer:
         where the progress fraction comes from (elapsed time here, the sample's
         row index there).
         """
+        if self.instruction and not self.use_client_prompt:
+            task_description = self.instruction
         if self.phase_mode != "progress":
             return task_description
         if self.episode_start is None:
@@ -978,6 +996,12 @@ if __name__ == "__main__":
                         help="0 = auto-detect from training_args.json")
     parser.add_argument("--n_flare_steps", type=int, default=0,
                         help="0 = auto-detect from training_args.json")
+    parser.add_argument("--instruction", type=str, default="",
+                        help="language prompt to serve; auto-detected from the "
+                             "checkpoint's training_args.json")
+    parser.add_argument("--use_client_prompt", type=int, default=0,
+                        help="1 = pass the caller's prompt through untouched "
+                             "instead of the string the policy trained on")
     parser.add_argument("--phase_mode", choices=["none", "progress"], default="none",
                         help="must match the prep the checkpoint trained on. "
                              "`progress` appends '(fold k of N)' to the prompt.")

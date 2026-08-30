@@ -263,6 +263,14 @@ class OrigamiDataset(torch.utils.data.Dataset):
         self.phase_mode = str(g("phase_mode", "") or cfg.get("phase_mode", "none"))
         self.n_phases = int(cfg.get("n_phases", 6))
         self.instruction = cfg.get("instruction", "")
+        # An explicit --instruction on the trainer wins over whatever prep baked
+        # into meta/dataset.json.  The parquet rows carry no text, so the prompt
+        # can be changed without re-prepping a single episode.
+        self.instruction_override = str(g("instruction", "") or "")
+        self.effective_instruction = (
+            self.instruction_override
+            or (self.episodes[0].get("instruction") if self.episodes else "")
+            or self.instruction)
 
         # The rows were written with a fixed chunk/dim/window; a mismatch here
         # would only surface much later as a reshape error inside __getitem__,
@@ -398,7 +406,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
         return split_deform_strip(np.asarray(img, dtype=np.float32) / 255.0)
 
     def _task_text(self, ep: dict, phase: float) -> str:
-        base = ep.get("instruction") or self.instruction
+        base = self.instruction_override or ep.get("instruction") or self.instruction
         mode = self.phase_mode or ep.get("phase_mode", "none")
         if mode != "progress":
             return base

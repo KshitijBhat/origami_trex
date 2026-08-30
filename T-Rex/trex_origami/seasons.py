@@ -18,10 +18,29 @@ from typing import List, Sequence, Tuple
 
 HF_REPO_ID = "SharpaIT/Robotic_Origami_Challenge"
 
-# The task string in every season's `meta/tasks.parquet`, and the organizer's
-# `default_prompt` in the serving entrypoint.  Train on the same text we will be
-# prompted with at evaluation.
-INSTRUCTION = "north ces task"
+# The prompt every sample is trained with.  It is *not* the dataset's own task
+# string -- `meta/tasks.parquet` says "north ces task" in every season, which is
+# also the organizer's `default_prompt` (openpi config.py's north_ces entries)
+# and the string the T-Rex midtrain data's "I am T-Rex." plays the same role as:
+# an opaque label carrying no information about the task.
+#
+# The prompt is constant across the dataset either way, so it can add nothing
+# per-sample; what it *can* do is pick which of Qwen3-VL's pretrained
+# visual-language priors the shared prefix lands on.  "north ces task" grounds on
+# nothing; naming the deformable object and the target figure grounds on the
+# things actually in the head camera.  Kept short deliberately -- these tokens
+# are prepended to all ~410k samples, and length costs sequence budget on every
+# forward pass.
+#
+# Because we diverge from the organizer's default_prompt, serving MUST ignore the
+# `prompt` field the robot sends (it "may be empty", and the kit's own example
+# says "fold the plane") and inject this string instead; `scripts/test.py` reads
+# it back from the checkpoint's training_args.json to do exactly that.
+INSTRUCTION = "fold the paper into a paper airplane"
+
+#: What the raw LeRobot data and the organizer's reference config call the task.
+#: Kept for provenance and for anything that needs to match the source dataset.
+DATASET_TASK_STRING = "north ces task"
 
 # Source frame rate of every stream (RGB, tactile video and the parquet rows).
 SRC_FPS = 30

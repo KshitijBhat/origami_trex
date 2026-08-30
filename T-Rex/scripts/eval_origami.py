@@ -425,6 +425,11 @@ def dataset_config_from_checkpoint(checkpoint: str, overrides: dict) -> SimpleNa
         n_flare_steps=0,
         flare_frame_stride=int(saved.get("flare_frame_stride", 4)),
         phase_mode=saved.get("phase_mode", "") or "",
+        # The prompt is a constant the policy memorised as a prefix.  A dataset
+        # prepped before --instruction existed still says "north ces task" in
+        # meta/dataset.json, so scoring has to take the string from the weights,
+        # not from the data, or it measures the model on an unseen prefix.
+        instruction=saved.get("instruction", "") or "",
         origami_sampler="random",
         origami_cache_groups=8,
         origami_val_root="",
