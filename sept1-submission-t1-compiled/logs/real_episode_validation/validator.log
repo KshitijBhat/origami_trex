@@ -1,0 +1,34 @@
+metadata: PASS (transport=origami-zenoh-v1, semantic=origami-v1, horizon=25, dim=65)
+--- train_slot: 1/3 episode(s), season=season_POC22061_2026_07_14_10_09_42_train/lerobot3.0 (competition-paper-set revision (distinct from pilot TRAIN_SEASONS/VAL_SEASONS)) ---
+/root/sharpa_north_ces_lite_sdk-main/.venv/lib/python3.10/site-packages/torchvision/io/_video_deprecation_warning.py:9: UserWarning: The video decoding and encoding capabilities of torchvision are deprecated from version 0.22 and will be removed in version 0.24. We recommend that you migrate to TorchCodec, where we'll consolidate the future decoding/encoding capabilities of PyTorch: https://github.com/pytorch/torchcodec
+  warnings.warn(
+train_slot ep=0 frame=0: PASS (339.3 ms, mae=0.1071 rad, mse=0.041584)
+train_slot ep=0 frame=1: PASS (114.5 ms, mae=0.1005 rad, mse=0.034345)
+train_slot ep=0 frame=2: PASS (114.4 ms, mae=0.0932 rad, mse=0.027634)
+train_slot ep=0 frame=3: PASS (115.1 ms, mae=0.0861 rad, mse=0.022200)
+train_slot ep=0 frame=4: PASS (112.7 ms, mae=0.0778 rad, mse=0.016966)
+train_slot ep=0 frame=5: PASS (110.2 ms, mae=0.0730 rad, mse=0.014359)
+train_slot ep=0 frame=6: PASS (117.5 ms, mae=0.0692 rad, mse=0.012549)
+train_slot ep=0 frame=7: PASS (113.6 ms, mae=0.0652 rad, mse=0.010897)
+train_slot ep=0 frame=8: PASS (112.3 ms, mae=0.0633 rad, mse=0.010128)
+train_slot ep=0 frame=9: PASS (109.1 ms, mae=0.0617 rad, mse=0.009624)
+--- val_slot: 1/3 episode(s), season=season_POC22061_2026_07_14_10_09_42_train/lerobot3.0 (competition-paper-set revision (distinct from pilot TRAIN_SEASONS/VAL_SEASONS) -- non-overlapping episode range from train_slot, same season) ---
+/root/sharpa_north_ces_lite_sdk-main/.venv/lib/python3.10/site-packages/torchvision/io/_video_deprecation_warning.py:9: UserWarning: The video decoding and encoding capabilities of torchvision are deprecated from version 0.22 and will be removed in version 0.24. We recommend that you migrate to TorchCodec, where we'll consolidate the future decoding/encoding capabilities of PyTorch: https://github.com/pytorch/torchcodec
+  warnings.warn(
+val_slot ep=3 frame=0: PASS (280.8 ms, mae=0.0931 rad, mse=0.029379)
+val_slot ep=3 frame=1: PASS (104.5 ms, mae=0.0875 rad, mse=0.023890)
+val_slot ep=3 frame=2: PASS (108.7 ms, mae=0.0809 rad, mse=0.018247)
+val_slot ep=3 frame=3: PASS (105.0 ms, mae=0.0724 rad, mse=0.012603)
+val_slot ep=3 frame=4: PASS (110.6 ms, mae=0.0676 rad, mse=0.010162)
+val_slot ep=3 frame=5: PASS (111.5 ms, mae=0.0639 rad, mse=0.008621)
+val_slot ep=3 frame=6: PASS (114.9 ms, mae=0.0613 rad, mse=0.007799)
+val_slot ep=3 frame=7: PASS (113.4 ms, mae=0.0591 rad, mse=0.007228)
+val_slot ep=3 frame=8: PASS (114.5 ms, mae=0.0590 rad, mse=0.007197)
+val_slot ep=3 frame=9: PASS (113.7 ms, mae=0.0596 rad, mse=0.007332)
+
+PASS: real-episode replay completed
+train_slot: requests=10 episodes=1 latency mean=135.9ms p50=114.0ms p95=239.5ms max=339.3ms mae=0.0797rad mse=0.020029
+val_slot: requests=10 episodes=1 latency mean=127.8ms p50=112.5ms p95=206.1ms max=280.8ms mae=0.0705rad mse=0.013246
+
+wrote /root/container_validations/run_20260830_180600/real_episode_metrics.json
+wrote /root/container_validations/run_20260830_180600/container.log

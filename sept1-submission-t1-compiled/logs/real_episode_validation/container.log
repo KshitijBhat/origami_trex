@@ -1,0 +1,89 @@
+==============================================
+T-Rex Policy Server
+==============================================
+  Action horizon: 25
+  Checkpoint:     /app/checkpoints/model
+  Execution mode: async
+==============================================
+2026-08-30 18:01:21,031 INFO root: startup flags endpoint=tcp/origami-contract-router:7447 session_id=test-session action_horizon=25 execution_mode=async TREX_CKPT_PATH=/app/checkpoints/model TREX_FULL_REFRESH_EVERY=25 (default=action_horizon) TREX_PROFILE_STEPS=0 (default, off)
+2026-08-30 18:02:05,282 INFO root: model.pt load_state_dict missing=0 unexpected=0
+2026-08-30 18:02:15,728 INFO root: model_load checkpoint=/app/checkpoints/model use_robot_state=1 use_tactile_vec=1 use_tactile_deform=1 use_tactile_vqvae=1 use_tactile_code=1 cascaded_total_steps=10 cascaded_split_step=6 action_chunk=25 action_dim=65
+2026-08-30 18:02:18,016 INFO root: TeamPolicy ready device=cuda action_horizon=25 full_refresh_every=25 use_embedded_vqvae=True vqvae_window=16 flow_compile_mode=default flow_compile_targets=tactile_flow_continue,forward_flow_action_partial
+2026-08-30 18:02:18,016 INFO root: warmup starting -- compiling tactile_flow_continue and forward_flow_action_partial (both default mode); measured ~80-100s combined on an RTX 5090 when the baked compile-cache isn't reused (see Dockerfile's compile-cache COPY note), this is a one-time cost for the process's lifetime
+2026-08-30 18:02:18,016 INFO root: policy reset episode_ticks_completed=0
+2026-08-30 18:02:18,348 INFO root: infer tick=0 observation_optional_keys=[]
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0] Graph break from `Tensor.item()`, consider setting:
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]     torch._dynamo.config.capture_scalar_outputs = True
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0] or:
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]     env TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS=1
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0] to include these operations in the captured graph.
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0] 
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0] Graph break: from user code at:
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]   File "/usr/local/lib/python3.10/dist-packages/torch/_dynamo/external_utils.py", line 69, in inner
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]     return fn(*args, **kwargs)
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]   File "/usr/local/lib/python3.10/dist-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]     return func(*args, **kwargs)
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]   File "/app/qwen_vla/modeling_vla.py", line 767, in forward_flow_action_partial
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0]     tau_split = float(time.item())
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0] 
+W0830 18:03:08.517000 1 torch/_dynamo/variables/tensor.py:1379] [0/0] 
+2026-08-30 18:04:58,459 INFO root: slow_pass tick=0 vision_ms=1246.6 slow_ms=158864.7 n_action_in_cache=164
+2026-08-30 18:05:37,500 INFO root: fast_pass tick=0 fast_ms=39040.0 actions_shape=(25, 65)
+2026-08-30 18:05:37,504 INFO root: infer tick=0 refresh=True total_ms=199155.6 mem_alloc_mb=8558.2 mem_reserved_mb=9447.7
+2026-08-30 18:05:37,504 INFO root: policy reset episode_ticks_completed=1
+2026-08-30 18:05:37,505 INFO root: infer tick=0 observation_optional_keys=[]
+2026-08-30 18:05:37,657 INFO root: slow_pass tick=0 vision_ms=44.8 slow_ms=107.2 n_action_in_cache=164
+2026-08-30 18:05:37,718 INFO root: fast_pass tick=0 fast_ms=60.7 actions_shape=(25, 65)
+2026-08-30 18:05:37,722 INFO root: infer tick=0 refresh=True total_ms=217.0 mem_alloc_mb=8558.2 mem_reserved_mb=9449.8
+2026-08-30 18:05:37,722 INFO root: policy reset episode_ticks_completed=1
+2026-08-30 18:05:37,722 INFO root: warmup complete elapsed_ms=199706.2
+2026-08-30 18:05:37,736 INFO root: READY transport=origami-zenoh-v1 endpoint=tcp/origami-contract-router:7447 horizon=25
+2026-08-30 18:06:00,434 INFO root: metadata query request_id=33116b922fa54d1c9ad38941aef4fa4c
+2026-08-30 18:06:05,887 INFO root: reset query request_id=172b9015bbab43c490789ebb0aaf8834
+2026-08-30 18:06:05,888 INFO root: policy reset episode_ticks_completed=0
+2026-08-30 18:06:06,431 INFO root: infer tick=0 observation_optional_keys=['observation/image/tactile_raw']
+2026-08-30 18:06:06,636 INFO root: slow_pass tick=0 vision_ms=99.9 slow_ms=104.0 n_action_in_cache=164
+2026-08-30 18:06:06,719 INFO root: fast_pass tick=0 fast_ms=83.0 actions_shape=(25, 65)
+2026-08-30 18:06:06,722 INFO root: infer tick=0 refresh=True total_ms=291.1 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:06:16,419 INFO root: fast_pass tick=1 fast_ms=87.0 actions_shape=(25, 65)
+2026-08-30 18:06:16,419 INFO root: infer tick=1 refresh=False total_ms=87.7 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:06:26,421 INFO root: fast_pass tick=2 fast_ms=84.5 actions_shape=(25, 65)
+2026-08-30 18:06:26,422 INFO root: infer tick=2 refresh=False total_ms=85.1 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:06:36,895 INFO root: fast_pass tick=3 fast_ms=88.9 actions_shape=(25, 65)
+2026-08-30 18:06:36,896 INFO root: infer tick=3 refresh=False total_ms=89.6 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:06:47,778 INFO root: fast_pass tick=4 fast_ms=87.2 actions_shape=(25, 65)
+2026-08-30 18:06:47,779 INFO root: infer tick=4 refresh=False total_ms=87.9 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:06:58,888 INFO root: fast_pass tick=5 fast_ms=87.0 actions_shape=(25, 65)
+2026-08-30 18:06:58,889 INFO root: infer tick=5 refresh=False total_ms=87.7 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:07:10,324 INFO root: fast_pass tick=6 fast_ms=89.6 actions_shape=(25, 65)
+2026-08-30 18:07:10,325 INFO root: infer tick=6 refresh=False total_ms=90.3 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:07:22,130 INFO root: fast_pass tick=7 fast_ms=87.8 actions_shape=(25, 65)
+2026-08-30 18:07:22,131 INFO root: infer tick=7 refresh=False total_ms=88.5 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:07:34,315 INFO root: fast_pass tick=8 fast_ms=86.7 actions_shape=(25, 65)
+2026-08-30 18:07:34,316 INFO root: infer tick=8 refresh=False total_ms=87.4 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:07:46,796 INFO root: fast_pass tick=9 fast_ms=85.4 actions_shape=(25, 65)
+2026-08-30 18:07:46,797 INFO root: infer tick=9 refresh=False total_ms=86.1 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:08:04,784 INFO root: reset query request_id=425f4650525e4b47a0fa66d02dedf0cd
+2026-08-30 18:08:04,784 INFO root: policy reset episode_ticks_completed=10
+2026-08-30 18:08:05,040 INFO root: infer tick=0 observation_optional_keys=['observation/image/tactile_raw']
+2026-08-30 18:08:05,230 INFO root: slow_pass tick=0 vision_ms=80.9 slow_ms=108.7 n_action_in_cache=164
+2026-08-30 18:08:05,291 INFO root: fast_pass tick=0 fast_ms=60.5 actions_shape=(25, 65)
+2026-08-30 18:08:05,295 INFO root: infer tick=0 refresh=True total_ms=255.6 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:08:14,854 INFO root: fast_pass tick=1 fast_ms=83.6 actions_shape=(25, 65)
+2026-08-30 18:08:14,855 INFO root: infer tick=1 refresh=False total_ms=84.3 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:08:24,883 INFO root: fast_pass tick=2 fast_ms=86.0 actions_shape=(25, 65)
+2026-08-30 18:08:24,884 INFO root: infer tick=2 refresh=False total_ms=86.7 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:08:35,119 INFO root: fast_pass tick=3 fast_ms=87.8 actions_shape=(25, 65)
+2026-08-30 18:08:35,120 INFO root: infer tick=3 refresh=False total_ms=88.5 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:08:45,821 INFO root: fast_pass tick=4 fast_ms=87.2 actions_shape=(25, 65)
+2026-08-30 18:08:45,822 INFO root: infer tick=4 refresh=False total_ms=87.9 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:08:56,779 INFO root: fast_pass tick=5 fast_ms=88.3 actions_shape=(25, 65)
+2026-08-30 18:08:56,779 INFO root: infer tick=5 refresh=False total_ms=89.1 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:09:08,120 INFO root: fast_pass tick=6 fast_ms=89.6 actions_shape=(25, 65)
+2026-08-30 18:09:08,121 INFO root: infer tick=6 refresh=False total_ms=90.4 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:09:19,668 INFO root: fast_pass tick=7 fast_ms=89.3 actions_shape=(25, 65)
+2026-08-30 18:09:19,668 INFO root: infer tick=7 refresh=False total_ms=90.0 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:09:31,750 INFO root: fast_pass tick=8 fast_ms=89.8 actions_shape=(25, 65)
+2026-08-30 18:09:31,751 INFO root: infer tick=8 refresh=False total_ms=90.5 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8
+2026-08-30 18:09:44,209 INFO root: fast_pass tick=9 fast_ms=88.4 actions_shape=(25, 65)
+2026-08-30 18:09:44,210 INFO root: infer tick=9 refresh=False total_ms=89.1 mem_alloc_mb=8567.8 mem_reserved_mb=9449.8

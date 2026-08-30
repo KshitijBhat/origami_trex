@@ -1,0 +1,65 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 3.76kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+#2 DONE 0.9s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 204B done
+#3 DONE 0.0s
+
+#4 [stage-0  1/14] FROM docker.io/nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@sha256:2fcc4280646484290cc50dce5e65f388dd04352b07cbe89a635703bd1f9aedb6
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 494.70kB 0.3s done
+#5 DONE 0.3s
+
+#6 [stage-0  2/14] RUN apt-get update && apt-get install -y --no-install-recommends     python3 python3-dev python3-pip ca-certificates     libgl1 libglib2.0-0 libgomp1 g++ gcc     && rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [stage-0  3/14] WORKDIR /app
+#7 CACHED
+
+#8 [stage-0  7/14] COPY --chown=65532:65532 --chmod=755 qwen_vla /app/qwen_vla
+#8 CACHED
+
+#9 [stage-0  4/14] RUN --mount=type=cache,target=/root/.cache/pip     python3 -m pip install --default-timeout=100 --retries=5     --index-url "https://download.pytorch.org/whl/cu128" torch==2.11.0+cu128 torchvision==0.26.0+cu128
+#9 CACHED
+
+#10 [stage-0  5/14] COPY requirements-inference.lock /tmp/requirements-inference.lock
+#10 CACHED
+
+#11 [stage-0  6/14] RUN --mount=type=cache,target=/root/.cache/pip     python3 -m pip install -r /tmp/requirements-inference.lock     && rm /tmp/requirements-inference.lock
+#11 CACHED
+
+#12 [stage-0  8/14] COPY --chown=65532:65532 --chmod=755 tactile_vqvae /app/tactile_vqvae
+#12 CACHED
+
+#13 [stage-0  9/14] COPY --chown=65532:65532 --chmod=755 trex_policy_server.py /app/trex_policy_server.py
+#13 DONE 0.1s
+
+#14 [stage-0 10/14] COPY --chown=65532:65532 --chmod=755 entrypoint.sh /app/entrypoint.sh
+#14 DONE 0.1s
+
+#15 [stage-0 11/14] COPY --chown=65532:65532 --chmod=755 compile_warmup.py /app/compile_warmup.py
+#15 DONE 0.1s
+
+#16 [stage-0 12/14] COPY --chown=65532:65532 --chmod=755 checkpoints/model /app/checkpoints/model
+#16 DONE 22.9s
+
+#17 [stage-0 13/14] COPY --chown=65532:65532 --chmod=755 compile-cache /app/compile-cache
+#17 DONE 2.2s
+
+#18 [stage-0 14/14] COPY --chown=65532:65532 --chmod=755 licenses/ /licenses/
+#18 DONE 0.1s
+
+#19 exporting to image
+#19 exporting layers
+#19 exporting layers 19.3s done
+#19 writing image sha256:69ee0390e9bc34a309556805140e4dded0bb58445fbbbcb25b7064a01405f43c done
+#19 naming to docker.io/orvizkar/origami-policy-t1:sept1-compiled 0.0s done
+#19 DONE 19.4s

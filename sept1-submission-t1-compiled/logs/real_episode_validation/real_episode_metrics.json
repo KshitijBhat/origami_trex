@@ -1,0 +1,257 @@
+{
+  "run_name": "run_20260830_180600",
+  "manifest": "/root/container_check_manifest.json",
+  "data_root": "/root/competition_paper_set_data",
+  "train_episodes_requested": 1,
+  "val_episodes_requested": 1,
+  "frame_stride": 1,
+  "frames_per_episode": 10,
+  "summary": {
+    "train_slot": {
+      "n_requests": 10,
+      "n_episodes": 1,
+      "latency_ms": {
+        "mean": 135.8575247002591,
+        "p50": 113.97775950081268,
+        "p95": 239.47937200045976,
+        "max": 339.29241400073806
+      },
+      "mae_rad_mean": 0.07970712596948469,
+      "mse_mean": 0.020028838519192738
+    },
+    "val_slot": {
+      "n_requests": 10,
+      "n_episodes": 1,
+      "latency_ms": {
+        "mean": 127.77324470007443,
+        "p50": 112.46245399979671,
+        "p95": 206.13717225014608,
+        "max": 280.7873910005583
+      },
+      "mae_rad_mean": 0.0704513949900269,
+      "mse_mean": 0.013245810815482357
+    }
+  },
+  "records": [
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 0,
+      "frame_index": 0,
+      "timestamp_s": 0.0,
+      "latency_ms": 339.29241400073806,
+      "mae_rad": 0.10713241796714605,
+      "mse": 0.041584412852803315
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 1,
+      "frame_index": 1,
+      "timestamp_s": 0.03333333507180214,
+      "latency_ms": 114.46776100092393,
+      "mae_rad": 0.10047790117346053,
+      "mse": 0.03434521373425884
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 2,
+      "frame_index": 2,
+      "timestamp_s": 0.06666667014360428,
+      "latency_ms": 114.36600300112332,
+      "mae_rad": 0.09317857099410333,
+      "mse": 0.027634092201024838
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 3,
+      "frame_index": 3,
+      "timestamp_s": 0.10000000149011612,
+      "latency_ms": 115.13159300011466,
+      "mae_rad": 0.08606217929983695,
+      "mse": 0.022200416804460946
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 4,
+      "frame_index": 4,
+      "timestamp_s": 0.13333334028720856,
+      "latency_ms": 112.65524599912169,
+      "mae_rad": 0.0778396072881567,
+      "mse": 0.016966261848200256
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 5,
+      "frame_index": 5,
+      "timestamp_s": 0.1666666716337204,
+      "latency_ms": 110.23034199934045,
+      "mae_rad": 0.07299498469641869,
+      "mse": 0.014359271060337126
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 6,
+      "frame_index": 6,
+      "timestamp_s": 0.20000000298023224,
+      "latency_ms": 117.48565400012012,
+      "mae_rad": 0.06921795757413061,
+      "mse": 0.012549438356079664
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 7,
+      "frame_index": 7,
+      "timestamp_s": 0.23333333432674408,
+      "latency_ms": 113.58951600050204,
+      "mae_rad": 0.06520620001880544,
+      "mse": 0.010897153770863786
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 8,
+      "frame_index": 8,
+      "timestamp_s": 0.2666666805744171,
+      "latency_ms": 112.30376200001047,
+      "mae_rad": 0.0632928697470836,
+      "mse": 0.01012836770405327
+    },
+    {
+      "slot": "train_slot",
+      "episode_index": 0,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 9,
+      "frame_index": 9,
+      "timestamp_s": 0.30000001192092896,
+      "latency_ms": 109.05295600059617,
+      "mae_rad": 0.06166857093570498,
+      "mse": 0.00962375685984534
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15157,
+      "frame_index": 0,
+      "timestamp_s": 0.0,
+      "latency_ms": 280.7873910005583,
+      "mae_rad": 0.09309490303166708,
+      "mse": 0.029378992373506524
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15158,
+      "frame_index": 1,
+      "timestamp_s": 0.03333333507180214,
+      "latency_ms": 104.49630800030718,
+      "mae_rad": 0.087519190217032,
+      "mse": 0.023889582387680564
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15159,
+      "frame_index": 2,
+      "timestamp_s": 0.06666667014360428,
+      "latency_ms": 108.73007600093842,
+      "mae_rad": 0.08086786746783818,
+      "mse": 0.018246888093967125
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15160,
+      "frame_index": 3,
+      "timestamp_s": 0.10000000149011612,
+      "latency_ms": 105.04581599889207,
+      "mae_rad": 0.07238775656742566,
+      "mse": 0.012603263888161577
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15161,
+      "frame_index": 4,
+      "timestamp_s": 0.13333334028720856,
+      "latency_ms": 110.56941599963466,
+      "mae_rad": 0.0676451209377606,
+      "mse": 0.010162317759439184
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15162,
+      "frame_index": 5,
+      "timestamp_s": 0.1666666716337204,
+      "latency_ms": 111.51781000080518,
+      "mae_rad": 0.06389533359833693,
+      "mse": 0.008621312347594263
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15163,
+      "frame_index": 6,
+      "timestamp_s": 0.20000000298023224,
+      "latency_ms": 114.89801599964267,
+      "mae_rad": 0.06134435809330031,
+      "mse": 0.007798610826514744
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15164,
+      "frame_index": 7,
+      "timestamp_s": 0.23333333432674408,
+      "latency_ms": 113.40709799878823,
+      "mae_rad": 0.05909451647467374,
+      "mse": 0.007227976285298079
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15165,
+      "frame_index": 8,
+      "timestamp_s": 0.2666666805744171,
+      "latency_ms": 114.5325680008682,
+      "mae_rad": 0.059031276158856366,
+      "mse": 0.007196713643114838
+    },
+    {
+      "slot": "val_slot",
+      "episode_index": 3,
+      "season_name": "season_POC22061_2026_07_14_10_09_42_train",
+      "dataset_row_index": 15166,
+      "frame_index": 9,
+      "timestamp_s": 0.30000001192092896,
+      "latency_ms": 113.7479480003094,
+      "mae_rad": 0.05963362735337809,
+      "mse": 0.007332450549546677
+    }
+  ]
+}
