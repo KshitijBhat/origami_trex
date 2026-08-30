@@ -54,11 +54,14 @@ F6_PER_FINGER = 6
 MIN_NORM_RANGE_JOINT = 1e-3
 CONTACT_THRESHOLD_N = 0.5
 MIN_CONTACT_FRACTION = 0.05
-COLUMNS = ("state", "action_chunk", "action_abs", "prev_command", "phase",
-           "tacf6_hist", "head", "wrist_left", "wrist_right", "deform")
-# What a split prepared before per-dim anchoring existed carries.  Accepted so
-# `verify` still runs against an older dataset instead of failing on schema.
-LEGACY_COLUMNS = tuple(c for c in COLUMNS if c != "prev_command")
+COLUMNS = ("state", "action_chunk", "action_chunk_abs", "action_abs",
+           "prev_command", "phase", "tacf6_hist", "head", "wrist_left",
+           "wrist_right", "deform")
+# Columns added after splits were already prepared in the wild.  A dataset
+# missing them still verifies -- the checks that need them are skipped -- so
+# `verify` runs against an older dataset instead of failing on schema.
+OPTIONAL_COLUMNS = ("prev_command", "action_chunk_abs")
+LEGACY_COLUMNS = tuple(c for c in COLUMNS if c not in OPTIONAL_COLUMNS)
 
 
 def split_deform_strip(arr: np.ndarray) -> np.ndarray:
@@ -118,7 +121,7 @@ def verify(root: str, n_samples: int = 8, seed: int = 0,
                f"{entry['file']}: {pf.metadata.num_rows} rows, meta says {entry['n_samples']}",
                problems)
         names = set(pf.schema_arrow.names)
-        _check(names in (set(COLUMNS), set(LEGACY_COLUMNS)),
+        _check(set(LEGACY_COLUMNS) <= names <= set(COLUMNS),
                f"{entry['file']}: columns {pf.schema_arrow.names}", problems)
         _check(not has_prev or "prev_command" in names,
                f"{entry['file']}: anchors arm dims to the previous command but has "
@@ -184,6 +187,8 @@ def verify(root: str, n_samples: int = 8, seed: int = 0,
         action_abs = np.asarray(table["action_abs"][i].as_py(), dtype=np.float32)
         prev_command = (np.asarray(table["prev_command"][i].as_py(), dtype=np.float32)
                         if "prev_command" in table.column_names else action_abs)
+        future_abs = (np.asarray(table["action_chunk_abs"][i].as_py(), dtype=np.float32)
+                      if "action_chunk_abs" in table.column_names else None)
 
         # ── 6. anchoring round-trip ──────────────────────────────────────────
         # `anchor + stored target` must be the wire contract, and its step 0 is
@@ -208,6 +213,19 @@ def verify(root: str, n_samples: int = 8, seed: int = 0,
                    problems)
         _check(state.shape == (dim,), f"state shape {state.shape}", problems)
         _check(chunk_arr.size == chunk * dim, f"action_chunk size {chunk_arr.size}", problems)
+        if future_abs is not None:
+            # The raw future commands are stored, not derived, so this catches a
+            # mismatch between the two action columns directly rather than
+            # relying on the reconstruction above.
+            _check(future_abs.size == chunk * dim,
+                   f"action_chunk_abs size {future_abs.size}", problems)
+            if future_abs.size == chunk * dim:
+                recon = to_absolute(chunk_arr.reshape(chunk, dim), anchor)
+                _check(np.allclose(recon, future_abs.reshape(chunk, dim), atol=1e-5),
+                       f"{entry['file']}[{i}]: anchor + action_chunk does not reproduce "
+                       f"action_chunk_abs (max |diff| "
+                       f"{np.abs(recon - future_abs.reshape(chunk, dim)).max():.2e} rad)",
+                       problems)
         _check(hist.size == window * N_FINGERS * F6_PER_FINGER,
                f"tacf6_hist size {hist.size}", problems)
         _check(np.isfinite(state).all() and np.isfinite(chunk_arr).all()

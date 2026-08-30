@@ -20,6 +20,7 @@ Row schema, at source frame `t` of an episode of length `N` starting at `s`:
 
     state         [65]        observation.state[t]
     action_chunk  [25*65]     action[min(t+k, s+N-1)] - anchor[t]     k = 0..24
+    action_chunk_abs [25*65]  action[min(t+k, s+N-1)]                 k = 0..24
     action_abs    [65]        action[t]
     prev_command  [65]        action[t-1]  (action[t] at the episode start)
     phase         float       (t - s) / (N - 1)
@@ -362,7 +363,14 @@ def build_episode_rows(
     chunk_idx = np.clip(offsets[:, None] + k_offsets[None, :], 0, last)      # [M, 25]
     anchor = build_anchor(state_all[offsets], prev_command[offsets],
                           anchor_spec(cfg.anchor_mode))                      # [M, 65]
-    chunks = (action_all[chunk_idx] - anchor[:, None, :]).astype(np.float32)  # [M, 25, 65]
+    # The raw future commands, kept alongside the anchored targets.  They are
+    # what `anchor + action_chunk` reconstructs, so nothing downstream *needs*
+    # them -- but having them on the wire means a consumer can re-anchor (or
+    # score in absolute radians) without knowing the prep's anchoring rule, and
+    # `verify` can check the round-trip against stored ground truth rather than
+    # against its own re-derivation.
+    future_abs = action_all[chunk_idx].astype(np.float32)                    # [M, 25, 65]
+    chunks = (future_abs - anchor[:, None, :]).astype(np.float32)            # [M, 25, 65]
 
     # F6 history stays on the native 30 Hz grid (the VQ-VAE's training rate),
     # left-padded by repeating the episode's first frame.
@@ -378,6 +386,7 @@ def build_episode_rows(
     rows = {
         "state": state_all[offsets],
         "action_chunk": chunks.reshape(len(offsets), -1),
+        "action_chunk_abs": future_abs.reshape(len(offsets), -1),
         "action_abs": action_all[offsets],
         "prev_command": prev_command[offsets],
         "phase": phase,
@@ -396,6 +405,7 @@ def build_episode_rows(
 _SCHEMA = pa.schema([
     ("state", pa.list_(pa.float32())),
     ("action_chunk", pa.list_(pa.float32())),
+    ("action_chunk_abs", pa.list_(pa.float32())),
     ("action_abs", pa.list_(pa.float32())),
     ("prev_command", pa.list_(pa.float32())),
     ("phase", pa.float32()),

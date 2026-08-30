@@ -42,6 +42,7 @@ At source frame `t` of an episode of length `N`:
 |---|---|---|
 | `state` | 65 | `observation.state[t]` |
 | `action_chunk` | 25×65 | `action[min(t+k, N-1)] - anchor[t]`, k = 0..24 |
+| `action_chunk_abs` | 25×65 | `action[min(t+k, N-1)]`, k = 0..24 — the same targets unanchored |
 | `action_abs` | 65 | `action[t]` |
 | `prev_command` | 65 | `action[t-1]` (`action[t]` at an episode start) |
 | `phase` | — | episode progress in [0, 1] |
