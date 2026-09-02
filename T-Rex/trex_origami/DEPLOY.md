@@ -89,10 +89,14 @@ Source: `/workspace/eval/full/checkpoint-2-7000/deploy/metrics_deploy.json`
 `latency_bench.json` (`scripts/bench_policy_latency.py`, idle A100-40GB).
 All errors are open-loop MAE in degrees against the teleoperator's commands.
 
-**Latency (eager, batch 1, A100).** cascaded 10/6: ~630 ms (19 frames);
-cascaded 5/3: ~370 ms (11 frames); blind 5: ~300 ms. K=1 vs K=8 is within
+**Latency (batch 1, A100).** Eager: cascaded 10/6 ~630 ms (19 frames),
+cascaded 5/3 ~370 ms (11 frames), blind 5 ~300 ms. K=1 vs K=8 is within
 noise (the K draws share the prefix). Two-thirds of the time is the flow
 steps themselves (~60 ms per Euler step), not the vision prefix (~40 ms).
+With `--compile 1` (torch.compile default mode on the three flow functions,
+`scripts/bench_policy_latency.py --compile 1`): 5/3 183 ms (5.5 frames),
+10/6 287 ms; cold compile 339 s, warm-cache start-up 176 s, no recompiles
+across the validator / random / varied observation patterns.
 
 **Chunk pass (K=8, oracle anchor, raw):**
 
@@ -145,3 +149,26 @@ steps themselves (~60 ms per Euler step), not the vision prefix (~40 ms).
   open-loop replay overstates this, but there is no evidence for it either.
 * Safety projection costs ~0.01 on the stream and cuts flagged values
   roughly 3x (seam jumps between chunks remain).
+* Corrected coverage numbers (the first run counted the Gateway's hold-last
+  repeats as executed; `deploy/rollout_fix/metrics_deploy.json` has the fix):
+  stale fraction 0.000 / 0.007 / 0.013 / 0.147 / 0.347 / 0.753 / 1.0 at
+  0 / 5 / 10 / 12 / 15 / 20 / 25 frames -- the analytic values above.
+
+**Real-data replay through the adapter (raw HF val season
+`season_POC22061_2026_05_19_10_18_58_train`, episodes 0/3/6/9, 40 s each from
+20 s in, wire observations built from the LeRobot v3.0 files, requests issued
+at the measured eager cadence on the idle A100;
+`scripts/replay_origami_real.py`, outputs under `deploy/replay2_*`):**
+
+| config | latency | chunk MAE | chunk MSE | executed-stream MAE | stale frames | stream jerk |
+|---|---|---|---|---|---|---|
+| cascaded 5/3 K=8 state_offset safe | 380 ms | 1.912 | 0.00359 | 2.138 | 1% | 0.85 |
+| cascaded 5/3 K=8 state safe | 377 ms | 1.957 | 0.00362 | 2.179 | 1% | 0.86 |
+| cascaded 5/3 K=1 state_offset safe | 359 ms | 2.411 | 0.00483 | 2.597 | 1% | 2.07 |
+| cascaded 10/6 K=8 state_offset safe | 648 ms | 1.925 | 0.00355 | 2.529 | 72% | 0.33 |
+
+Chunk MSE is the kit's flattened definition (`check_zenoh_policy_real_episodes.py`),
+so it is comparable to the organizer's pi0.5 numbers. The 10/6 row shows the
+latency effect directly: same chunk error, but at 19-20 frames of latency
+72% of executed frames are stale repeats (which is also why its jerk looks
+low). The teleoperator's own stream jerk on these episodes is ~0.03.
