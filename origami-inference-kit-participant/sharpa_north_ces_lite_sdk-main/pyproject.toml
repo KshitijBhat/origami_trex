@@ -1,11 +1,9 @@
 [project]
 name = "origami-participant-sdk"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "eclipse-zenoh>=1.9.0",
-    "lerobot[dataset]==0.6.0",
-    "matplotlib>=3.11.1",
     "msgpack>=1.0.5",
     "numpy>=2.2.6",
     "opencv-python>=4.13.0.92",

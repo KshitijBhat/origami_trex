@@ -12,9 +12,7 @@ import numpy as np
 
 from .contract import ACTION_DIM, JOINT_GROUPS, JOINT_NAMES
 
-DEFAULT_URDF_RELATIVE_PATH = "north_poc2_2_v3_1.urdf"
-# "urdf/north_poc2_2_with_hand_description.urdf"
-
+DEFAULT_URDF_RELATIVE_PATH = "urdf/north_poc2_2_with_hand_description.urdf"
 DEFAULT_GROUP_JUMPS = {
     "left_arm": 0.1,
     "left_hand": math.radians(60),
@@ -34,7 +32,6 @@ class TrajectoryValidator:
     ) -> None:
         self.assets_root = pathlib.Path(robot_assets_dir).expanduser().resolve()
         relative = pathlib.PurePosixPath(urdf_relative_path)
-        print('000relative', relative)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("URDF path must stay below --robot-assets-dir")
         self.urdf_path = (self.assets_root / pathlib.Path(*relative.parts)).resolve()

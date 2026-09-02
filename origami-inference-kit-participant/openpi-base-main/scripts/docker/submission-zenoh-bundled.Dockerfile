@@ -7,6 +7,8 @@
 ARG RUNTIME_IMAGE=origami-openpi-runtime:dev
 FROM ${RUNTIME_IMAGE}
 
+ARG EXECUTION_MODE=async
+LABEL org.opencontainers.image.source-kit="origami-inference-kit-async"
 USER root
 
 # Add the public Zenoh Python binding to the existing OpenPI virtual environment.
@@ -28,6 +30,7 @@ RUN chmod 0755 /app/scripts/docker/submission_zenoh_entrypoint.sh \
   && chown -R policy:policy /opt/policy/checkpoint
 
 ENV CHECKPOINT_DIR=/opt/policy/checkpoint \
+    EXECUTION_MODE=${EXECUTION_MODE} \
     HOME=/tmp/origami-home \
     XDG_CACHE_HOME=/tmp/origami-cache \
     JAX_COMPILATION_CACHE_DIR=/tmp/origami-jax-cache

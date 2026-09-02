@@ -64,6 +64,7 @@ class PolicyServerTemplateTests(unittest.TestCase):
     def test_metadata_reset_and_infer_contract(self) -> None:
         metadata = self.server.process("metadata", request("metadata"))
         self.assertEqual(metadata["metadata"]["action_horizon"], 4)
+        self.assertEqual(metadata["metadata"]["execution_mode"], "async")
         self.assertEqual(tuple(metadata["metadata"]["joint_names"]), server_module.JOINT_NAMES)
 
         reset = self.server.process("reset", request("reset"))

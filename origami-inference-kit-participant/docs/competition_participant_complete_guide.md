@@ -863,12 +863,16 @@ The OpenPI reference's formal Zenoh image can be built from the repository root:
 ```bash
 docker build \
   --build-arg RUNTIME_IMAGE=<compatible-openpi-runtime-image> \
+  --build-arg EXECUTION_MODE=sync \
   --build-context checkpoint=/absolute/path/to/checkpoint \
   --build-context python_packages=/absolute/path/to/python/site-packages \
   -f openpi-base-main/scripts/docker/submission-zenoh-bundled.Dockerfile \
   -t team-name/origami-openpi:submission \
   openpi-base-main
 ```
+
+Set `EXECUTION_MODE=sync` to request synchronous execution. The default is
+`async`; Gateway also treats images that omit execution mode metadata as async.
 
 The Python package context must contain Eclipse Zenoh 1.9. The checkpoint context
 must contain model parameters and `assets/**/norm_stats.json`.

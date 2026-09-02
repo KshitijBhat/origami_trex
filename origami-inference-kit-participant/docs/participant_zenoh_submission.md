@@ -149,6 +149,8 @@ Required reply:
         "action_type": "absolute_joint_position",
         "action_units": "radians",
         "joint_names": [...],  # exact 65 names from robot_io_spec.md
+        "execution_mode": "async",  # optional: "sync" or "async"
+        "inference_kit": "origami-inference-kit-async",
     },
 }
 ```
@@ -158,6 +160,11 @@ successful `infer` reply. `joint_names` is mandatory and must exactly equal the
 ordered 65-name list in `robot_io_spec.md`; omission, reordering, duplication,
 or model-internal padded names fail validation. Extra metadata fields are
 allowed only if they do not change required fields.
+
+`execution_mode` selects the organizer Gateway execution strategy. It may be
+`sync` or `async`; omitting it means `async`. With the
+bundled submission Dockerfile, set it while building with
+`--build-arg EXECUTION_MODE=sync` to override the async default.
 
 ### `reset`
 

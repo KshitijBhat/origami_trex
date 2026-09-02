@@ -174,6 +174,11 @@ OpenPI teams should use
 named-context build command is documented in
 `sharpa_north_ces_lite_sdk-main/scripts/README.md`.
 
+Set the image build argument `EXECUTION_MODE=sync` or `EXECUTION_MODE=async`.
+The server exposes that value in metadata, and the organizer Gateway selects the
+matching execution strategy automatically. Omitting the argument defaults to
+`async`. Set it explicitly to `sync` for synchronous execution.
+
 ## 6. Running synthetic black-box validation before reservation
 
 First, follow Section 13 of `docs/competition_participant_complete_guide.md` to start the local Zenoh
