@@ -1,0 +1,7 @@
+{
+  "epoch": 2,
+  "global_step": 7000,
+  "learning_rate": 0.00015,
+  "warmup_rates": 0.03,
+  "min_lr_ratio": 0.0
+}

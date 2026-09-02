@@ -1,0 +1,20 @@
+# torch/torchvision and their transitive CUDA closure are installed from the
+# cu124 index in the Dockerfile, before this file -- deliberately absent here.
+#
+# Versions match T-Rex's own pyproject.toml (origami_trex/T-Rex), except
+# accelerate/deepspeed/datasets/wandb/h5py/pyarrow/matplotlib/pyzmq, which
+# that file lists for training but nothing on this inference path imports.
+
+# --- origami-inference-kit-participant (wire protocol) ---
+eclipse-zenoh==1.9.0
+msgpack==1.2.1
+
+# --- T-Rex (qwen_vla + tactile_vqvae, traced imports only) ---
+transformers==4.57.3
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+safetensors==0.5.3
+numpy==2.2.6
+pillow==12.1.1
+opencv-python-headless==4.12.0.88
+timm==1.0.17
