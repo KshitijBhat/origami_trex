@@ -1,0 +1,305 @@
+<title>Tracing T-Rex</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-2: #eef0f3;
+    --border: #dde1e7;
+    --text: #14181f;
+    --text-muted: #5b6570;
+    --text-faint: #8790a0;
+    --accent: #0969da;
+    --frozen: #8790a0;
+    --frozen-bg: #eceff3;
+    --live: #1a7f37;
+    --live-bg: #e8f5ea;
+    --thawed: #c9700c;
+    --thawed-bg: #fbf0dd;
+    --mixed: #a35bc9;
+    --mixed-bg: #f5eefb;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+    --sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117;
+      --surface: #141a21;
+      --surface-2: #1b2229;
+      --border: #29323d;
+      --text: #e6edf3;
+      --text-muted: #9aa4b2;
+      --text-faint: #6b7684;
+      --accent: #58a6ff;
+      --frozen: #6b7684;
+      --frozen-bg: #1c2128;
+      --live: #3fb950;
+      --live-bg: #0f2318;
+      --thawed: #e3922a;
+      --thawed-bg: #2b2008;
+      --mixed: #c893f0;
+      --mixed-bg: #241a2b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117;
+    --surface: #141a21;
+    --surface-2: #1b2229;
+    --border: #29323d;
+    --text: #e6edf3;
+    --text-muted: #9aa4b2;
+    --text-faint: #6b7684;
+    --accent: #58a6ff;
+    --frozen: #6b7684;
+    --frozen-bg: #1c2128;
+    --live: #3fb950;
+    --live-bg: #0f2318;
+    --thawed: #e3922a;
+    --thawed-bg: #2b2008;
+    --mixed: #c893f0;
+    --mixed-bg: #241a2b;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    margin: 0;
+    padding: 44px 20px 70px;
+    font-variant-numeric: tabular-nums;
+  }
+  .page { max-width: 860px; margin: 0 auto; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin-bottom: 12px;
+  }
+  h1 { font-size: clamp(28px,4.2vw,38px); font-weight: 700; line-height: 1.08; margin: 0 0 12px; text-wrap: balance; letter-spacing: -0.01em; }
+  .dek { font-size: 15.5px; line-height: 1.55; color: var(--text-muted); max-width: 66ch; margin: 0 0 8px; }
+  .dek code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); border: 1px solid var(--border); padding: .05em .35em; border-radius: 4px; color: var(--text); }
+  .verify-note { font-size: 12.5px; color: var(--text-faint); margin: 0 0 28px; line-height: 1.5; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 34px;
+  }
+  .chip { display: flex; align-items: center; gap: 6px; font-size: 12px; font-family: var(--mono);
+    padding: 4px 10px 4px 8px; border-radius: 20px; border: 1px solid var(--border); }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .chip.frozen { color: var(--frozen); } .chip.frozen .dot { background: var(--frozen); }
+  .chip.live { color: var(--live); } .chip.live .dot { background: var(--live); }
+  .chip.thawed { color: var(--thawed); } .chip.thawed .dot { background: var(--thawed); }
+  .chip.mixed { color: var(--mixed); } .chip.mixed .dot { background: var(--mixed); }
+
+  .stage { position: relative; margin-bottom: 4px; }
+  .node {
+    border: 1px solid var(--border); background: var(--surface); border-radius: 12px;
+    padding: 16px 20px; margin-bottom: 4px;
+  }
+  .node-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .node-title { font-weight: 600; font-size: 15px; }
+  .node-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .badge { font-family: var(--mono); font-size: 10.5px; font-weight: 600; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+  .badge.frozen { color: var(--frozen); background: var(--frozen-bg); }
+  .badge.live { color: var(--live); background: var(--live-bg); }
+  .badge.thawed { color: var(--thawed); background: var(--thawed-bg); }
+  .badge.mixed { color: var(--mixed); background: var(--mixed-bg); }
+  .node-sub { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin: 0 0 8px; }
+  .shapes { display: flex; flex-wrap: wrap; gap: 6px 16px; font-family: var(--mono); font-size: 12px; }
+  .shapes .k { color: var(--text-faint); } .shapes .v { color: var(--text); font-weight: 500; }
+
+  .arrow-wrap { display: flex; justify-content: center; margin: 2px 0; }
+  .arrow-wrap svg { display: block; color: var(--text-faint); }
+  .arrow-label { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); text-anchor: middle; }
+
+  .group-label {
+    font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--text-faint); margin: 30px 0 10px;
+  }
+
+  .decoder-frame {
+    border: 1.5px dashed var(--border); border-radius: 14px; padding: 18px; margin: 4px 0 4px;
+  }
+  .decoder-frame-label { font-family: var(--mono); font-size: 12px; color: var(--text-muted); margin-bottom: 12px; text-align: center; }
+
+  .layer-strip { display: flex; gap: 2px; margin: 10px 0 4px; border-radius: 8px; overflow: hidden; }
+  .layer-cell { flex: 1; height: 26px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 9.5px; color: var(--surface); }
+  .layer-cell.f { background: var(--frozen); }
+  .layer-cell.t { background: var(--thawed); }
+  .layer-strip-caption { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+
+  .mech-caption { font-size: 12px; color: var(--text-faint); margin: 8px 0 0; line-height: 1.5; text-align: center; }
+
+  .callout {
+    border: 1px solid var(--border); background: var(--surface); border-radius: 12px;
+    padding: 20px 22px; margin-top: 34px;
+  }
+  .callout h3 { font-size: 14px; margin: 0 0 10px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
+  .callout table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .callout td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .callout td:first-child { font-family: var(--mono); color: var(--text-muted); white-space: nowrap; }
+  .callout tr:last-child td { border-bottom: none; }
+
+  footer { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 30px; font-size: 12.5px; color: var(--text-faint); line-height: 1.6; }
+  footer code { font-family: var(--mono); background: var(--surface-2); border: 1px solid var(--border); padding: .05em .35em; border-radius: 4px; }
+
+  @media (max-width: 560px) {
+    .shapes { flex-direction: column; gap: 3px; }
+  }
+</style>
+
+<div class="page">
+  <div class="eyebrow">qwen_vla/modeling_qwen3vl_mot.py · modeling_vla.py · config.json · direct weight diff</div>
+  <h1>Tracing T-Rex</h1>
+  <p class="dek">Every shape and layer count below is read directly from <code>checkpoint-2-7000</code>'s own <code>config.json</code>, or measured live off a real forward pass &mdash; nothing here is from memory.</p>
+  <p class="verify-note">Freeze status for the decoder is not inferred from the training script's defaults &mdash; it's confirmed by diffing <code>checkpoint-2-7000</code>'s weights tensor-by-tensor against the pre-origami <code>checkpoint_midtrain</code>: bit-identical = frozen, changed = trained.</p>
+
+  <div class="legend">
+    <span class="chip frozen"><span class="dot"></span>frozen (100% identical to pre-origami)</span>
+    <span class="chip live"><span class="dot"></span>always trainable</span>
+    <span class="chip thawed"><span class="dot"></span>origami-thawed (75% of tensors changed)</span>
+    <span class="chip mixed"><span class="dot"></span>mixed / not cleanly one or the other</span>
+  </div>
+
+  <div class="group-label">1 &middot; vision input</div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">camera frame</span></div>
+    <div class="shapes"><span class="k">in:</span><span class="v">480&times;480 RGB</span><span class="k">→ resize →</span><span class="v">224&times;224</span></div>
+  </div>
+  <div class="arrow-wrap"><svg viewBox="0 0 40 26" width="40" height="26" role="img" aria-label="reprocessed"><defs><marker id="a1" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="currentColor"/></marker></defs><line x1="20" y1="0" x2="20" y2="20" stroke="currentColor" stroke-width="1.5" marker-end="url(#a1)"/></svg></div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">HF image processor</span><span class="node-badges"><span class="badge frozen">fixed logic</span></span></div>
+    <p class="node-sub">Re-resizes internally to its own target resolution &mdash; the 224&times;224 input does <em>not</em> survive as-is. Patchifies at <code>patch_size=16</code>, doubles channels for <code>temporal_patch_size=2</code> (even for a static image).</p>
+    <div class="shapes"><span class="k">measured:</span><span class="v">256&times;256 → 16&times;16 = 256 patches</span><span class="k">pixel_values:</span><span class="v">[256, 1536]</span><span class="k">grid_thw:</span><span class="v">[1, 16, 16]</span></div>
+  </div>
+
+  <div class="arrow-wrap"><svg viewBox="0 0 40 26" width="40" height="26"><defs><marker id="a2" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="currentColor"/></marker></defs><line x1="20" y1="0" x2="20" y2="20" stroke="currentColor" stroke-width="1.5" marker-end="url(#a2)"/></svg></div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">ViT (<code style="font-family:var(--mono)">model.visual</code>)</span><span class="node-badges"><span class="badge frozen">frozen &mdash; always</span></span></div>
+    <p class="node-sub">24 blocks, own weights &amp; own numbering &mdash; a separate module from the 28-layer decoder below. <code>deepstack_visual_indexes=[5,11,17]</code> exist in the upstream model but this codebase discards that output and keeps only the final block's features.</p>
+    <div class="shapes"><span class="k">depth:</span><span class="v">24</span><span class="k">hidden:</span><span class="v">1024</span><span class="k">heads:</span><span class="v">16 (head_dim 64)</span><span class="k">shape:</span><span class="v">[256, 1024] unchanged thru all 24</span></div>
+  </div>
+
+  <div class="arrow-wrap"><svg viewBox="0 0 40 26" width="40" height="26"><defs><marker id="a3" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="currentColor"/></marker></defs><line x1="20" y1="0" x2="20" y2="20" stroke="currentColor" stroke-width="1.5" marker-end="url(#a3)"/></svg></div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">merger</span><span class="node-badges"><span class="badge frozen">frozen &mdash; always</span></span></div>
+    <p class="node-sub">Groups adjacent 2&times;2 patches into one token and projects up to the decoder's hidden size. This 8&times;8 grid ordering is exactly what every attention heatmap in this session's GIFs was reshaped back onto.</p>
+    <div class="shapes"><span class="k">merge:</span><span class="v">2&times;2 → 16/2 &times; 16/2 = 8&times;8</span><span class="k">out:</span><span class="v">[64, 2048]</span><span class="k">(2048 = out_hidden_size, matches decoder hidden)</span></div>
+  </div>
+
+  <div class="group-label">2 &middot; embedding assembly</div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">tokenize + embed</span></div>
+    <p class="node-sub">Instruction text runs through the chat template (<code>&lt;|im_start|&gt;user\n&lt;|vision_start|&gt;[image]&lt;|vision_end|&gt;INSTRUCTION&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n</code>), tokenized, embedded via <code>model.embed_tokens</code>.</p>
+    <div class="shapes"><span class="k">input_ids:</span><span class="v">[B, L]</span><span class="k">inputs_embeds:</span><span class="v">[B, L, 2048]</span></div>
+  </div>
+
+  <div class="arrow-wrap"><svg viewBox="0 0 40 26" width="40" height="26"><defs><marker id="a4" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="currentColor"/></marker></defs><line x1="20" y1="0" x2="20" y2="20" stroke="currentColor" stroke-width="1.5" marker-end="url(#a4)"/></svg></div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">image feature injection + M-RoPE</span></div>
+    <p class="node-sub"><code>inputs_embeds[input_ids == image_token_id] = image_features</code> &mdash; the 64 merged vision tokens overwrite their placeholder slots in place, preserving raster order. <code>get_rope_index()</code> then computes 3-D rotary positions.</p>
+    <div class="shapes"><span class="k">image_token_id:</span><span class="v">151655</span><span class="k">position_ids:</span><span class="v">[3, B, L] &mdash; mrope_section [24,20,20]</span></div>
+  </div>
+
+  <div class="group-label">3 &middot; shared decoder &mdash; 28 layers, 3 experts, one attention</div>
+
+  <div class="decoder-frame">
+    <div class="decoder-frame-label">inside every one of the 28 layers &mdash; <code style="font-family:var(--mono)">Qwen3VLDecoderLayerMoT</code></div>
+    <figure style="margin:0">
+      <svg viewBox="0 0 720 260" width="100%" role="img" aria-label="Latent, action, and tactile token streams are each projected through their own Q/K/V, concatenated into one sequence, pass through a single causal self-attention, then split back and projected through separate output heads and separate MLPs.">
+        <defs>
+          <marker id="am" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="currentColor"/></marker>
+        </defs>
+        <text x="60" y="16" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" text-anchor="middle">latent</text>
+        <text x="60" y="30" font-family="IBM Plex Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle" opacity=".6">L_lat</text>
+        <text x="230" y="16" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" text-anchor="middle">action</text>
+        <text x="230" y="30" font-family="IBM Plex Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle" opacity=".6">n_act</text>
+        <text x="400" y="16" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" text-anchor="middle">tactile</text>
+        <text x="400" y="30" font-family="IBM Plex Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle" opacity=".6">n_tac</text>
+
+        <rect x="30" y="38" width="60" height="22" rx="4" fill="none" stroke="currentColor"/>
+        <text x="60" y="53" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">q/k/v</text>
+        <rect x="200" y="38" width="60" height="22" rx="4" fill="none" stroke="currentColor"/>
+        <text x="230" y="53" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">q/k/v</text>
+        <rect x="370" y="38" width="60" height="22" rx="4" fill="none" stroke="currentColor"/>
+        <text x="400" y="53" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">q/k/v</text>
+        <text x="60" y="72" font-family="IBM Plex Mono, monospace" font-size="8.5" fill="currentColor" text-anchor="middle" opacity=".55">q_proj/k_proj/v_proj</text>
+        <text x="230" y="72" font-family="IBM Plex Mono, monospace" font-size="8.5" fill="currentColor" text-anchor="middle" opacity=".55">*_action</text>
+        <text x="400" y="72" font-family="IBM Plex Mono, monospace" font-size="8.5" fill="currentColor" text-anchor="middle" opacity=".55">*_tactile</text>
+
+        <line x1="60" y1="60" x2="220" y2="112" stroke="currentColor" stroke-width="1.2" marker-end="url(#am)"/>
+        <line x1="230" y1="60" x2="240" y2="112" stroke="currentColor" stroke-width="1.2" marker-end="url(#am)"/>
+        <line x1="400" y1="60" x2="260" y2="112" stroke="currentColor" stroke-width="1.2" marker-end="url(#am)"/>
+
+        <rect x="140" y="116" width="220" height="46" rx="6" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <text x="250" y="136" font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor" text-anchor="middle" font-weight="600">concat → ONE causal softmax</text>
+        <text x="250" y="150" font-family="IBM Plex Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle" opacity=".6">seq = [latent | action | tactile]</text>
+
+        <line x1="220" y1="162" x2="60" y2="200" stroke="currentColor" stroke-width="1.2" marker-end="url(#am)"/>
+        <line x1="240" y1="162" x2="230" y2="200" stroke="currentColor" stroke-width="1.2" marker-end="url(#am)"/>
+        <line x1="260" y1="162" x2="400" y2="200" stroke="currentColor" stroke-width="1.2" marker-end="url(#am)"/>
+
+        <rect x="30" y="204" width="60" height="22" rx="4" fill="none" stroke="currentColor"/>
+        <text x="60" y="219" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">o_proj</text>
+        <rect x="200" y="204" width="60" height="22" rx="4" fill="none" stroke="currentColor"/>
+        <text x="230" y="219" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">o_proj</text>
+        <rect x="370" y="204" width="60" height="22" rx="4" fill="none" stroke="currentColor"/>
+        <text x="400" y="219" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">o_proj</text>
+
+        <text x="60" y="248" font-family="IBM Plex Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle" opacity=".6">+ mlp → latent out</text>
+        <text x="230" y="248" font-family="IBM Plex Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle" opacity=".6">+ mlp_action → action out</text>
+        <text x="400" y="248" font-family="IBM Plex Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle" opacity=".6">+ mlp_tactile → tactile out</text>
+      </svg>
+      <figcaption class="mech-caption">Each stream has its own Q/K/V/O and its own MLP &mdash; but they're concatenated into <strong>one</strong> sequence for <strong>one</strong> causal softmax, so action/tactile queries can attend all the way back into vision+text, at every layer, through a shared KV cache.</figcaption>
+    </figure>
+  </div>
+
+  <div class="node" style="margin-top:16px">
+    <div class="node-head"><span class="node-title">latent (vision-language) expert &mdash; freeze status by layer</span></div>
+    <p class="node-sub">Confirmed by diffing all 33 tensors/layer against <code>checkpoint_midtrain</code>. Layers 0&ndash;23: <strong>264/264 latent tensors bit-identical</strong>. Layers 24&ndash;27: <strong>33/44 changed</strong>.</p>
+    <div class="layer-strip">
+      <div class="layer-cell f" style="flex:24">L0&ndash;23 &middot; frozen</div>
+      <div class="layer-cell t" style="flex:4">L24&ndash;27</div>
+    </div>
+    <div class="layer-strip-caption"><span>layer 0</span><span>layer 27</span></div>
+  </div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">action expert</span><span class="node-badges"><span class="badge live">live &mdash; every layer</span></span></div>
+    <p class="node-sub">Never frozen by <code>freeze_latent_expert</code> regardless of layer index &mdash; confirmed: changed at effectively all 28&times;11 tensors.</p>
+  </div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">tactile expert</span><span class="node-badges"><span class="badge mixed">mixed, unconfirmed pattern</span></span></div>
+    <p class="node-sub">Not cleanly frozen or trainable &mdash; layers 0&ndash;23 show 96/264 tensors identical, 168/264 changed, with no clean split by sub-module. The code's <code>freeze_tactile</code> flag would explain an all-or-nothing pattern per layer; what's measured isn't that. Flagged honestly rather than guessed at.</p>
+  </div>
+
+  <div class="group-label">4 &middot; readout</div>
+
+  <div class="node">
+    <div class="node-head"><span class="node-title">3 final norms → 2 heads</span></div>
+    <p class="node-sub"><code>norm</code> / <code>norm_action</code> / <code>norm_tactile</code>, one per stream. <code>final_layer</code> reads only the action tokens' own hidden states (<code>hidden[:, -n_chunk:, :]</code>) &mdash; never the latent stream directly; grounding reaches it only through attention, not a pooled vector (see below).</p>
+    <div class="shapes"><span class="k">action_dim:</span><span class="v">65</span><span class="k">action_chunk:</span><span class="v">25</span><span class="k">cascaded steps:</span><span class="v">10 total, split at step 6</span></div>
+  </div>
+
+  <div class="callout">
+    <h3>the readout path, precisely</h3>
+    <table>
+      <tr><td>steps 1&ndash;6</td><td><code>final_layer</code> (action expert) integrates flow velocity from <code>hidden[:, -n_chunk:, :]</code>, using cross-attention-via-shared-KV back to the full [image + text] latent sequence.</td></tr>
+      <tr><td>steps 7&ndash;10</td><td>tactile expert continues from the cached KV + fresh tactile observations; <code>final_layer_tactile</code> reads its own <code>hidden[:, -n_chunk:, :]</code>.</td></tr>
+      <tr><td>never happens</td><td>no code path pools, slices, or specially reads a single "summary" position from the latent sequence &mdash; every position (including the one this session probed as <code>last_token</code>) is just one ordinary key in the shared cache.</td></tr>
+    </table>
+  </div>
+
+  <footer>
+    Verified this session against <code>checkpoint-2-7000</code> on the current GPU box: <code>config.json</code> (exact dims), a live forward pass (<code>pixel_values.shape</code>, <code>grid_thw</code>), and a full tensor-by-tensor <code>torch.equal</code> diff against <code>checkpoint_midtrain</code> across all 28 layers &times; 33 tensors. Not sourced from the training script's argument defaults alone.
+  </footer>
+</div>
