@@ -26,12 +26,16 @@ export TOKENIZERS_PARALLELISM=false
 # run from fragmenting itself into an OOM after a few thousand steps.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-# The language prompt, read from the single source of truth so the shell and
-# the prep cannot drift apart.  Passing it explicitly matters for a dataset
-# prepped before this existed: its meta/dataset.json still says "north ces task",
-# and --instruction is what overrides it (no re-prep -- the rows hold no text).
-INSTRUCTION_EXPLICIT="${INSTRUCTION+set}"
-INSTRUCTION="${INSTRUCTION:-$(python3 -c 'from trex_origami import INSTRUCTION; print(INSTRUCTION)')}"
+# No --instruction flag here on purpose: train.py resolves args.instruction
+# from the dataset's own effective_instruction (meta/dataset.json's baked-in
+# prep-time string, e.g. DATASET_TASK_STRING = "north ces task") and records
+# whatever that resolves to into training_args.json itself (train.py:1194-1196,
+# 707). Sourcing a default here too previously meant this script's own
+# `from trex_origami import INSTRUCTION` (= "fold the paper into a paper
+# airplane") could silently outrank the dataset's real prompt -- and per
+# DEPLOY.md that phrasing is the one that measurably performs *worse* than the
+# trained "north ces task" string. Pass --instruction "..." yourself only if
+# you deliberately want to override the dataset's own prompt for an ablation.
 
 ORIGIN_MODEL_PATH="${ORIGIN_MODEL_PATH:-${ASSET_ROOT}/Qwen3-VL-2B-Instruct}"
 ORIGAMI_ROOT="${ORIGAMI_ROOT:-${DATA_ROOT}/train}"
@@ -129,24 +133,6 @@ if [ "${RESUME:-0}" = "1" ]; then
     RESUME_CHECKPOINT="${LATEST}"
     RUN_NAME="$(basename "$(dirname "${LATEST}")")"
     EXTRA_ARGS+=(--resume_full_state 1)
-    # A resumed run must not change its own prompt: the policy has been fitting
-    # one constant prefix, and swapping it mid-run makes the steps before and
-    # after disagree about what the language tokens mean.  Take the string from
-    # the checkpoint (checkpoints written before --instruction record none, so
-    # fall back to what prep baked in then) unless the caller named one.
-    if [ -z "${INSTRUCTION_EXPLICIT}" ]; then
-        INSTRUCTION="$(python3 - "${LATEST}/training_args.json" <<'EOF'
-import json, sys
-from trex_origami.seasons import DATASET_TASK_STRING
-try:
-    saved = json.load(open(sys.argv[1])).get("instruction") or ""
-except OSError:
-    saved = ""
-print(saved or DATASET_TASK_STRING)
-EOF
-)"
-        echo ">>> resumed prompt (from the checkpoint): \"${INSTRUCTION}\""
-    fi
 fi
 
 # Expected startup warnings, both benign:
@@ -185,7 +171,8 @@ echo ">>> output : ${OUTPUT_DIR}/${EXPERIMENT_NAME}/${RUN_NAME}"
 echo ">>> batch  : ${TRAIN_BSZ} x ${GRAD_ACCUM} = $((TRAIN_BSZ * GRAD_ACCUM))  lr=${LR}"
 echo ">>> sched  : cosine -> ${MIN_LR_RATIO} x peak, warmup 3%, ${N_EPOCHS} epochs"
 echo ">>> anchor : noise=${ANCHOR_NOISE_MODE} dropout=${ANCHOR_DROPOUT}"
-echo ">>> prompt : \"${INSTRUCTION}\""
+# prompt is printed by train.py itself once the dataset resolves it (see the
+# note above -- this script no longer sources or overrides it)
 
 accelerate launch \
     --num_processes 1 --num_machines 1 --mixed_precision bf16 --dynamo_backend no \
@@ -195,7 +182,6 @@ accelerate launch \
     --origami_root "${ORIGAMI_ROOT}" \
     --origami_val_root "${ORIGAMI_VAL_ROOT}" \
     --origami_sampler block --origami_pool_groups 32 --origami_cache_groups 8 \
-    --instruction "${INSTRUCTION}" \
     --output_dir "${OUTPUT_DIR}" --log_dir "${OUTPUT_DIR}" \
     --experiment_name "${EXPERIMENT_NAME}" --run_name "${RUN_NAME}" \
     --n_epochs "${N_EPOCHS}" --save_freq 1 --max_ckpts 3 \
