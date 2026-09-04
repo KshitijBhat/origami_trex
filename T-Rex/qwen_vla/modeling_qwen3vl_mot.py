@@ -229,6 +229,7 @@ class Qwen3VLAttentionMoT(nn.Module):
         latent_indexes:     Optional[torch.LongTensor] = None,
         action_indexes:     Optional[torch.LongTensor] = None,
         tactile_indexes:    Optional[torch.LongTensor] = None,
+        output_attentions:  bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
@@ -284,17 +285,35 @@ class Qwen3VLAttentionMoT(nn.Module):
                 )
 
         # Use F.scaled_dot_product_attention (flash / memory-efficient backend)
-        # for better numerical stability in bf16 vs manual matmul+softmax.
-        key_s   = repeat_kv(key_states,   self.num_key_value_groups)
-        value_s = repeat_kv(value_states, self.num_key_value_groups)
-        causal_mask = attention_mask[:, :, :, :key_s.shape[-2]] if attention_mask is not None else None
-        attn_output = nn.functional.scaled_dot_product_attention(
-            query_states, key_s, value_s,
-            attn_mask=causal_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            scale=self.scaling,
-        )
-        attn_weights = None
+        # for better numerical stability in bf16 vs manual matmul+softmax --
+        # UNLESS the caller asked for the weights back (output_attentions=True),
+        # in which case SDPA's fused kernel can't expose them and we fall back
+        # to the eager matmul+softmax path. Eager is only used when explicitly
+        # requested, so normal training/inference is unaffected.
+        if output_attentions:
+            # eager_attention_forward does its own repeat_kv internally, so it
+            # takes the RAW (pre-repeat) key/value states, not key_s/value_s.
+            # It also returns attn_output already transposed to [B, S, heads,
+            # head_dim] (its own internal convention) -- transpose it back to
+            # [B, heads, S, head_dim] so it matches SDPA's raw output and the
+            # shared reshape below (common to both branches) is correct either way.
+            attn_output, attn_weights = eager_attention_forward(
+                self, query_states, key_states, value_states, attention_mask,
+                scaling=self.scaling,
+                dropout=self.attention_dropout if self.training else 0.0,
+            )
+            attn_output = attn_output.transpose(1, 2)
+        else:
+            key_s   = repeat_kv(key_states,   self.num_key_value_groups)
+            value_s = repeat_kv(value_states, self.num_key_value_groups)
+            causal_mask = attention_mask[:, :, :, :key_s.shape[-2]] if attention_mask is not None else None
+            attn_output = nn.functional.scaled_dot_product_attention(
+                query_states, key_s, value_s,
+                attn_mask=causal_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                scale=self.scaling,
+            )
+            attn_weights = None
 
         # Reshape back to [B, total_seq, hidden]
         attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
@@ -375,6 +394,7 @@ class Qwen3VLDecoderLayerMoT(nn.Module):
             latent_indexes=latent_indexes,
             action_indexes=action_indexes,
             tactile_indexes=tactile_indexes,
+            output_attentions=output_attentions,
         )
 
         hidden_states = residual + hidden_states
