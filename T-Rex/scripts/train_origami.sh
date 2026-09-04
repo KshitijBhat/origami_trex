@@ -2,15 +2,17 @@
 # T-Rex post-training on the Robotic Origami Challenge fold-plane data.
 # Single A100 (40 GB), no DeepSpeed.
 #
-#   bash scripts/train_origami.sh              # train
-#   RESUME=1 bash scripts/train_origami.sh     # continue after a Colab pre-emption
-#   SMOKE=1  bash scripts/train_origami.sh     # 5 steps, proves the wiring
+#   NUM_GPUS=1 bash scripts/train_origami.sh              # train
+#   NUM_GPUS=1 RESUME=1 bash scripts/train_origami.sh     # continue after a Colab pre-emption
+#   NUM_GPUS=1 SMOKE=1  bash scripts/train_origami.sh     # 5 steps, proves the wiring
+#
+# NUM_GPUS has no default (see below) -- always pass it explicitly.
 #
 # Attempt-3 launch (see REIMPLEMENTATION_PLAN.md), on hybrid-anchored data:
-#   LR=1.5e-4 N_EPOCHS=3 TRAIN_BSZ=128 GRAD_ACCUM=4 bash scripts/train_origami.sh
+#   NUM_GPUS=1 LR=1.5e-4 N_EPOCHS=3 TRAIN_BSZ=128 GRAD_ACCUM=4 bash scripts/train_origami.sh
 #
 # Everything below can be overridden from the environment, e.g.
-#   TRAIN_BSZ=4 GRAD_ACCUM=8 bash scripts/train_origami.sh
+#   NUM_GPUS=1 TRAIN_BSZ=4 GRAD_ACCUM=8 bash scripts/train_origami.sh
 set -euo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-/content/T-Rex}"
@@ -70,6 +72,11 @@ esac
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-trex_origami_fold_plane}"
 RUN_NAME="${RUN_NAME:-${EXPERIMENT_NAME}_$(date +%m%d_%H%M)}"
 
+# No default: a silently-defaulted-to-1 process count is how a single-GPU
+# launch ships unnoticed to an 8-GPU node. Caller must say how many
+# (run_trex_job.sh already does this via its own NUM_GPUS arg).
+NUM_GPUS="${NUM_GPUS:?NUM_GPUS must be set explicitly, e.g. NUM_GPUS=4 bash scripts/train_origami.sh}"
+
 # ── action space ──────────────────────────────────────────────────────────────
 # 65-D absolute-radian joints is the competition's wire contract, and the
 # dataset has no eef poses (observation.state.tcp is identically zero), so
@@ -94,6 +101,12 @@ ACTION_CHUNK=25
 #
 # Rough A100-40GB planning numbers for the `pilot` tier (~160k samples at
 # stride 5): ~20k micro-steps per epoch at batch 8, so roughly 2-2.5 h/epoch.
+#
+# NOTE(decide later): a later branch (inference) moved these to LR=5e-5,
+# min_lr_ratio=0.05, n_epochs=2, anchor augmentation off by default
+# (anchor_noise_mode=none, anchor_dropout=0.0) after further tuning. The
+# values below are this branch's own attempt-3 recipe, left unchanged --
+# your call which recipe to actually run.
 TRAIN_BSZ="${TRAIN_BSZ:-8}"
 GRAD_ACCUM="${GRAD_ACCUM:-4}"
 LR="${LR:-1.5e-4}"
@@ -168,14 +181,14 @@ fi
 echo ">>> data   : ${ORIGAMI_ROOT}  (val ${ORIGAMI_VAL_ROOT})"
 echo ">>> resume : ${RESUME_CHECKPOINT}"
 echo ">>> output : ${OUTPUT_DIR}/${EXPERIMENT_NAME}/${RUN_NAME}"
-echo ">>> batch  : ${TRAIN_BSZ} x ${GRAD_ACCUM} = $((TRAIN_BSZ * GRAD_ACCUM))  lr=${LR}"
+echo ">>> batch  : ${TRAIN_BSZ} x ${GRAD_ACCUM} x ${NUM_GPUS} gpu(s) = $((TRAIN_BSZ * GRAD_ACCUM * NUM_GPUS))  lr=${LR}"
 echo ">>> sched  : cosine -> ${MIN_LR_RATIO} x peak, warmup 3%, ${N_EPOCHS} epochs"
 echo ">>> anchor : noise=${ANCHOR_NOISE_MODE} dropout=${ANCHOR_DROPOUT}"
 # prompt is printed by train.py itself once the dataset resolves it (see the
 # note above -- this script no longer sources or overrides it)
 
 accelerate launch \
-    --num_processes 1 --num_machines 1 --mixed_precision bf16 --dynamo_backend no \
+    --num_processes "${NUM_GPUS}" --num_machines 1 --mixed_precision bf16 --dynamo_backend no \
     train.py \
     --model_path "${ORIGIN_MODEL_PATH}" \
     --data_format origami \
