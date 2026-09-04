@@ -881,7 +881,7 @@ def run_validation(model, val_dataloader, accelerator, args,
                 slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
-            outputs = model.model(
+            outputs = raw_model.model(  # DDP: no .model on wrapper
                 inputs_embeds=full_embeds, position_ids=pos_ids,
                 attention_mask=batch["attention_mask"], use_cache=False,
                 output_hidden_states=use_flare,
@@ -936,7 +936,7 @@ def run_validation(model, val_dataloader, accelerator, args,
                 slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
-            outputs = model.model(
+            outputs = raw_model.model(  # DDP: no .model on wrapper
                 inputs_embeds=full_embeds, position_ids=pos_ids,
                 attention_mask=batch["attention_mask"], use_cache=False,
                 output_hidden_states=use_flare,
@@ -1401,7 +1401,7 @@ def train(args):
                 fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
-            outputs = model.model(
+            outputs = raw_model.model(  # DDP: no .model on wrapper
                 inputs_embeds=full_embeds,
                 position_ids=pos_ids,
                 attention_mask=batch["attention_mask"],
