@@ -13,18 +13,6 @@ The client orchestrates cadence (e.g. slow every 16 robot steps, fast at
 offsets 0, 4, 8, 12).  ZMQ REP is single-threaded so a fast request
 arriving mid-slow naturally waits until slow finishes — the "if a
 refinement has not finished, wait until it finishes" guarantee.
-
-What comes back on the wire
----------------------------
-`actions` is float32[T, 65] of **absolute joint angles**, which is the
-competition's contract.  The reconstruction from the model's raw output is
-per-dimension and belongs here rather than in the client: under the hybrid prep
-the 14 arm dims are deltas from the *previous command* (this server's own last
-emitted chunk, tracked below) and the other 51 are already joint angles.  The
-rule is read from the checkpoint's `training_args.json`; a checkpoint that
-records none is assumed to be the legacy all-delta-from-state kind, and
-`--action_output delta` reproduces the old "client adds observation/state"
-behaviour for exactly that case.
 """
 
 import os
@@ -49,13 +37,6 @@ from PIL import Image
 import zmq
 from transformers import AutoProcessor
 from qwen_vla import Qwen3VLVLAModel, extend_position_ids_for_flare, split_slow_fast_embeds
-from trex_origami.anchoring import (ANCHOR_PREV_COMMAND, build_anchor,
-                                    describe as describe_anchor, masks as anchor_masks,
-                                    mode_of, spec_from_meta)
-
-#: The evaluator streams commands at 30 Hz; used to work out which element of
-#: the last emitted chunk is "the command for the frame just before now".
-CONTROL_HZ = 30.0
 
 
 def _normalize(values, mask, vmin, vmax):
@@ -71,33 +52,6 @@ def _denormalize(norm_values, mask, vmin, vmax):
         0.5 * (norm_values + 1.0) * (vmax - vmin) + vmin,
         norm_values,
     )
-
-
-def _clamp_frozen_absolute(absolute, mask, state):
-    """Hold the measured position on the dims the training stats marked frozen.
-
-    A masked-off dim is normalisation *passthrough*: `_normalize` left it in raw
-    units, so the flow head's job there is to cancel its own unit-variance input
-    noise against a target of ~0, and whatever it fails to cancel reaches the
-    wire as raw radians.  On the origami split that is the torso
-    `lower_body_joint_1/2` -- constant to ~4e-4 rad across every season, but
-    +-0.3 rad out of the policy, which alone blows the motor group's 0.06 rad
-    step-jump budget on essentially every chunk.
-
-    Commanding `state[j]` for the whole chunk is exactly what the teleoperator
-    did there.  Expressed on the *absolute* chunk, not as "zero the delta":
-    under hybrid anchoring these dims are absolute, so zeroing them would
-    command 0 rad -- a full-travel move -- rather than holding.  Driven by the
-    mask, so a checkpoint whose stats say the torso moves clamps nothing.
-    """
-    if mask is None or state is None:
-        return absolute
-    dims = np.where(~np.asarray(mask, dtype=bool))[0]
-    if dims.size == 0:
-        return absolute
-    out = np.array(absolute, copy=True)
-    out[..., dims] = np.asarray(state, dtype=out.dtype)[dims]
-    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,8 +165,7 @@ def model_load(args):
                              ("vqvae_codebook_size", 64),
                              ("use_tactile_vqvae", 0),
                              ("cascaded_total_steps", 10),
-                             ("cascaded_split_step", 6),
-                             ("instruction", "")]:
+                             ("cascaded_split_step", 6)]:
             saved = ta.get(key, default)
             cli_val = getattr(args, key, default)
             if saved and cli_val == default:
@@ -325,23 +278,6 @@ def model_load(args):
         statistic["state_min"]  = _arr("state", "q01")
         statistic["state_max"]  = _arr("state", "q99")
 
-    frozen = np.where(~np.asarray(statistic["action_mask"], dtype=bool))[0]
-    if frozen.size:
-        print(f"[serve] frozen action dims {frozen.tolist()} -> held at state[j] "
-              f"(normalisation passthrough dims; see _clamp_frozen_absolute)")
-
-    # What the 65 outputs are measured from.  Written into training_args.json by
-    # the trainer; a checkpoint that predates it was trained all-delta-from-state,
-    # which is what `spec_from_meta` returns for an empty dict.
-    statistic["action_anchor"] = spec_from_meta(ta)
-    print(f"[serve] action anchoring {describe_anchor(statistic['action_anchor'])}")
-    if not ta.get("action_anchor"):
-        print("[serve] WARNING: this checkpoint records no `action_anchor`; assuming "
-              "the legacy all-delta-from-state rule. If it was in fact trained on "
-              "hybrid-anchored data, every arm joint will be off by the "
-              "command-minus-state offset and the 51 hand/motor dims will be "
-              "catastrophically wrong.")
-
     return model, processor, statistic
 
 
@@ -431,67 +367,8 @@ class CascadedServer:
         self.attention_mask     = None
         self.n_action_in_cache  = 0
         self.chunk_id           = -1               # incremented per slow
-        self.last_actions       = None             # cached absolute chunk for
+        self.last_actions       = None             # cached denormalized chunk for
                                                    # disable_tactile fast-tick passthrough
-
-        # ── action anchoring ──
-        # `statistic["action_anchor"]` says, per dim, what the model's output is
-        # measured from.  The arms (under the hybrid prep) are measured from the
-        # *previous command* -- which at deployment is this server's own last
-        # emitted command, so it has to be tracked here.  Nobody downstream can
-        # do this reconstruction: the rule is per-dim and lives with the weights.
-        self.anchor_spec = tuple(statistic.get("action_anchor")
-                                 or spec_from_meta(None))
-        self.needs_prev_command = bool(
-            anchor_masks(self.anchor_spec)[ANCHOR_PREV_COMMAND].any())
-        self.action_output = str(getattr(args, "action_output", "absolute"))
-        self.anchor_source = str(getattr(args, "anchor_source", "auto"))
-        if self.action_output == "delta" and mode_of(self.anchor_spec) != "state":
-            raise SystemExit(
-                "--action_output delta is only meaningful for an all-delta-from-state "
-                f"checkpoint; this one is anchored '{mode_of(self.anchor_spec)}', where "
-                "51 of the 65 outputs are absolute joint angles and 'delta' has no "
-                "definition. Serve absolute radians (the wire contract).")
-        # Last emitted absolute chunk + when it was emitted, for the anchor.
-        self.last_chunk         = None
-        self.last_chunk_time    = 0.0
-        self.seed_state         = None             # state at the last slow tick
-        self.anchor             = None             # per-dim anchor for that chunk
-
-        # ── phase conditioning ──
-        # `--phase-mode progress` bakes "(fold k of N)" into the training prompt
-        # from the sample's fraction through its episode -- which needs the
-        # episode's total length, a number the robot does not have.  Online we
-        # approximate it from elapsed wall-clock against the training set's
-        # median episode duration (`median_episode_frames` in the prep's
-        # dataset.json).  It is the same prompt for most of the attempt and it
-        # degrades gracefully: a slow attempt just reaches the later folds late.
-        # ── the language prompt ──
-        # The policy trained on one constant string (--instruction, recorded in
-        # training_args.json).  The robot sends its own `prompt` field, which the
-        # competition spec says "may be empty" and the kit's example fills with
-        # "fold the plane" -- neither is what the weights saw.  Serving the
-        # client's text would put an unseen token span in front of every
-        # observation, so the trained string wins unless asked otherwise.
-        self.instruction = str(getattr(args, "instruction", "") or "")
-        self.use_client_prompt = bool(getattr(args, "use_client_prompt", 0))
-        if self.instruction and not self.use_client_prompt:
-            print(f"Prompt pinned to the trained instruction: {self.instruction!r}")
-        elif not self.instruction:
-            print("WARNING: checkpoint records no instruction; using the client's "
-                  "prompt verbatim, which may not be what the policy trained on.")
-
-        self.phase_mode = str(getattr(args, "phase_mode", "none") or "none")
-        self.phase_seconds = float(getattr(args, "phase_episode_seconds", 0.0))
-        self.n_phases = int(getattr(args, "n_phases", 6))
-        self.episode_start = None
-        if self.phase_mode == "progress" and self.phase_seconds <= 0:
-            raise SystemExit(
-                "--phase_mode progress needs --phase_episode_seconds: the fold "
-                "index the policy trained against is a fraction of the episode, "
-                "and online that fraction can only come from elapsed time over an "
-                "expected duration. Use median_episode_frames / 30 from the "
-                "training split's meta/dataset.json.")
 
         # VQ-VAE tactile-code encoder.  Two modes:
         #   • embedded  — the model carries `tactile_vqvae`; the server only
@@ -605,63 +482,6 @@ class CascadedServer:
         return torch.tensor(flat, dtype=torch.long,
                             device=self.device).unsqueeze(0)
 
-    # -- internal: phase-conditioned prompt --------------------------------
-    def _task_text(self, task_description):
-        """The prompt as the policy saw it in training.
-
-        Mirrors `qwen_vla.origami_dataset._task_text`; the only difference is
-        where the progress fraction comes from (elapsed time here, the sample's
-        row index there).
-        """
-        if self.instruction and not self.use_client_prompt:
-            task_description = self.instruction
-        if self.phase_mode != "progress":
-            return task_description
-        if self.episode_start is None:
-            self.episode_start = time.time()
-        phase = min(1.0, max(0.0, (time.time() - self.episode_start) / self.phase_seconds))
-        k = min(self.n_phases, 1 + int(phase * self.n_phases))
-        return f"{task_description} (fold {k} of {self.n_phases})"
-
-    def reset_episode(self):
-        """Start a new fold attempt: clears the phase clock and the anchor chain."""
-        self.episode_start = None
-        self.last_chunk = None
-        self.last_chunk_time = 0.0
-
-    # -- internal: action anchoring --------------------------------------
-    def _prev_command(self, state):
-        """The command for the frame just before now, as best the server knows it.
-
-        The robot streams our last chunk at 30 Hz, so the element it is on is
-        set by elapsed wall-clock rather than by anything in the request.  Index
-        `k-1` is the frame before the one now being replaced.  Before any chunk
-        has been emitted -- and whenever `--anchor_source state` is set -- fall
-        back to the measured state, which is the same fallback anchor dropout
-        trained the policy to accept.
-        """
-        if self.anchor_source == "state" or self.last_chunk is None:
-            return state
-        elapsed = max(0.0, time.time() - self.last_chunk_time)
-        k = int(round(elapsed * CONTROL_HZ)) - 1
-        k = max(0, min(k, self.last_chunk.shape[0] - 1))
-        return self.last_chunk[k]
-
-    def _reconstruct(self, normalised_chunk, anchor, state):
-        """Normalised model output -> the absolute [T, 65] the wire contract wants."""
-        statistic = self.statistic
-        chunk = _denormalize(np.asarray(normalised_chunk, dtype=np.float64),
-                             statistic["action_mask"],
-                             statistic["action_min"], statistic["action_max"])
-        absolute = chunk if anchor is None else chunk + anchor[None, :]
-        absolute = _clamp_frozen_absolute(absolute, statistic["action_mask"], state)
-        self.last_chunk = absolute
-        self.last_chunk_time = time.time()
-        if self.action_output == "delta":
-            # Legacy state-anchored checkpoints only; the client adds the state.
-            return absolute - np.asarray(state, dtype=np.float64)[None, :]
-        return absolute
-
     # -- internal: build slow embeddings, run action-only flow, cache state --
     def _run_slow(
         self, task_description, slow_images, fast_images,
@@ -675,22 +495,6 @@ class CascadedServer:
             _sz = tuple(args.image_size)
             slow_images = [img.resize(_sz, Image.LANCZOS) for img in slow_images]
             fast_images = [img.resize(_sz, Image.LANCZOS) for img in fast_images]
-
-        # The chunk is conditioned on this tick's observation, so the anchor is
-        # pinned here and reused by every fast tick that continues it.
-        state = (np.asarray(state_fast, dtype=np.float64)
-                 if state_fast is not None else None)
-        if state is None:
-            if self.needs_prev_command or self.action_output == "absolute":
-                raise ValueError(
-                    "slow request carries no `state_fast`, but reconstructing the "
-                    "absolute command needs it (frozen-dim hold, and the anchor "
-                    "fallback). Send observation/state with every slow request.")
-            self.seed_state, self.anchor = None, None
-        else:
-            self.seed_state = state
-            self.anchor = build_anchor(state, self._prev_command(state),
-                                       self.anchor_spec)
 
         state_embeds = None
         if args.use_robot_state and state_fast is not None:
@@ -770,8 +574,10 @@ class CascadedServer:
             self.attention_mask    = attention_mask
             self.n_action_in_cache = 0
             self.chunk_id         += 1
-            a_full = self._reconstruct(full_chunk[0].float().cpu().numpy(),
-                                       self.anchor, self.seed_state)
+            a_full = _denormalize(
+                full_chunk[0].float().cpu().numpy(),
+                statistic["action_mask"],
+                statistic["action_min"], statistic["action_max"])
             self.last_actions = list(a_full)
             return self.last_actions, self.chunk_id
 
@@ -847,8 +653,10 @@ class CascadedServer:
             num_steps_total    = args.cascaded_total_steps,
             split_step         = args.cascaded_split_step,
         )
-        a_refined = self._reconstruct(refined[0].float().cpu().numpy(),
-                                      self.anchor, self.seed_state)
+        a_refined_norm = refined[0].float().cpu().numpy()
+        a_refined = _denormalize(
+            a_refined_norm, statistic["action_mask"],
+            statistic["action_min"], statistic["action_max"])
         return list(a_refined), self.chunk_id
 
     def predict(self, mode, payload):
@@ -866,12 +674,7 @@ class CascadedServer:
         tac_f6     = payload.get("tactile_f6")
         tac_deform = payload.get("tactile_deform", payload.get("tactile_image_deform"))
         state_fast = payload.get("state_fast")
-        # A client that folds several planes in one session must say so, or the
-        # phase clock and the previous-command chain carry over from the last
-        # attempt.  Absent the flag the first slow request starts the clock.
-        if payload.get("reset_episode"):
-            self.reset_episode()
-        task_desc  = self._task_text(payload.get("task_description", ""))
+        task_desc  = payload.get("task_description", "")
 
         with self.lock, torch.inference_mode():
             self.model = self.model.to(self.device).eval()
@@ -916,9 +719,7 @@ def main(args):
     dummy_slow  = [Image.new("RGB", (224, 224), color="black")]
     n_fast_cams = 2 if args.action_dim > 31 else 1
     dummy_fast  = [Image.new("RGB", (224, 224), color="black") for _ in range(n_fast_cams)]
-    # Always sent, even with --use_robot_state 0: the reconstruction needs the
-    # state for the frozen-dim hold and the anchor fallback, not just the encoder.
-    dummy_state = np.zeros(args.action_dim, dtype=np.float32)
+    dummy_state = np.zeros(args.action_dim, dtype=np.float32) if args.use_robot_state else None
     dummy_f6    = np.zeros((5, 6), dtype=np.float32) if args.use_tactile_vec else None
     dummy_deform = np.zeros((5, 240, 240), dtype=np.float32) if args.use_tactile_deform else None
 
@@ -936,7 +737,7 @@ def main(args):
         dummy_payload["image_wrist_left"] = _pil_to_bytes(dummy_fast[1])
     result = server.predict("slow_and_fast", dummy_payload)
     print(f"Warm-up output shape: "
-          f"{np.array(result['actions']).shape} ({server.action_output} radians), "
+          f"{np.array(result['actions']).shape}, "
           f"latency {result['latency_ms']:.1f} ms")
 
     # ZMQ Server
@@ -996,34 +797,6 @@ if __name__ == "__main__":
                         help="0 = auto-detect from training_args.json")
     parser.add_argument("--n_flare_steps", type=int, default=0,
                         help="0 = auto-detect from training_args.json")
-    parser.add_argument("--instruction", type=str, default="",
-                        help="language prompt to serve; auto-detected from the "
-                             "checkpoint's training_args.json")
-    parser.add_argument("--use_client_prompt", type=int, default=0,
-                        help="1 = pass the caller's prompt through untouched "
-                             "instead of the string the policy trained on")
-    parser.add_argument("--phase_mode", choices=["none", "progress"], default="none",
-                        help="must match the prep the checkpoint trained on. "
-                             "`progress` appends '(fold k of N)' to the prompt.")
-    parser.add_argument("--phase_episode_seconds", type=float, default=0.0,
-                        help="expected attempt duration, used only with "
-                             "--phase_mode progress. Take it from the training "
-                             "split's median_episode_frames / 30.")
-    parser.add_argument("--n_phases", type=int, default=6,
-                        help="folds in the target figure; matches the prep's n_phases")
-    parser.add_argument("--action_output", choices=["absolute", "delta"],
-                        default="absolute",
-                        help="`absolute` is the competition wire contract: float32"
-                             "[T, 65] joint angles, reconstructed here through the "
-                             "checkpoint's per-dim anchoring rule. `delta` returns "
-                             "action - state for the client to add, and is only "
-                             "defined for a legacy all-delta-from-state checkpoint.")
-    parser.add_argument("--anchor_source", choices=["auto", "state"], default="auto",
-                        help="where the previous-command anchor comes from: `auto` "
-                             "tracks this server's own last emitted chunk (what the "
-                             "robot is executing), `state` always falls back to "
-                             "observation/state -- the same fallback anchor dropout "
-                             "trained the policy to tolerate.")
     parser.add_argument("--cuda", type=str, default="0")
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--image_size", type=int, nargs=2, default=None, metavar=("W", "H"))

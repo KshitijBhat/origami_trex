@@ -39,7 +39,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import LambdaLR
-from accelerate import Accelerator, skip_first_batches
+from accelerate import Accelerator
 from transformers import AutoProcessor, set_seed
 from datasets import Dataset as HFDataset
 
@@ -102,48 +102,12 @@ def add_tracking_error_noise(state, te_mean, te_std, action_dim):
     return noisy
 
 
-def prepare_dataloader_fds() -> None:
-    """Make the DataLoader survive 8 persistent workers x prefetch 4.
-
-    Two independent fd consumers blow the default 1024 soft limit and surface as
-    `OSError: [Errno 24] Too many open files` inside `reduce_storage`:
-      * torch's default `file_descriptor` sharing sends *one fd per tensor* to
-        the main process, and our collate emits ~10 tensors per sample;
-      * every worker holds an open ParquetFile per episode it has touched
-        (bounded in OrigamiDataset, but still up to `origami_file_cache` each).
-    Raising the soft limit to the hard limit is free; `file_system` sharing drops
-    the per-tensor fd entirely, at the cost of /dev/shm entries that leak if the
-    process is SIGKILLed.  Set TREX_SHARING_STRATEGY=file_descriptor to opt out
-    (do that if /dev/shm is small -- containers often default to 64 MB).
-    """
-    try:
-        import resource
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        target = 1_048_576 if hard == resource.RLIM_INFINITY else hard
-        if soft < target:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
-            logger.info(f"RLIMIT_NOFILE raised {soft} -> {target}")
-    except Exception as exc:                       # non-POSIX, or a locked-down container
-        logger.warning(f"could not raise RLIMIT_NOFILE: {exc}")
-    strategy = os.environ.get("TREX_SHARING_STRATEGY", "file_system")
-    try:
-        torch.multiprocessing.set_sharing_strategy(strategy)
-        logger.info(f"torch multiprocessing sharing strategy: {strategy}")
-    except Exception as exc:
-        logger.warning(f"could not set sharing strategy {strategy!r}: {exc}")
-
-
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps,
                                      min_lr_ratio=0.0, num_cycles=0.5):
     def lr_lambda(step):
         if step < num_warmup_steps:
             return float(step) / float(max(1, num_warmup_steps))
-        # Clamped at 1: a resumed run replays the head of an epoch (see
-        # --resume_full_state), so the optimizer can take more steps than
-        # num_training_steps -- and past progress 1 this cosine turns back *up*
-        # toward the peak LR instead of holding the min_lr_ratio floor.
-        progress = min(1.0, float(step - num_warmup_steps)
-                       / float(max(1, num_training_steps - num_warmup_steps)))
+        progress = float(step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
         cosine = 0.5 * (1.0 + math.cos(math.pi * 2 * num_cycles * progress))
         return (1 - min_lr_ratio) * cosine + min_lr_ratio
     return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
@@ -515,259 +479,55 @@ class SftDataset(Dataset):
         }
 
 
-# ── checkpoint disk accounting ────────────────────────────────────────────
-# One checkpoint costs roughly 3x the model: model.pt (bf16 weights), a second
-# copy of the weights that accelerate writes under state/, and the optimizer
-# moments.  When the volume runs out mid-write torch fails deep inside the zip
-# writer ("file write failed" / "unexpected pos NNN vs NNN") -- thousands of
-# steps into a run, leaving a half-written directory behind.  The space is
-# therefore budgeted up front at startup and re-checked before every save.
-_CKPT_MARKER = "SAVE_COMPLETE"
-
-
-def _fmt_bytes(n):
-    return f"{n / 1024**3:.1f} GiB"
-
-
-def _free_bytes(path):
-    """Free bytes on the filesystem holding `path`, walking up to the nearest
-    existing parent (output_dir may not have been created yet)."""
-    p = os.path.abspath(path)
-    while p != os.path.dirname(p) and not os.path.exists(p):
-        p = os.path.dirname(p)
-    return shutil.disk_usage(p).free
-
-
-def _dir_bytes(path):
-    total = 0
-    for root, _, files in os.walk(path):
-        for fn in files:
-            try:
-                total += os.path.getsize(os.path.join(root, fn))
-            except OSError:
-                pass
-    return total
-
-
-def estimate_checkpoint_bytes(model, args):
-    """Expected on-disk size of one checkpoint directory."""
-    params = list(model.parameters())
-    n_all   = sum(p.numel() for p in params)
-    n_train = sum(p.numel() for p in params if p.requires_grad)
-    weights = n_all * 2                        # bf16 model.pt
-    total = weights
-    if getattr(args, "save_optimizer_state", 0):
-        total += weights                       # state/ holds the weights again
-        # AdamW8bit keeps 1 B per moment; torch AdamW on bf16 params keeps 2 B.
-        per_moment = 1 if "8bit" in str(getattr(args, "optim", "")).lower() else 2
-        total += n_train * per_moment * 2      # exp_avg + exp_avg_sq
-    return int(total * 1.10)                   # processor/config/json + slack
-
-
-def _checkpoint_dirs(output_dir):
-    if not os.path.isdir(output_dir):
-        return []
-    out = [os.path.join(output_dir, f) for f in os.listdir(output_dir)
-           if f.startswith("checkpoint-")]
-    return [d for d in out if os.path.isdir(d)]
-
-
-def _is_usable_checkpoint(d):
-    """A directory that at least carries weights.  Older checkpoints predate the
-    marker file, so the weights themselves are the fallback test -- an aborted
-    save that never got as far as model.pt is pure garbage and goes first."""
-    return (os.path.exists(os.path.join(d, _CKPT_MARKER))
-            or os.path.exists(os.path.join(d, "model.pt")))
-
-
-def _prune_checkpoints(output_dir, keep):
-    """Delete checkpoints until at most `keep` remain (`keep` < 0 keeps all).
-    Unusable leftovers from a crashed save go first, then oldest by ctime."""
-    ckpts = _checkpoint_dirs(output_dir)
-    junk    = [d for d in ckpts if not _is_usable_checkpoint(d)]
-    usable  = sorted((d for d in ckpts if _is_usable_checkpoint(d)),
-                     key=os.path.getctime)
-    for d in junk:
-        logger.warning(f"Removing unusable checkpoint {d} "
-                       f"({_fmt_bytes(_dir_bytes(d))} reclaimed).")
-        shutil.rmtree(d, ignore_errors=True)
-    while keep >= 0 and len(usable) > keep:
-        d = usable.pop(0)
-        logger.info(f"Pruning old checkpoint {d} ({_fmt_bytes(_dir_bytes(d))} reclaimed).")
-        shutil.rmtree(d, ignore_errors=True)
-
-
-def preflight_checkpoint_space(model, args, accelerator):
-    """Fail (or warn) at startup rather than after the first thousand steps."""
-    est = estimate_checkpoint_bytes(model, args)
-    args.ckpt_bytes_estimate = est
-    if not accelerator.is_main_process:
-        return est
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    existing = _checkpoint_dirs(args.output_dir)
-    existing_bytes = sum(_dir_bytes(d) for d in existing)
-    free = _free_bytes(args.output_dir)
-    keep = args.max_ckpts if args.max_ckpts > 0 else 1
-    # Rotation reclaims the checkpoints already on disk, so they count as budget.
-    budget = free + existing_bytes
-
-    accelerator.print(
-        f"[disk] checkpoint ~= {_fmt_bytes(est)} each "
-        f"(save_optimizer_state={int(bool(getattr(args, 'save_optimizer_state', 0)))}); "
-        f"free {_fmt_bytes(free)} on {args.output_dir}, "
-        f"{len(existing)} existing checkpoint(s) holding {_fmt_bytes(existing_bytes)}; "
-        f"--max_ckpts {args.max_ckpts} needs ~{_fmt_bytes(est * keep)}.")
-
-    if budget < est:
-        raise SystemExit(
-            f"Not enough disk for a single checkpoint: {_fmt_bytes(est)} needed, "
-            f"{_fmt_bytes(free)} free on {args.output_dir} "
-            f"(+{_fmt_bytes(existing_bytes)} reclaimable from existing checkpoints). "
-            f"Free space, point --output_dir at a larger volume, or drop "
-            f"--save_optimizer_state (halves the cost, at the price of full-state resume).")
-    if budget < est * keep:
-        fits = max(1, int(budget // est))
-        logger.warning(
-            f"[disk] {args.output_dir} holds only ~{fits} checkpoint(s) of "
-            f"{_fmt_bytes(est)} ({_fmt_bytes(budget)} usable), but --max_ckpts is "
-            f"{args.max_ckpts}. Saves will fail once it fills -- rerun with "
-            f"--max_ckpts {fits} or free space now.")
-    elif args.max_ckpts <= 0:
-        logger.warning(
-            f"[disk] --max_ckpts {args.max_ckpts} keeps every checkpoint; "
-            f"{_fmt_bytes(budget)} usable fits ~{int(budget // est)} of them.")
-    return est
-
-
 def save_checkpoint(model, processor, accelerator, args, epoch, global_step, stats_data):
     save_dir = os.path.join(args.output_dir, f"checkpoint-{epoch}-{global_step}")
-    need = (getattr(args, "ckpt_bytes_estimate", 0)
-            or estimate_checkpoint_bytes(accelerator.unwrap_model(model), args))
 
     if accelerator.is_main_process:
-        # Make room *before* writing: a loop, not a single delete, so a run that
-        # starts with more checkpoints than --max_ckpts still converges.
-        _prune_checkpoints(args.output_dir,
-                           keep=(args.max_ckpts - 1) if args.max_ckpts > 0 else -1)
-
-        free = _free_bytes(args.output_dir)
-        if free < need:
-            raise RuntimeError(
-                f"Refusing to start checkpoint {epoch}-{global_step}: needs "
-                f"~{_fmt_bytes(need)}, only {_fmt_bytes(free)} free on "
-                f"{args.output_dir}. Writing anyway would abort mid-file and "
-                f"leave a corrupt checkpoint. Free space, lower --max_ckpts, or "
-                f"set --save_optimizer_state 0.")
+        ckpts = [f for f in os.listdir(args.output_dir) if f.startswith("checkpoint-")]
+        if args.max_ckpts > 0 and len(ckpts) >= args.max_ckpts:
+            oldest = min(ckpts, key=lambda f: os.path.getctime(os.path.join(args.output_dir, f)))
+            shutil.rmtree(os.path.join(args.output_dir, oldest))
 
         os.makedirs(save_dir, exist_ok=True)
 
-        try:
-            sd = accelerator.get_state_dict(model)
-            torch.save(sd, os.path.join(save_dir, "model.pt"))
+        sd = accelerator.get_state_dict(model)
+        torch.save(sd, os.path.join(save_dir, "model.pt"))
 
-            processor.save_pretrained(os.path.join(save_dir, "processor"))
+        processor.save_pretrained(os.path.join(save_dir, "processor"))
 
-            src_config = os.path.join(args.model_path, "config.json")
-            if os.path.exists(src_config):
-                shutil.copy(src_config, os.path.join(save_dir, "config.json"))
+        src_config = os.path.join(args.model_path, "config.json")
+        if os.path.exists(src_config):
+            shutil.copy(src_config, os.path.join(save_dir, "config.json"))
 
-            with open(os.path.join(save_dir, "training_args.json"), "w") as f:
-                json.dump({
-                    "model_path": args.model_path,
-                    "action_dim": args.action_dim,
-                    "action_chunk": args.action_chunk,
-                    "use_robot_state": args.use_robot_state,
-                    "use_tactile_deform": args.use_tactile_deform,
-                    "use_tactile_vec": getattr(args, "use_tactile_vec", 0),
-                    "tactile_intermediate_size": getattr(args, "tactile_intermediate_size", 0),
-                    "training_stage": args.training_stage,
-                    "use_flare": args.use_flare,
-                    "n_flare_tokens_per_frame": args.n_flare_tokens_per_frame,
-                    "n_flare_steps": args.n_flare_steps,
-                    "flare_layer_index": args.flare_layer_index,
-                    "use_tactile_code": getattr(args, "use_tactile_code", 0),
-                    "vqvae_codebook_size": getattr(args, "vqvae_codebook_size", 64),
-                    "use_tactile_vqvae": getattr(args, "use_tactile_vqvae", 0),
-                    "vqvae_config": getattr(args, "vqvae_config_dict", None),
-                    "paradigm": "cascaded",
-                    "cascaded_total_steps": getattr(args, "cascaded_total_steps", 10),
-                    "cascaded_split_step":  getattr(args, "cascaded_split_step", 6),
-                    "flare_frame_stride": getattr(args, "flare_frame_stride", 2),
-                    # Needed to rebuild the *dataloader* the same way at eval time:
-                    # feeding a different resolution or F6 window than training
-                    # silently changes the model's input without any shape error.
-                    "image_size": getattr(args, "image_size", None),
-                    "vqvae_window": getattr(args, "vqvae_window", 16),
-                    "phase_mode": getattr(args, "phase_mode", ""),
-                # The prompt every sample was trained with.  It is a constant the
-                # policy has effectively memorised as a prefix, and the robot
-                # sends its own `prompt` field, so serving has to inject this
-                # exact string back rather than trust the client's.
-                "instruction": getattr(args, "instruction", ""),
-                    "data_format": getattr(args, "data_format", "json"),
-                    # What the 65 outputs are measured from.  Serving has no dataset
-                    # to read it off, and reconstructing with the wrong rule is a
-                    # silent bias, not an error — so it travels with the weights.
-                    "action_anchor": getattr(args, "action_anchor", None),
-                    "anchor_noise_mode": getattr(args, "anchor_noise_mode", "none"),
-                    "anchor_dropout": getattr(args, "anchor_dropout", 0.0),
-                }, f, indent=2)
+        with open(os.path.join(save_dir, "training_args.json"), "w") as f:
+            json.dump({
+                "model_path": args.model_path,
+                "action_dim": args.action_dim,
+                "action_chunk": args.action_chunk,
+                "use_robot_state": args.use_robot_state,
+                "use_tactile_deform": args.use_tactile_deform,
+                "use_tactile_vec": getattr(args, "use_tactile_vec", 0),
+                "tactile_intermediate_size": getattr(args, "tactile_intermediate_size", 0),
+                "training_stage": args.training_stage,
+                "use_flare": args.use_flare,
+                "n_flare_tokens_per_frame": args.n_flare_tokens_per_frame,
+                "n_flare_steps": args.n_flare_steps,
+                "flare_layer_index": args.flare_layer_index,
+                "use_tactile_code": getattr(args, "use_tactile_code", 0),
+                "vqvae_codebook_size": getattr(args, "vqvae_codebook_size", 64),
+                "use_tactile_vqvae": getattr(args, "use_tactile_vqvae", 0),
+                "vqvae_config": getattr(args, "vqvae_config_dict", None),
+                "paradigm": "cascaded",
+                "cascaded_total_steps": getattr(args, "cascaded_total_steps", 10),
+                "cascaded_split_step":  getattr(args, "cascaded_split_step", 6),
+                "flare_frame_stride": getattr(args, "flare_frame_stride", 2),
+            }, f, indent=2)
 
-            with open(os.path.join(save_dir, "stats_data.json"), "w") as f:
-                json.dump(stats_data, f, indent=2)
-
-            with open(os.path.join(save_dir, "training_state.json"), "w") as f:
-                json.dump({"epoch": epoch, "global_step": global_step,
-                           "learning_rate": args.learning_rate,
-                           "warmup_rates": args.warmup_rates,
-                           "min_lr_ratio": args.min_lr_ratio}, f, indent=2)
-
-        except Exception as e:
-            shutil.rmtree(save_dir, ignore_errors=True)
-            raise RuntimeError(
-                f"Checkpoint {epoch}-{global_step} failed while writing weights "
-                f"({type(e).__name__}: {e}); partial directory removed. "
-                f"{_fmt_bytes(_free_bytes(args.output_dir))} free on "
-                f"{args.output_dir}, ~{_fmt_bytes(need)} needed per checkpoint."
-            ) from e
+        with open(os.path.join(save_dir, "stats_data.json"), "w") as f:
+            json.dump(stats_data, f, indent=2)
 
     accelerator.wait_for_everyone()
-    # Optimizer + scheduler + RNG, so a pre-empted Colab session resumes
-    # exactly where it stopped instead of restarting the LR schedule.
-    if getattr(args, "save_optimizer_state", 0):
-        os.makedirs(save_dir, exist_ok=True)
-        state_dir = os.path.join(save_dir, "state")
-        try:
-            accelerator.save_state(state_dir)
-        except Exception as e:
-            # The weights are already on disk and still warm-startable, so only
-            # the truncated state/ goes -- dropping it also frees the most space.
-            if accelerator.is_main_process:
-                shutil.rmtree(state_dir, ignore_errors=True)
-            raise RuntimeError(
-                f"Checkpoint {epoch}-{global_step}: optimizer/scheduler state "
-                f"failed to write ({type(e).__name__}: {e}). The truncated "
-                f"state/ was removed; {os.path.join(save_dir, 'model.pt')} is "
-                f"intact -- resume from it without --resume_full_state "
-                f"(weights only). {_fmt_bytes(_free_bytes(args.output_dir))} "
-                f"free on {args.output_dir}, ~{_fmt_bytes(need)} needed per "
-                f"checkpoint -- free space or lower --max_ckpts before retrying."
-            ) from e
-
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        # Written last: its absence marks a directory an abort left behind.
-        open(os.path.join(save_dir, _CKPT_MARKER), "w").close()
-        logger.info(f"Checkpoint {epoch}-{global_step} saved "
-                    f"({_fmt_bytes(_dir_bytes(save_dir))}; "
-                    f"{_fmt_bytes(_free_bytes(args.output_dir))} free).")
-
-
-def _world_size():
-    """World size that also works for a plain single-GPU launch (no DeepSpeed,
-    no torch.distributed init) — needed for the 1x A100 origami recipe."""
-    return dist.get_world_size() if dist.is_initialized() else 1
+    logger.info(f"Checkpoint {epoch}-{global_step} saved.")
 
 
 class TrainingMetrics:
@@ -777,7 +537,7 @@ class TrainingMetrics:
         self.tactile_loss = torch.tensor(0.0, device=device)
         self.flare_loss  = torch.tensor(0.0, device=device)
         self.total_loss   = torch.tensor(0.0, device=device)
-        self.world_size   = _world_size()
+        self.world_size   = dist.get_world_size()
 
     def update(self, total, action, tactile=0.0, flare=0.0):
         self.n_step += 1
@@ -788,8 +548,7 @@ class TrainingMetrics:
 
     def get_metric(self, reset=True):
         for t in [self.total_loss, self.action_loss, self.tactile_loss, self.flare_loss]:
-            if dist.is_initialized():
-                dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
         denom = self.world_size * max(self.n_step, 1)
         m = {
             "total_loss":   self.total_loss.item() / denom,
@@ -923,7 +682,6 @@ def run_validation(model, val_dataloader, accelerator, args,
                 n_action_in_cache=n_action_in_cache,
                 x_tau=x_tau,
                 tau=tau_t,
-                attention_mask=batch["attention_mask"],
                 tactile_f6=batch.get("tactile_f6s_delayed"),
                 tactile_deform=batch.get("tactile_deforms_delayed"),
                 tactile_codes=batch.get("tactile_codes"),
@@ -980,9 +738,8 @@ def train(args):
                    dir=args.log_dir
                 )
 
-    if getattr(accelerator.state, "deepspeed_plugin", None) is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = args.train_bsz_per_gpu
-        accelerator.state.deepspeed_plugin.deepspeed_config["train_batch_size"] = (args.train_bsz_per_gpu * _world_size() * accelerator.gradient_accumulation_steps)
+    accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = args.train_bsz_per_gpu
+    accelerator.state.deepspeed_plugin.deepspeed_config["train_batch_size"] = (args.train_bsz_per_gpu * dist.get_world_size() * accelerator.gradient_accumulation_steps)
 
     processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
 
@@ -1099,25 +856,6 @@ def train(args):
     elif resumed_tactile:
         accelerator.print("Tactile expert weights kept from resumed midtrain checkpoint.")
 
-    # The backbone (base Qwen3-VL + MoT decoder) is bf16 via torch_dtype above,
-    # but the VLA-specific heads built in __init__ (x_embedder, t_embedder,
-    # final_layer*, deform_encoder, ...) are plain fp32 modules -- construction
-    # and resume-checkpoint loading (nn.Module.load_state_dict copies into the
-    # destination's existing dtype) never touch that. The cascaded-flow helpers
-    # (forward_flow_action_partial / tactile_flow_continue) hardcode bf16
-    # intermediates and call these heads directly rather than through
-    # model.forward(), so nothing autocasts them -- left uncast, the first
-    # training_stage=2 step raises "mat1 and mat2 must have the same dtype".
-    # test.py casts the whole model the same way at inference; mirror it here.
-    model = model.to(torch.bfloat16)
-    # Keep the embedded VQ-VAE in eval + fp32 so on-the-fly codes match the
-    # standalone tokenizer (the bf16 cast above would otherwise downcast the
-    # codebook and normalization buffers).
-    if getattr(model, "tactile_vqvae", None) is not None:
-        model.tactile_vqvae.float().eval()
-        for _b in ("tacf6_vqvae_min", "tacf6_vqvae_max"):
-            setattr(model, _b, getattr(model, _b).float())
-
     for name, param in model.named_parameters():
         if (name.startswith("visual") or name.startswith("deform_encoder")
                 or name.startswith("tactile_vqvae")):
@@ -1127,37 +865,12 @@ def train(args):
         else:
             param.requires_grad = True
 
-    # ── optional: freeze the latent (vision-language) expert ──
-    # Single-GPU post-training budget.  The latent expert is a full 1.41B copy
-    # of the backbone whose only job here is to encode RGB+language context;
-    # the action and tactile experts are what adapt to a new task.  Freezing it
-    # cuts optimiser memory ~45% and step time ~25%.  `--train_latent_last_n K`
-    # thaws the top K layers as a middle ground.
-    if args.freeze_latent_expert:
-        n_layers = len(model.model.layers)
-        keep_from = n_layers - max(0, args.train_latent_last_n)
-        n_frozen = 0
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if "_action" in name or "_tactile" in name:
-                continue                       # action / tactile experts stay live
-            if name.startswith(("x_embedder", "t_embedder", "final_layer",
-                                "tacf6_embedder", "deform_proj", "state_embedder",
-                                "tactile_code_embedder", "flare_proj", "flare_queries")):
-                continue                       # heads stay live
-            m = re.match(r"model\.layers\.(\d+)\.", name)
-            if m and int(m.group(1)) >= keep_from:
-                continue                       # top-K latent layers thawed
-            param.requires_grad = False
-            n_frozen += 1
-        accelerator.print(f"Latent expert frozen ({n_frozen} tensors; "
-                          f"last {max(0, args.train_latent_last_n)} of {n_layers} "
-                          f"layers trainable).")
-
-    if args.gradient_checkpointing:
-        model.model.gradient_checkpointing = True
-        accelerator.print("Gradient checkpointing enabled on the MoT decoder layers.")
+    # Keep the embedded VQ-VAE in eval + fp32 so on-the-fly codes match the
+    # standalone tokenizer (no EMA drift, full-precision normalization).
+    if getattr(model, "tactile_vqvae", None) is not None:
+        model.tactile_vqvae.float().eval()
+        for _b in ("tacf6_vqvae_min", "tacf6_vqvae_max"):
+            setattr(model, _b, getattr(model, _b).float())
 
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1172,74 +885,39 @@ def train(args):
                     if p.requires_grad and any(nd in n for nd in no_decay)],
          "weight_decay": 0.0},
     ]
-    if args.optim == "adamw8bit":
-        # bf16 params make torch.optim.AdamW keep bf16 moments; 8-bit blockwise
-        # Adam is both smaller (2 B/param vs 4) and numerically better behaved.
-        import bitsandbytes as bnb
-        optimizer = bnb.optim.AdamW8bit(param_groups, lr=args.learning_rate)
-        accelerator.print("Optimizer: bitsandbytes AdamW8bit")
-    else:
-        optimizer = torch.optim.AdamW(param_groups, lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.learning_rate)
 
-    data_format = getattr(args, "data_format", "json")
-    if data_format == "lerobot":
+    if getattr(args, "data_format", "json") == "lerobot":
         from qwen_vla.lerobot_dataset import TRexLeRobotDataset
         dataset = TRexLeRobotDataset(args, processor, accelerator)
-    elif data_format == "origami":
-        from qwen_vla.origami_dataset import OrigamiDataset
-        dataset = OrigamiDataset(args, processor, accelerator)
-        # Record what the head is being trained to emit, so the checkpoint can
-        # be reconstructed without the dataset it was trained on.
-        args.action_anchor = list(dataset.anchor_spec)
-        args.instruction = getattr(dataset, "effective_instruction",
-                                   getattr(args, "instruction", ""))
-        accelerator.print(f"[origami] prompt: {args.instruction!r}")
     else:
         dataset = SftDataset(args, processor, accelerator)
 
     val_dataloader = None
-    if getattr(args, "val_ratio", 0) > 0 or getattr(args, "origami_val_root", ""):
+    if getattr(args, "val_ratio", 0) > 0:
         val_dataset = dataset.create_val_split(
             val_ratio=args.val_ratio, seed=args.seed)
         val_dataloader = DataLoader(
             val_dataset, batch_size=args.train_bsz_per_gpu, shuffle=False,
             drop_last=True, collate_fn=val_dataset.collate_fn,
-            num_workers=max(1, args.num_workers // 2), pin_memory=True)
+            num_workers=2, pin_memory=True)
 
-    # A dataset may supply its own sampler (the origami loader shuffles at
-    # parquet row-group granularity so one read serves a whole block).
-    sampler = dataset.make_sampler(seed=args.seed) if hasattr(dataset, "make_sampler") else None
     dataloader = DataLoader(
-        dataset, batch_size=args.train_bsz_per_gpu,
-        shuffle=(sampler is None), sampler=sampler,
-        collate_fn=dataset.collate_fn, num_workers=args.num_workers,
-        pin_memory=True, drop_last=True,
-        persistent_workers=bool(args.num_workers),
-        prefetch_factor=(4 if args.num_workers else None),
+        dataset, batch_size=args.train_bsz_per_gpu, shuffle=True,
+        collate_fn=dataset.collate_fn, num_workers=4, pin_memory=True,
     )
 
     num_training_steps = (
         int(len(dataloader) * args.n_epochs)
         // accelerator.gradient_accumulation_steps
-        // _world_size()
+        // dist.get_world_size()
     )
-    if args.max_steps > 0:
-        num_training_steps = min(num_training_steps, args.max_steps)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=int(args.warmup_rates * num_training_steps),
         num_training_steps=num_training_steps,
         min_lr_ratio=args.min_lr_ratio,
     )
-    # accelerator.prepare() only wraps model/optimizer/dataloader below; without
-    # this, save_state()/load_state() never captures the scheduler's step count
-    # and a resume silently restarts the warmup from 0 (the LR falls back to
-    # near-zero instead of continuing the cosine decay).
-    accelerator.register_for_checkpointing(lr_scheduler)
-
-    # Budget the disk before the first step: a full volume otherwise only
-    # announces itself at the first save, an hour or more into the run.
-    preflight_checkpoint_space(model, args, accelerator)
 
     if val_dataloader is not None:
         model, optimizer, dataloader, val_dataloader = accelerator.prepare(
@@ -1249,75 +927,17 @@ def train(args):
 
     metric = TrainingMetrics(device=torch.cuda.current_device())
     global_step = 0
-    start_epoch = 0
     T_per_frame = args.n_flare_tokens_per_frame
     S_steps = args.n_flare_steps
     K = T_per_frame * S_steps  # total flare tokens
     use_flare = bool(args.use_flare and K > 0)
-    # flare_loss_weight == 0 keeps the K latent query tokens (so the sequence
-    # the action expert attends to matches the resumed checkpoint) but skips the
-    # future-frame decode + the extra no-grad ViT pass entirely.  That is the
-    # right setting whenever the latent expert is frozen, since the loss would
-    # then only train flare_proj.
-    train_flare = bool(use_flare and args.flare_loss_weight > 0)
     flare_layer_idx = args.flare_layer_index
     model.train()
 
-    # ── optional full-state resume (Colab sessions get pre-empted) ──
-    skip_batches = 0
-    if args.resume_full_state and args.resume_checkpoint:
-        state_dir = os.path.join(args.resume_checkpoint, "state")
-        ts_path = os.path.join(args.resume_checkpoint, "training_state.json")
-        if not os.path.isdir(state_dir):
-            # Carrying on here would restore global_step but neither the
-            # optimizer nor the scheduler: the run prints "Resuming at epoch N"
-            # while actually restarting warmup from zero on fresh AdamW moments.
-            raise SystemExit(
-                f"--resume_full_state given but {state_dir} does not exist. "
-                f"Only checkpoints written with --save_optimizer_state 1 carry "
-                f"optimizer/scheduler/RNG state -- resume from one of those, or "
-                f"drop --resume_full_state to warm-start from the weights alone.")
-        accelerator.load_state(state_dir)
-        accelerator.print(f"Restored optimizer/scheduler/RNG from {state_dir}")
-        if os.path.exists(ts_path):
-            with open(ts_path) as f:
-                ts = json.load(f)
-            global_step = int(ts.get("global_step", 0))
-            start_epoch = int(ts.get("epoch", 0))
-            # The dataloader carries no position of its own, and
-            # BlockShuffleSampler is seeded from (seed, epoch) -- so re-entering
-            # an epoch replays the *identical* batches with the LR and optimizer
-            # already advanced past them.  A full-tier epoch is ~51k micro-steps
-            # (~32 h), longer than a Colab session, so without this skip a
-            # pre-empted run never leaves the head of epoch 0.
-            per_epoch = len(dataloader)
-            skip_batches = max(0, global_step - start_epoch * per_epoch)
-            if skip_batches >= per_epoch:      # checkpoint sits on an epoch boundary
-                start_epoch += skip_batches // per_epoch
-                skip_batches %= per_epoch
-            accelerator.print(
-                f"Resuming at epoch {start_epoch}, step {global_step} "
-                f"({skip_batches} batches into the epoch)")
-
-    stop_training = False
-    for epoch in range(start_epoch, args.n_epochs):
-        if stop_training:
-            break
+    for epoch in range(args.n_epochs):
         from tqdm import tqdm
-        if sampler is not None and hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(epoch)
-        # Only the first epoch of a resumed run skips.  skip_first_batches keeps
-        # the sampler's order, so what it drops is exactly what already trained.
-        epoch_loader, n_batches = dataloader, len(dataloader)
-        if skip_batches:
-            accelerator.print(
-                f"Skipping the first {skip_batches} batches of epoch {epoch} "
-                f"(already trained before the pre-emption)")
-            epoch_loader = skip_first_batches(dataloader, skip_batches)
-            n_batches -= skip_batches
-            skip_batches = 0
-        it = (tqdm(epoch_loader, total=n_batches)
-              if accelerator.is_main_process else epoch_loader)
+        it = (tqdm(dataloader, total=len(dataloader))
+              if accelerator.is_main_process else dataloader)
 
         for batch in it:
             raw_model = accelerator.unwrap_model(model)
@@ -1406,7 +1026,7 @@ def train(args):
                 position_ids=pos_ids,
                 attention_mask=batch["attention_mask"],
                 use_cache=False,
-                output_hidden_states=train_flare,
+                output_hidden_states=use_flare,
                 latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
                 tactile_indexes=torch.arange(0, 0, device=full_embeds.device),
@@ -1485,7 +1105,6 @@ def train(args):
                         n_action_in_cache=n_action_in_cache,
                         x_tau=x_tau,
                         tau=tau_t,
-                        attention_mask=batch["attention_mask"],
                         tactile_f6=tac_f6_in,
                         tactile_deform=tac_def_in,
                         tactile_codes=tac_codes_in,
@@ -1497,7 +1116,7 @@ def train(args):
                 loss_tac = 0.0
 
             loss_flare = 0.0
-            if train_flare and batch["flare_pixel_values"] is not None:
+            if use_flare and batch["flare_pixel_values"] is not None:
                 # Extract flare hidden states from intermediate layer or last layer
                 if flare_layer_idx == -1:
                     flare_source = hidden  # last layer (already normed)
@@ -1600,23 +1219,7 @@ def train(args):
 
             global_step += 1
 
-            if args.save_steps > 0 and global_step % args.save_steps == 0:
-                accelerator.wait_for_everyone()
-                save_checkpoint(model, processor, accelerator, args,
-                                epoch, global_step, dataset.stats_data)
-            if args.max_steps > 0 and global_step >= args.max_steps:
-                accelerator.print(f"Reached --max_steps {args.max_steps}; stopping.")
-                stop_training = True
-                break
-
-        # skip_first_batches builds a *second* DataLoader over the same dataset;
-        # with persistent_workers it keeps its own 8 workers alive.  Drop both
-        # references here so that pool is shut down before the next epoch opens
-        # a new one, rather than overlapping it.
-        if epoch_loader is not dataloader:
-            it = epoch_loader = None
-
-        if stop_training or (epoch + 1) % args.save_freq == 0 or epoch == args.n_epochs - 1:
+        if (epoch + 1) % args.save_freq == 0 or epoch == args.n_epochs - 1:
             accelerator.wait_for_everyone()
             save_checkpoint(model, processor, accelerator, args,
                             epoch, global_step, dataset.stats_data)
@@ -1631,8 +1234,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="")
     parser.add_argument("--data_root", type=str, default="")
     # Data source: legacy JSON (default) or a LeRobot v3.0 dataset directory.
-    parser.add_argument("--data_format", type=str, default="json",
-                        choices=["json", "lerobot", "origami"])
+    parser.add_argument("--data_format", type=str, default="json", choices=["json", "lerobot"])
     parser.add_argument("--lerobot_root", type=str, default="",
                         help="LeRobot dataset dir (required when --data_format lerobot).")
     parser.add_argument("--lerobot_repo_id", type=str, default="",
@@ -1721,77 +1323,13 @@ if __name__ == "__main__":
     parser.add_argument("--val_freq", type=int, default=0, help="Run validation every N steps (0=disable)")
     parser.add_argument("--max_val_batches", type=int, default=50, help="Max batches per validation run")
 
-    # ── origami-flat data path (Robotic Origami Challenge / Sharpa) ──
-    parser.add_argument("--origami_root", type=str, default="",
-                        help="origami-flat dataset root (--data_format origami)")
-    parser.add_argument("--origami_val_root", type=str, default="val",
-                        help="held-out-season root used for validation")
-    parser.add_argument("--origami_sampler", type=str, default="block",
-                        choices=["block", "random"],
-                        help="block = shuffle at parquet row-group granularity")
-    parser.add_argument("--origami_pool_groups", type=int, default=32,
-                        help="row groups mixed per block-shuffle window")
-    parser.add_argument("--instruction", type=str, default="",
-                        help="language prompt for every sample; overrides the "
-                             "string baked into meta/dataset.json at prep time "
-                             "(empty = use the dataset's). The parquet rows hold "
-                             "no text, so changing it needs no re-prep.")
-    parser.add_argument("--origami_cache_groups", type=int, default=8,
-                        help="row groups held per dataloader worker")
-    parser.add_argument("--state_noise_mode", type=str, default="none",
-                        choices=["none", "joint"],
-                        help="state augmentation for --use_robot_state 1; the "
-                             "T-Rex axis-angle noise model is invalid in joint space")
-    parser.add_argument("--anchor_noise_mode", type=str, default="none",
-                        choices=["none", "tracking"],
-                        help="perturb the previous-command anchor with the measured "
-                             "tracking-error statistics. Only affects dims the dataset "
-                             "anchors to the previous command; a no-op on an "
-                             "all-delta-from-state prep.")
-    parser.add_argument("--anchor_dropout", type=float, default=0.0,
-                        help="fraction of samples whose previous-command anchor is "
-                             "replaced by state[t], so the policy does not depend on "
-                             "an anchor it will only ever have approximately")
-    parser.add_argument("--phase_mode", type=str, default="", choices=["", "none", "progress"],
-                        help="'progress' appends '(fold k of N)' to the instruction. "
-                             "Offline experiments only — the fold index is unknown at "
-                             "deployment. Empty falls back to the value baked into the data.")
-    parser.add_argument("--vqvae_window", type=int, default=16,
-                        help="F6 history length fed to the embedded VQ-VAE. Overwritten "
-                             "by the resumed checkpoint's vqvae_config when present, and "
-                             "must match the window the data was prepared with.")
-
-    # ── single-GPU / long-run knobs ──
-    parser.add_argument("--freeze_latent_expert", type=int, default=0,
-                        help="freeze the vision-language expert; train action + tactile")
-    parser.add_argument("--train_latent_last_n", type=int, default=0,
-                        help="with --freeze_latent_expert 1, thaw the top N layers")
-    parser.add_argument("--gradient_checkpointing", type=int, default=0)
-    parser.add_argument("--optim", type=str, default="adamw",
-                        choices=["adamw", "adamw8bit"])
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--save_steps", type=int, default=0,
-                        help="checkpoint every N optimiser steps (0 = epoch-based only)")
-    parser.add_argument("--max_steps", type=int, default=0,
-                        help="stop after N steps (0 = run --n_epochs)")
-    parser.add_argument("--save_optimizer_state", type=int, default=0,
-                        help="also write state/ (optimizer+scheduler+RNG) per checkpoint")
-    parser.add_argument("--resume_full_state", type=int, default=0,
-                        help="restore state/ + step counter from --resume_checkpoint")
-
     args = parser.parse_args()
 
     if args.data_format == "lerobot":
         if not args.lerobot_root:
             parser.error("--data_format lerobot requires --lerobot_root")
-    elif args.data_format == "origami":
-        if not args.origami_root:
-            parser.error("--data_format origami requires --origami_root")
     elif not args.data_path:
         parser.error("--data_format json requires --data_path")
-
-    # Before the Accelerator and any DataLoader worker fork.
-    prepare_dataloader_fds()
 
     args.log_dir = os.path.join(args.log_dir, args.experiment_name)
     args.output_dir = os.path.join(args.output_dir, args.experiment_name, args.run_name)

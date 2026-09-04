@@ -192,42 +192,6 @@ The robot-side client that drives this server on the real Vega-1 (REQ socket,
 slow every chunk start, tactile-only fast ticks in between) is
 [`hardware_code/eval/eval_trex_async.py`](hardware_code/eval/README.md).
 
-## Robotic Origami Challenge (IROS 2026) — fold-plane post-training
-
-A third data path, `--data_format origami`, post-trains on Sharpa's
-[Robotic Origami Challenge](https://huggingface.co/datasets/SharpaIT/Robotic_Origami_Challenge)
-fold-plane demonstrations and targets that competition's inference contract.
-
-```bash
-bash trex_origami/run_prepare.sh pilot        # stream + convert seasons (CPU box)
-python scripts/smoke_test_origami.py --root <train dir>
-bash scripts/colab_setup.sh                   # deps + midtrain ckpt + dataset (A100)
-SMOKE=1 bash scripts/train_origami.sh         # 5 steps, proves the wiring
-bash scripts/train_origami.sh                 # post-train
-python scripts/eval_origami.py --checkpoint_path <ckpt> \
-    --origami_root <val dir> --out_dir <out>
-```
-
-Three things differ from the recipes above, all forced by the target robot:
-
-- **`action_dim=65`, joint space.** The competition wants `float32[25, 65]` absolute
-  joint positions in radians, and the dataset's `observation.state.tcp` is identically
-  zero, so T-Rex's eef-62 representation has no source data. Resuming the midtrain
-  checkpoint therefore re-initialises `x_embedder`, `final_layer`, `final_layer_tactile`
-  and `state_embedder` (shape-mismatched keys are dropped on load); the MoT backbone,
-  the tactile expert, the embedded VQ-VAE and the deform encoder all transfer.
-- **`action_chunk=25`** to match the kit's `action_horizon`. No weight depends on chunk
-  length, so this is free.
-- **`image_size 224 224`**, which is exactly what the wire delivers.
-
-The tactile stack needs no adaptation: both robots use Sharpa Wave hands, the 60-D
-force vector is the same `10 fingertips x [fx,fy,fz,tx,ty,tz]` layout, and the
-challenge's `tactile_deform` grid is 2x5 cells of **240x240** — already the size
-`deform_proj`'s hardcoded `128*15*15` requires.
-
-See [`trex_origami/README.md`](trex_origami/README.md) for the data format, the
-conversion pipeline and the verification steps.
-
 ## Data preparation (your own task data)
 
 Post-training runs on **your own task episodes**; T-Rex's pretrain/midtrain
