@@ -146,23 +146,6 @@ The demonstrations include synchronized head, wrist, and tactile video streams. 
 | Joint-space control | 65D synchronized state and action for two arms, two dexterous hands, and torso/motor-related joints |
 | LeRobot ecosystem | Full `lerobot3.0` coverage across all seasons, with `lerobotv2.1` available for many seasons |
 
-## Dataset Statistics
-
-| Item | Value |
-| --- | ---: |
-| Total collection seasons | 51 |
-| `lerobot3.0` seasons | 51 |
-| `lerobot3.0` episodes | 682 |
-| `lerobot3.0` frames | 4,763,267 |
-| `lerobotv2.1` seasons | 41 |
-| `lerobotv2.1` episodes | 555 |
-| `lerobotv2.1` frames | 3,893,595 |
-| FPS | 30 |
-| Video streams | 6 |
-| State/action dimension | 65 |
-
-For new users, we recommend starting from `lerobot3.0`, since it covers all 51 seasons in this release.
-
 ## Get Started
 
 ### Download The Dataset
