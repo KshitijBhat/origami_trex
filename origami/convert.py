@@ -58,8 +58,19 @@ MIN_EPISODE_LENGTH = 64  # §4.4: reject if N < one chunk + one F6 window
 
 LOSSLESS_DEFORM_ENCODER = RGBEncoderConfig(vcodec="h264", crf=0, pix_fmt="yuv444p")
 
-# Small enough that each episode lands in its own data/video file (§5.2).
-ONE_EPISODE_PER_FILE_MB = dict(data_files_size_in_mb=64, video_files_size_in_mb=128)
+# lerobot's writer has no true "one episode per file" mode -- data_files_size_in_mb /
+# video_files_size_in_mb only roll over to a new file when the *projected* size after the
+# next episode would reach the threshold (dataset_writer.py's _save_episode_data /
+# _save_episode_video), and for video it otherwise calls concatenate_video_files to merge the
+# next episode INTO the current file. 64/128 MB was meant to be "small enough that every
+# episode gets its own file", but that's only true if episodes are large relative to the
+# threshold -- two short episodes (near MIN_EPISODE_LENGTH) can both land far under 64/128 MB
+# and get packed into one file, silently violating merge.py's one-episode-per-file assumption
+# (caught by an assertion for data files; NOT caught for video files, which would silently
+# concatenate). Use a threshold near zero instead of "small": every episode's file already
+# exceeds it once written, so the size check always fires before the *next* episode is added,
+# forcing a genuine one-episode-per-file split regardless of episode length.
+ONE_EPISODE_PER_FILE_MB = dict(data_files_size_in_mb=1e-6, video_files_size_in_mb=1e-6)
 
 
 def gray_to_3ch(a: np.ndarray) -> np.ndarray:
