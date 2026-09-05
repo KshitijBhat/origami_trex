@@ -1,11 +1,97 @@
-# Preparing the Origami dataset
+# Origami dataset preparation
 
 `origami/prepare.py` converts the Robotic Origami Challenge dataset
 (`SharpaIT/Robotic_Origami_Challenge`, gated on the Hub) into the T-Rex eef-62 LeRobot format
 consumed by `T-Rex/qwen_vla/lerobot_dataset.py::TRexLeRobotDataset`. See REDESIGN_PLAN.md §5
-for the full design; this is just the command and its arguments.
+for the full design; this doc covers setup end-to-end plus the prepare command and its
+arguments.
 
-It runs three phases per split (train/val are prepared separately, into separate
+## 1. Clone the repo (with the T-Rex submodule)
+
+```bash
+git clone --recurse-submodules <this-repo-url> origami_trex
+cd origami_trex
+```
+
+If you already cloned without `--recurse-submodules`:
+
+```bash
+git submodule update --init --recursive
+```
+
+This must check out `T-Rex/` at the pinned commit (`f88e10c`) with **zero local diff** —
+`T-Rex/` is never modified in this repo (gate G0 in `origami/tests/test_upstream_drift.py`
+enforces this).
+
+## 2. Install `uv` and sync the environment
+
+This project uses [`uv`](https://docs.astral.sh/uv/) for Python/venv/dependency management —
+never bare `pip` or `pip --user`.
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # skip if uv is already installed
+uv sync --extra dev
+```
+
+`uv sync` reads `pyproject.toml`/`uv.lock`, installs a matching Python (>=3.12) if you don't
+already have one, creates `.venv/` at the repo root, and installs everything: `pinocchio`
+(`pin`) + `pin-pink` (**not** the PyPI package literally named `pink` — that's an unrelated
+code-formatting tool that shadows the real inverse-kinematics library) + `qpsolvers[daqp]`
+for FK/IK, `av` for video decode, `lerobot[dataset]`, `transformers`/`accelerate`/`timm` for
+the T-Rex model, plus `pytest` (the `dev` extra).
+
+Use `.venv/bin/python` or `uv run <cmd>` for everything below — never the system Python.
+
+Verify the venv works:
+
+```bash
+.venv/bin/python -c "import pinocchio, pink, av, lerobot; print('ok')"
+```
+
+## 3. Get Hub access and set `HF_TOKEN`
+
+`SharpaIT/Robotic_Origami_Challenge` is a **gated** dataset — request access on its Hub page
+first, then create a read-scoped token at https://huggingface.co/settings/tokens.
+
+Put it in a `.env` file at the repo root (already `.gitignore`d — never commit a token):
+
+```bash
+echo 'HF_TOKEN=hf_...' > .env
+```
+
+Load it into your shell before running anything that talks to the Hub:
+
+```bash
+set -a && source .env && set +a
+```
+
+(or just `export HF_TOKEN=hf_...` directly, or pass `--hf-token hf_...` to `prepare.py`
+below instead of relying on the env var).
+
+## 4. Sanity-check the install
+
+```bash
+.venv/bin/python -m pytest origami/tests/ -q
+```
+
+Most of these tests are CPU-only and network-free, but several (`test_convert.py`,
+`test_merge.py`, `test_verify.py`, `test_delayed_lerobot_dataset.py`) need a local fixture
+season at `season_POC22061_2026_05_23_19_21_25_train/lerobot3.0/` at the repo root (gitignored,
+~2.8 GB) — fetch it once with `HF_TOKEN` set:
+
+```bash
+.venv/bin/python -c "
+from origami.fetch import download_season
+download_season('season_POC22061_2026_05_23_19_21_25_train', '.', '$HF_TOKEN')
+"
+```
+
+The whole suite takes a few minutes (real FK/IK, real video decode/encode against that
+fixture — nothing here is mocked out). Expect it to pass fully before moving on.
+
+## 5. Prepare the dataset
+
+`prepare.py` runs three phases per split (train/val are prepared separately, into separate
 `--out-root`s, but **share one `LockedConfig`** — see below):
 
 1. **Phase 0** — fetches `meta/` + `data/` only (no video, ~66 MB/season) for every season in
@@ -22,7 +108,7 @@ It runs three phases per split (train/val are prepared separately, into separate
 
 Run it from the repo root with the project venv (`uv run` or `.venv/bin/python`).
 
-## Command
+### Command
 
 ```bash
 export HF_TOKEN=hf_...   # or pass --hf-token
@@ -82,7 +168,7 @@ Don't reuse that `--out-root` for a real run afterward — `prep_config` locking
 guards the conversion *settings*, not which seasons were included, so a later full run would
 happily merge into a partially-populated root.
 
-## Disk and cache space
+### Disk and cache space
 
 - **`--cache-root`** (raw per-season downloads, deleted right after each season converts):
   needs `--disk-budget * 3.5 GB` free — ~3.5 GB per season resident at once, not the whole
@@ -97,7 +183,7 @@ happily merge into a partially-populated root.
 - `--cache-root` and `--out-root` can point at the same filesystem or different ones; there's
   no requirement they be on the same disk.
 
-## Arguments
+### Arguments
 
 | flag | default | meaning |
 |---|---|---|
@@ -116,7 +202,7 @@ happily merge into a partially-populated root.
 | `--locked-config-path` | `<cache-root>/locked_config.json` | Where the shared `LockedConfig` (§3.3) is read from / written to. |
 | `--limit-seasons` | *(none)* | Restrict the resolved split to the first N seasons — for a quick local smoke test only; use a separate `--out-root` from any real run (see above). |
 
-## Preflight checks (fail fast, before any download)
+### Preflight checks (fail fast, before any download)
 
 - `--hf-token` is validated against the Hub before phase 0 runs.
 - Every season in the requested split must resolve on the Hub, and the split lists
@@ -129,7 +215,7 @@ happily merge into a partially-populated root.
   `meta/origami_prep.json` on first write and locked in. (`--deform-size`'s codec and the
   frame stride are fixed constants, not CLI flags, so they can't drift silently.)
 
-## After it finishes
+### After it finishes
 
 Phase 2 already ran `origami/verify.py`'s root-scale gates (G18, G8/G8b, G6, G4) against the
 merged root and would have raised if any failed, so nothing further is required. To re-check

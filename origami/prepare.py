@@ -33,6 +33,7 @@ from origami.fetch import (
     drop_season,
     have_season,
     list_hub_seasons,
+    season_has_lerobot3_data,
     validate_token,
 )
 from origami.kinematics import LockedConfig, OrigamiKinematics, arm_default_from_state_median, urdf_sha256
@@ -118,7 +119,7 @@ def check_disk_budget(out_root: Path, cache_root: Path, n_seasons: int, disk_bud
 
 def phase0_locked_config(
     seasons: list[str], cache_root: Path, token: str
-) -> tuple[LockedConfig, np.ndarray, np.ndarray, int]:
+) -> tuple[LockedConfig, np.ndarray, np.ndarray, int, list[str]]:
     """§5.5 phase 0: meta+data only (no video) per season, for the exact frame total and to
     compute ``LockedConfig`` + arm medians over the whole split -- must run before phase 1.
 
@@ -127,20 +128,32 @@ def phase0_locked_config(
     being prepared (§3.2: the baked ``action`` representation is invariant to the lock value,
     but the absolute 62-D ``state``/``action_abs`` and their q01/q99 stats are not -- a val
     run computing its own median would silently live in a different frame than train's).
+
+    Some hub seasons were never backfilled to lerobot3.0 (meta/videos present, no ``data/``
+    at all) -- skip those here rather than crashing on a missing parquet dir; they're also
+    skipped in phase 1 (``run_phase1``), so they never enter the merge. Returns the actually-
+    used season subset alongside the stats, for an accurate ``seasons_used`` record.
     """
     all_states = []
     total_frames = 0
+    seasons_used = []
     for season in seasons:
+        if not season_has_lerobot3_data(season, token):
+            logger.warning(
+                "phase0: season %s has no lerobot3.0/data on the hub (never backfilled) -- skipping", season,
+            )
+            continue
         local_dir = download_season_meta_and_data(season, cache_root, token)
         df = pd.read_parquet(Path(local_dir) / "lerobot3.0" / "data", columns=["observation.state"])
         states = np.stack(df["observation.state"].to_numpy())
         all_states.append(states)
         total_frames += len(states)
+        seasons_used.append(season)
         drop_season(season, cache_root)
     all_states = np.concatenate(all_states, axis=0)
     locked = LockedConfig.from_state_median(all_states)
     left_default, right_default = arm_default_from_state_median(all_states)
-    return locked, left_default, right_default, total_frames
+    return locked, left_default, right_default, total_frames, seasons_used
 
 
 def write_locked_config(
@@ -269,8 +282,22 @@ def run_phase1(
     manifest_path = shard_root / "manifest.jsonl"
 
     all_entries = _read_manifest(manifest_path)
-    done_seasons = {s for s, e in all_entries.items() if e.get("status") == "done"}
+    done_seasons = {s for s, e in all_entries.items() if e.get("status") in ("done", "skipped")}
     todo = [s for s in seasons if s not in done_seasons]
+
+    unbackfilled = [s for s in todo if not season_has_lerobot3_data(s, token)]
+    if unbackfilled:
+        logger.warning(
+            "phase1: %d season(s) have no lerobot3.0/data on the hub (never backfilled) -- "
+            "skipping: %s", len(unbackfilled), unbackfilled,
+        )
+        with open(manifest_path, "a") as mf:
+            for season in unbackfilled:
+                entry = {"season": season, "status": "skipped", "reason": "no lerobot3.0/data on hub"}
+                mf.write(json.dumps(entry) + "\n")
+                all_entries[season] = entry
+        todo = [s for s in todo if s not in unbackfilled]
+
     logger.info("phase1: %d/%d seasons already done, %d to convert", len(done_seasons), len(seasons), len(todo))
 
     locked_dict = {
@@ -387,9 +414,10 @@ def main(argv: list[str] | None = None) -> None:
             f"--split train first (add --phase locked to only run phase 0)."
         )
         logger.info("phase 0: computing locked config over %d train seasons", len(seasons))
-        locked, default_left, default_right, locked_total_frames = phase0_locked_config(
+        locked, default_left, default_right, locked_total_frames, seasons_used = phase0_locked_config(
             seasons, cache_root, args.hf_token)
-        write_locked_config(locked_config_path, locked, default_left, default_right, locked_total_frames, seasons)
+        write_locked_config(
+            locked_config_path, locked, default_left, default_right, locked_total_frames, seasons_used)
         logger.info(
             "phase 0 done: %d total frames, locked digest %s, written to %s",
             locked_total_frames, locked.digest(), locked_config_path,

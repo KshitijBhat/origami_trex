@@ -131,6 +131,29 @@ def drop_season(season: str, cache_root: Path) -> None:
         shutil.rmtree(path)
 
 
+def season_has_lerobot3_data(season: str, token: str) -> bool:
+    """Hub-side check, before any download is attempted: does this season actually have a
+    lerobot3.0 backfill (a ``data/`` dir and the ``.backfill_complete`` marker)?
+
+    Some hub seasons were never backfilled to v3.0 -- their ``lerobot3.0/`` tree exists but
+    holds only ``meta/`` (and sometimes a partial ``videos/``), no ``data/`` at all. Attempting
+    to download/read those season crashes deep inside pandas with a bare
+    ``FileNotFoundError``; catching it here up front lets callers skip the season cleanly.
+    """
+    api = HfApi()
+    try:
+        entries = api.list_repo_tree(
+            HF_REPO_ID, repo_type="dataset", token=token,
+            path_in_repo=f"{season}/lerobot3.0", recursive=True,
+        )
+    except HfHubHTTPError:
+        return False
+    paths = [e.path for e in entries]
+    has_data = any(p.startswith(f"{season}/lerobot3.0/data/") for p in paths)
+    has_marker = any(p == f"{season}/lerobot3.0/.backfill_complete" for p in paths)
+    return has_data and has_marker
+
+
 def list_hub_seasons(token: str) -> set[str]:
     """All season directories on the hub, via the (public) tree listing."""
     api = HfApi()
