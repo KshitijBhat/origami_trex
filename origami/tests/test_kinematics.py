@@ -194,6 +194,28 @@ def test_locked_config_digest_stable_and_sensitive():
     assert c.digest() != a.digest()
 
 
+def test_locked_config_digest_is_dtype_invariant(fixture_states):
+    """A JSON round trip (prepare.py's locked_config.json, §5.5) always reconstructs
+    float64 arrays via ``np.array(python_floats)``, but ``LockedConfig.from_state_median``
+    on real parquet data comes out float32 -- the digest must agree across both, or the
+    exact scenario this guards against (write float32-derived config, load it back as
+    float64, compare digests) spuriously fails every time. This regressed once already:
+    hashing raw ``.tobytes()`` after ``np.round(x, 6)`` is NOT dtype-invariant, because
+    float32's coarser grid can round to a bit-different float64 value than the same decimal
+    number stored natively in float64."""
+    locked_f32 = LockedConfig.from_state_median(fixture_states.astype(np.float32))
+    assert locked_f32.lower_body.dtype == np.float32
+
+    roundtripped = LockedConfig(
+        lower_body=np.array(locked_f32.lower_body.tolist()),
+        neck=np.array(locked_f32.neck.tolist()),
+        left_hand=np.array(locked_f32.left_hand.tolist()),
+        right_hand=np.array(locked_f32.right_hand.tolist()),
+    )
+    assert roundtripped.lower_body.dtype == np.float64
+    assert roundtripped.digest() == locked_f32.digest()
+
+
 def test_locked_config_from_state_median(fixture_states):
     locked = LockedConfig.from_state_median(fixture_states)
     assert locked.lower_body.shape == (5,)

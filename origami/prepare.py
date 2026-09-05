@@ -35,9 +35,10 @@ from origami.fetch import (
     list_hub_seasons,
     validate_token,
 )
-from origami.kinematics import LockedConfig, OrigamiKinematics, arm_default_from_state_median
+from origami.kinematics import LockedConfig, OrigamiKinematics, arm_default_from_state_median, urdf_sha256
 from origami.merge import merge_shards
 from origami.splits import parse_splits, validate_splits
+from origami.verify import run_all_gates
 
 logger = logging.getLogger(__name__)
 
@@ -53,21 +54,30 @@ FIXTURE_SEASON_NAME = "season_POC22061_2026_07_23_10_20_33_train"
 @dataclass
 class PrepConfig:
     """Recorded in ``meta/origami_prep.json`` at the merged root; changing any of these
-    fields invalidates an existing root (§5.5) -- refuse to write into it."""
+    fields invalidates an existing root (§5.5) -- refuse to write into it.
 
+    Every field here must either be a real CLI-configurable knob that's actually threaded
+    into ``ConvertConfig`` (``instruction``, ``image_size``, ``deform_size``), or a genuine
+    fixed constant enforced elsewhere (``deform_codec`` is hardcoded in
+    ``convert.py``'s ``LOSSLESS_DEFORM_ENCODER``; ``frame_stride`` is fixed by D4) -- never a
+    field that looks configurable but silently isn't, which made this comparison vacuous.
+    """
+
+    instruction: str
+    extra_seasons: str = "none"
     image_size: tuple[int, int] = (224, 224)
     deform_size: tuple[int, int] = (240, 240)
-    deform_codec: str = "lossless_h264"
-    frame_stride: int = 1
-    extra_seasons: str = "none"
+    deform_codec: str = "lossless_h264"  # fixed: convert.py's LOSSLESS_DEFORM_ENCODER (§5.2)
+    frame_stride: int = 1  # fixed: D4 (settled, not an ablation knob)
 
     def as_dict(self) -> dict:
         return {
+            "instruction": self.instruction,
+            "extra_seasons": self.extra_seasons,
             "image_size": list(self.image_size),
             "deform_size": list(self.deform_size),
             "deform_codec": self.deform_codec,
             "frame_stride": self.frame_stride,
-            "extra_seasons": self.extra_seasons,
         }
 
 
@@ -110,7 +120,14 @@ def phase0_locked_config(
     seasons: list[str], cache_root: Path, token: str
 ) -> tuple[LockedConfig, np.ndarray, np.ndarray, int]:
     """§5.5 phase 0: meta+data only (no video) per season, for the exact frame total and to
-    compute ``LockedConfig`` + arm medians over the whole split -- must run before phase 1."""
+    compute ``LockedConfig`` + arm medians over the whole split -- must run before phase 1.
+
+    §3.3 is explicit that this is computed **once over the training split, then frozen** --
+    callers must only ever pass train seasons here, never whatever ``--split`` is currently
+    being prepared (§3.2: the baked ``action`` representation is invariant to the lock value,
+    but the absolute 62-D ``state``/``action_abs`` and their q01/q99 stats are not -- a val
+    run computing its own median would silently live in a different frame than train's).
+    """
     all_states = []
     total_frames = 0
     for season in seasons:
@@ -124,6 +141,33 @@ def phase0_locked_config(
     locked = LockedConfig.from_state_median(all_states)
     left_default, right_default = arm_default_from_state_median(all_states)
     return locked, left_default, right_default, total_frames
+
+
+def write_locked_config(
+    path: Path, locked: LockedConfig, default_q_left7: np.ndarray, default_q_right7: np.ndarray,
+    total_frames: int, seasons_used: list[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "lower_body": locked.lower_body.tolist(), "neck": locked.neck.tolist(),
+        "left_hand": locked.left_hand.tolist(), "right_hand": locked.right_hand.tolist(),
+        "default_q_left7": np.asarray(default_q_left7).tolist(),
+        "default_q_right7": np.asarray(default_q_right7).tolist(),
+        "digest": locked.digest(),
+        "total_frames": total_frames,
+        "n_seasons_used": len(seasons_used),
+        "seasons_used": seasons_used,
+    }, indent=2))
+
+
+def load_locked_config(path: Path) -> tuple[LockedConfig, np.ndarray, np.ndarray, int]:
+    data = json.loads(path.read_text())
+    locked = LockedConfig(
+        lower_body=np.array(data["lower_body"]), neck=np.array(data["neck"]),
+        left_hand=np.array(data["left_hand"]), right_hand=np.array(data["right_hand"]),
+    )
+    assert locked.digest() == data["digest"], f"{path}: locked_config.json's own digest field is stale/corrupt"
+    return locked, np.array(data["default_q_left7"]), np.array(data["default_q_right7"]), data["total_frames"]
 
 
 def _process_one_season(
@@ -172,6 +216,28 @@ def _process_one_season(
     return manifest_entry
 
 
+def _read_manifest(manifest_path: Path) -> dict[str, dict]:
+    """Single source of truth for phase-1 resumability and results -- keyed by season, last
+    entry wins (a retried season's new entry supersedes its earlier ``failed`` one)."""
+    entries: dict[str, dict] = {}
+    if not manifest_path.exists():
+        return entries
+    for line in manifest_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning(
+                "%s: skipping a malformed trailing line (likely a crash mid-write); "
+                "that season will be retried", manifest_path,
+            )
+            continue
+        entries[entry["season"]] = entry
+    return entries
+
+
 def run_phase1(
     seasons: list[str],
     cache_root: Path,
@@ -184,20 +250,26 @@ def run_phase1(
     token: str,
     workers: int,
     disk_budget: int,
-) -> list[Path]:
-    """Convert every season not already marked DONE, ``workers``-way parallel, at most
-    ``disk_budget`` seasons resident on disk at once. Returns the shard roots to merge."""
+) -> tuple[list[Path], dict[str, dict]]:
+    """Convert every season not already recorded ``"status": "done"`` in ``manifest.jsonl``,
+    ``workers``-way parallel, at most ``disk_budget`` seasons resident on disk at once.
+
+    Returns ``(shard_roots, manifest_entries)`` -- both derived from the same parsed
+    manifest, never a separate DONE-marker file (a season whose manifest line was written
+    but whose marker-touch never ran, e.g. a crash in between, must not disagree with itself
+    about being done). A season whose conversion raises gets a durable ``"status": "failed"``
+    manifest entry (§5.1: "mark the season failed and continue") instead of only a log line,
+    so a re-run retries exactly the failed/missing seasons and the failure is auditable
+    without needing to have kept stdout.
+    """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     shard_root = Path(shard_root)
     shard_root.mkdir(parents=True, exist_ok=True)
     manifest_path = shard_root / "manifest.jsonl"
 
-    done_seasons = set()
-    if manifest_path.exists():
-        for line in manifest_path.read_text().splitlines():
-            done_seasons.add(json.loads(line)["season"])
-
+    all_entries = _read_manifest(manifest_path)
+    done_seasons = {s for s, e in all_entries.items() if e.get("status") == "done"}
     todo = [s for s in seasons if s not in done_seasons]
     logger.info("phase1: %d/%d seasons already done, %d to convert", len(done_seasons), len(seasons), len(todo))
 
@@ -223,14 +295,20 @@ def run_phase1(
                 season = futures[fut]
                 try:
                     entry = fut.result()
-                except Exception:
+                    entry["status"] = "done"
+                except Exception as e:
                     logger.exception("phase1: season %s failed", season)
-                    continue
+                    entry = {"season": season, "status": "failed", "error": repr(e)}
                 mf.write(json.dumps(entry) + "\n")
                 mf.flush()
-                (shard_root / season / "DONE").touch()
+                all_entries[season] = entry
 
-    return [shard_root / s for s in seasons if (shard_root / s / "DONE").exists()]
+    failed = [s for s in seasons if all_entries.get(s, {}).get("status") == "failed"]
+    if failed:
+        logger.warning("phase1: %d season(s) failed and are excluded from the merge: %s", len(failed), failed)
+
+    shard_roots = [shard_root / s for s in seasons if all_entries.get(s, {}).get("status") == "done"]
+    return shard_roots, all_entries
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -245,6 +323,25 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--extra-seasons", choices=["none", "train"], default="none")
     parser.add_argument("--instruction", default=INSTRUCTION)
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"))
+    parser.add_argument("--image-size", type=int, nargs=2, default=[224, 224], metavar=("H", "W"))
+    parser.add_argument("--deform-size", type=int, nargs=2, default=[240, 240], metavar=("H", "W"))
+    parser.add_argument(
+        "--phase", choices=["locked", "all"], default="all",
+        help="'locked': only compute/refresh the shared train-split LockedConfig "
+             "(--locked-config-path) and exit. 'all' (default): locked (if needed) + convert "
+             "+ merge + verify.",
+    )
+    parser.add_argument(
+        "--locked-config-path", type=Path, default=None,
+        help="Shared locked_config.json (§3.3: computed once over train, frozen, reused for "
+             "val). Defaults to <cache-root>/locked_config.json. Must already exist when "
+             "--split val (val never computes its own).",
+    )
+    parser.add_argument(
+        "--limit-seasons", type=int, default=None,
+        help="Only prepare the first N seasons of the resolved split -- for a quick local "
+             "smoke test, not a real prep run. Use a separate --out-root from any real run.",
+    )
     args = parser.parse_args(argv)
 
     assert args.hf_token, "HF_TOKEN required: pass --hf-token or set the HF_TOKEN env var"
@@ -252,7 +349,11 @@ def main(argv: list[str] | None = None) -> None:
 
     out_root = Path(args.out_root)
     cache_root = Path(args.cache_root)
-    prep_cfg = PrepConfig(extra_seasons=args.extra_seasons)
+    image_size, deform_size = tuple(args.image_size), tuple(args.deform_size)
+    prep_cfg = PrepConfig(
+        instruction=args.instruction, extra_seasons=args.extra_seasons,
+        image_size=image_size, deform_size=deform_size,
+    )
 
     prep_meta_path = out_root / "meta" / "origami_prep.json"
     if prep_meta_path.exists():
@@ -263,25 +364,74 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     seasons = resolve_season_list(args.split, args.extra_seasons, args.hf_token)
+    if args.limit_seasons is not None:
+        seasons = seasons[: args.limit_seasons]
+        logger.info("--limit-seasons %d: restricting to %s", args.limit_seasons, seasons)
     check_disk_budget(out_root, cache_root, len(seasons), args.disk_budget)
 
-    logger.info("phase 0: locked config over %d seasons", len(seasons))
-    locked, default_left, default_right, total_frames = phase0_locked_config(seasons, cache_root, args.hf_token)
-    logger.info("phase 0 done: %d total frames, locked digest %s", total_frames, locked.digest())
+    # §3.3/§3.2: LockedConfig is computed once over the TRAIN split and frozen -- never
+    # recomputed per --split. Load the shared artifact if it exists; only a train run may
+    # create it fresh (a val run with none yet is a usage error, not something to silently
+    # compute over val's own seasons).
+    locked_config_path = args.locked_config_path or (cache_root / "locked_config.json")
+    if locked_config_path.exists():
+        locked, default_left, default_right, locked_total_frames = load_locked_config(locked_config_path)
+        logger.info(
+            "phase 0: loaded existing locked config from %s (%d frames, digest %s)",
+            locked_config_path, locked_total_frames, locked.digest(),
+        )
+    else:
+        assert args.split == "train", (
+            f"{locked_config_path} doesn't exist yet -- LockedConfig (§3.3) must be computed "
+            f"once over the TRAIN split before preparing '{args.split}'. Run with "
+            f"--split train first (add --phase locked to only run phase 0)."
+        )
+        logger.info("phase 0: computing locked config over %d train seasons", len(seasons))
+        locked, default_left, default_right, locked_total_frames = phase0_locked_config(
+            seasons, cache_root, args.hf_token)
+        write_locked_config(locked_config_path, locked, default_left, default_right, locked_total_frames, seasons)
+        logger.info(
+            "phase 0 done: %d total frames, locked digest %s, written to %s",
+            locked_total_frames, locked.digest(), locked_config_path,
+        )
+
+    if args.phase == "locked":
+        logger.info("--phase locked: stopping after phase 0.")
+        return
 
     logger.info("phase 1: converting %d seasons (workers=%d, disk_budget=%d)", len(seasons), args.workers, args.disk_budget)
-    cfg = ConvertConfig(instruction=args.instruction)
-    shard_roots = run_phase1(
+    cfg = ConvertConfig(instruction=args.instruction, image_size=image_size, deform_size=deform_size)
+    shard_roots, manifest_entries = run_phase1(
         seasons, cache_root, out_root.parent / f"{out_root.name}_shards", args.urdf,
         locked, default_left, default_right, cfg, args.hf_token, args.workers, args.disk_budget,
     )
+    # §1.1a: replace the corpus-size estimate with the exact sum phase 1 actually measured
+    # (each season's SeasonResult.n_frames), for whichever split this run is -- not the
+    # train-only total_frames stored inside locked_config.json.
+    exact_total_frames = sum(
+        manifest_entries[s]["n_frames"] for s in seasons if manifest_entries.get(s, {}).get("status") == "done"
+    )
+    logger.info("phase 1 done: %d exact frames across %d converted seasons", exact_total_frames, len(shard_roots))
 
     logger.info("phase 2: merging %d shards", len(shard_roots))
     merge_shards(shard_roots, out_root)
 
+    logger.info("phase 2: verifying merged root (G18, G8/G8b, G6, G4)")
+    gate_results = run_all_gates(out_root, args.split, args.extra_seasons)
+    logger.info("verify: %s", gate_results)
+    assert all(gate_results.values()), f"post-merge verification failed: {gate_results}"
+
     prep_meta_path.parent.mkdir(parents=True, exist_ok=True)
     prep_meta = json.loads(prep_meta_path.read_text()) if prep_meta_path.exists() else {}
     prep_meta["prep_config"] = prep_cfg.as_dict()
+    prep_meta["instruction"] = args.instruction
+    prep_meta["urdf_sha256"] = urdf_sha256(args.urdf)
+    prep_meta["locked_config"] = {
+        "lower_body": locked.lower_body.tolist(), "neck": locked.neck.tolist(),
+        "left_hand": locked.left_hand.tolist(), "right_hand": locked.right_hand.tolist(),
+        "digest": locked.digest(),
+    }
+    prep_meta["total_frames"] = exact_total_frames
     prep_meta_path.write_text(json.dumps(prep_meta, indent=2))
     logger.info("done: %s", out_root)
 

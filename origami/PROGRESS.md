@@ -14,8 +14,8 @@ handoff artifact if context is compacted.
 | 5 | stats.py | **done** | G8, G8b pass (see notes -- G8b's exact-finger claim doesn't reproduce on this fixture) |
 | 6 | convert.py | **done** | smoke-tested against real fixture season (1 episode full-length + truncated unit tests); G4/G4b, G6 pass in `test_convert.py` |
 | 7 | fetch.py + merge.py + prepare.py | **done** (see notes) | - |
-| 8 | verify.py | not started | - |
-| 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | not started | - |
+| 8 | verify.py | **done** (scoped to gates checkable now; see notes) | - |
+| 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | **done** (see notes; real training run itself is GPU-only, untested here) | - |
 | 10 | Full prep run (user-executed) | not started | - |
 | 10b | diagnose_shift.py + eval_offline.py --zero-shot | not started | - |
 | 10c | refit_vqvae_stats.py (if needed) | not started | - |
@@ -50,7 +50,7 @@ handoff artifact if context is compacted.
 | G14 | Instruction identity | not started | - |
 | G15 | VQ-VAE codebook health | not started | - |
 | G16 | Token budget | not started | - |
-| G17 | Delay-curriculum parity | not started | - |
+| G17 | Delay-curriculum parity | **PARTIAL** | loader half (`tactile_f6s_delayed`/`tactile_f6_history` == the extended F6 window's slice at each configured delay) passes in `test_delayed_lerobot_dataset.py`, real fixture data; the deploy-parity half needs `serve_zenoh.py` (step 13), not implemented yet |
 | G18 | Season-set integrity | not started | - |
 
 ## Notes / surprises
@@ -248,6 +248,236 @@ handoff artifact if context is compacted.
   writing synthetic parquet) against synthetic 65-D state data — frame totals and
   `LockedConfig`/arm-default shapes came out correct.
 * Full `origami/tests/` suite: **48/48 pass**, ~115s total.
+
+## Step 8 findings (verify.py) — scoped to gates checkable at this point in the build
+
+* Gates G0, G1a, G1b, G2, G2b, G3, G3b, G8, G8b already live as fixture-scale pytest tests
+  (steps 3/5); `verify.py unit` just re-runs those files via `pytest -q` rather than
+  reimplementing them (§10: "every gate is a test... or a verify.py subcommand"). Confirmed
+  working: `python -m origami.verify unit` -> 22 passed.
+* Added root-scale subcommands (`verify.py all --root <merged_root>`, the exact call
+  `prepare.py`'s phase 2 makes per §5.5) for the 4 gates meaningfully checkable **from a
+  merged root alone**, i.e. after stream-and-delete has already dropped the original raw
+  season videos: **G18** (recorded `origami_prep.json` seasons vs the parsed split list,
+  exact match unless `--extra-seasons train`), **G8/G8b** (re-validates `trex_norm_stats.json`
+  shapes + the tactile mask isn't all-`True`), **G6** (weakened to a *self-consistency* check
+  -- `gray_to_3ch` replicates one luma channel into 3, so all 3 decoded channels of every
+  deform tile must be exactly equal; this doesn't re-verify losslessness against the
+  now-gone source video, which is `test_convert.py`'s job while the source is still on
+  disk), **G4** (weakened to a *pose-reconstruction* check -- rebuilds the left/right FK
+  matrices from the stored 9-D `observation.state`/`action_abs` and re-derives the k=0 chunk
+  step via the real `build_action_chunk`, comparing to the stored chunk's k=0 step at
+  `atol=1e-5`; a literal full-season bitwise check needs the original per-frame `action65`,
+  which is also gone by merge time -- that's `test_convert.py`'s `test_g4_...` job).
+  G7/G7b/G9-G17 are not yet implementable (need `train_origami.py`/`policy.py`/
+  `serve_zenoh.py`, steps 9/13/14) -- `verify.py list` reports why for each.
+* Manually confirmed `verify.py all --root ...` against a real 2-shard merged root: G8/G6/G4
+  all pass (100% at `atol=1e-5`); G18 correctly **fails** when the merged root's seasons don't
+  match the given split (expected -- the manual test merged one season twice, not a real
+  101-season train split).
+* `test_verify.py` (5 tests, all pass, real FK/decode/encode/merge -- same 2-shard fixture
+  pattern as `test_merge.py`): G8/G6/G4 pass on real merged data; G18 both matches (mocked
+  split == the fixture season) and correctly fails (mocked split != the fixture season).
+* Full `origami/tests/` suite: **53/53 pass**, ~163s total.
+
+## Step 9 findings (trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh)
+
+* **Two real environment gaps found: T-Rex's own declared dependencies (`timm`, `wandb`,
+  `h5py`, `accelerate`) were never actually installed in this dev venv**, because steps
+  1-8 only ever imported `utils.lerobot_common` and `qwen_vla.lerobot_dataset` — neither
+  touches `qwen_vla.modeling_vla` (needs `timm` via `diffusion.py`) or `scripts/midtrain.py`
+  (needs `wandb`/`h5py`/`accelerate`). The moment `trex_patch.py` imports
+  `qwen_vla.modeling_vla` (for patch 2's assertion) and `train_origami.py` imports the
+  vendored script's own dependencies, both failed with `ModuleNotFoundError` on a fresh
+  `uv sync --extra dev`. Fixed by adding `timm`, `wandb`, `h5py`, `accelerate` to
+  `pyproject.toml` (T-Rex's own `pyproject.toml`/`requirements.txt` pins versions; ours
+  uses floors, consistent with the existing `transformers>=4.53.0` convention) and
+  re-running `uv sync`. `origami/train_origami.py` now imports cleanly stand-alone
+  (`from origami import train_origami` succeeds, confirmed).
+* **`trex_patch.py` (§7.1).** Added `qwen_vla/modeling_vla.py` and
+  `qwen_vla/modeling_qwen3vl_mot.py` to `upstream_manifest.json` (they were never hashed
+  before — only files direct-imported/vendored in steps 1-8 were) at f88e10c; this
+  automatically extends `test_upstream_drift.py`'s parametrized hash checks to cover them,
+  since that test parametrizes over every key already in the manifest.
+  * Patch 1 (`Qwen3VLAttentionMoT.forward`'s cached-prefix read) is implemented exactly per
+    the plan's `read_cached_kv` code, gated on `torch.is_grad_enabled()`. Real
+    `transformers.cache_utils.DynamicCache` (the actual class T-Rex uses, confirmed via
+    `pip show transformers`/direct inspection) uses the `.layers` list layout, not the older
+    `key_cache`/`value_cache` top-level lists — `read_cached_kv`'s first branch is what
+    actually executes on the installed version; the second branch is dead code on this
+    version but kept per the plan's exact given code (harmless, and would matter on an
+    older transformers).
+  * Patch 2 is exactly what the plan describes: an assertion, not a functional patch.
+    Verified by source inspection (`inspect.getsource` + locating the `else:` branch) that
+    `modeling_vla.py`'s `forward_flow_action_{full,partial}` still omit `attention_mask=` in
+    their `past_kv is not None` branch on the pinned commit.
+  * `test_trex_patch.py` (8 tests, all pass, CPU-only, no GPU): idempotency of `apply()`;
+    both upstream-hash and patch-2 assertions pass on the real pinned checkout;
+    `read_cached_kv` returns `None` before any cache write and matches a manual
+    `DynamicCache.update()` reference afterward without appending; a synthetic
+    "no-grad real forward that appends once, then grad-enabled recompute that must
+    reproduce the identical K/V without a second append" scenario (the exact bug patch 1
+    fixes) passes bit-for-bit (`torch.equal`).
+  * **Not verified for real** (needs GPU + a full model): that gradient checkpointing
+    actually double-appends without the patch, end-to-end, inside a real
+    `Qwen3VLVLAModel` forward/backward. The unit tests prove the patched read function is
+    behaviorally equivalent to a correct single append using synthetic cache objects
+    (matching the plan's ask), which is what's checkable without a GPU; the full
+    integration is implicitly exercised whenever `--gradient_checkpointing 1` is first used
+    for real (§11 pilot run, step 11).
+* **`train_origami.py` (§7.2).** Vendored from `git -C T-Rex show
+  origin/full-pipeline:scripts/midtrain.py` (b23eafe, already in `upstream_manifest.json`
+  from step 1) with the 8 numbered deltas, each marked `# ORIGAMI-DELTA:`.
+  * Two deltas needed judgment calls beyond the plan's literal wording, both documented
+    inline: (1) item 6 (`train_flare`) only applies to `train()`'s loop — `run_validation`
+    never computes a flare loss at all (only gates sequence shape via its `use_flare` arg),
+    so there was nothing to change there. (2) item 7 (`--max_steps`) needed an actual loop
+    break, not just truncating the LR schedule's period as the plan's one-line description
+    literally says — without a break, `--max_steps 40000` with `--n_epochs 1` would run
+    every batch in the epoch regardless (`steps_per_epoch` for the real 101-season root is
+    unknown until step 10's real prep run, but there is no reason to assume it's exactly
+    40000). Added a `stop_training` flag breaking both the batch and epoch loops, plus a
+    final checkpoint save on early stop.
+  * **`locked_config` in the checkpoint is honest about a real gap, not silently
+    papered over**: `meta/origami_prep.json` (written by `convert.py`/`merge.py`, read by
+    `save_checkpoint` here) only carries `LockedConfig.digest()` (a hash), never the full
+    `lower_body`/`neck`/`left_hand`/`right_hand` arrays — those are computed in
+    `prepare.py::phase0_locked_config` and passed to worker processes in-memory, but never
+    written back out to the merged root. So `training_args.json`'s `locked_config` field is
+    `{"digest": ...}` only. A full G1c cross-check (`serve_zenoh.py` reconstructing the
+    identical `LockedConfig` a checkpoint was trained under) needs `prepare.py` to also
+    persist the arrays at the merged root — flagged here, not fixed (out of scope for step
+    9; `prepare.py` is step 7's deliverable).
+  * `optim=adamw8bit` lazily imports `bitsandbytes`, **not installed** in this dev venv
+    (GPU-only, training-only dependency) — confirmed the import is deferred to inside the
+    `if` branch so nothing else breaks; the branch itself is untestable without it.
+  * `test_train_vendor.py` (3 tests, all pass, CPU-only/network-free — `full-pipeline` was
+    already fetched into the submodule in step 1, so `git show origin/full-pipeline:...` is
+    a local ref lookup): every changed opcode block from `difflib.SequenceMatcher` against
+    the real upstream text carries an `# ORIGAMI-DELTA:` marker within a small context
+    window; vendored file is valid Python; vendored file is a small delta, not a rewrite
+    (>90% of upstream's line count preserved).
+  * **Not verified for real** (needs GPU + real data): that the script actually trains
+    end-to-end. `python -m py_compile`/import-level checks pass; the full run is step 11
+    (pilot, 2000 steps, user-executed).
+* **`delayed_lerobot_dataset.py` (§7.5-B).** `DelayedTRexLeRobotDataset` subclasses
+  `TRexLeRobotDataset`, overriding only `_f6_offsets` (extends the window from `W` to
+  `W + max(tactile_delay_offsets)` entries), `_build_delta_timestamps` (adds 2-offset
+  deform delta_timestamps only for `--tactile_delay_scope both`), and `collate_fn`
+  (recomputes the delay-dependent output keys after calling `super().collate_fn()` for
+  everything else — images/actions/state/flare are untouched by the delay curriculum and
+  reusing the base implementation for them avoids re-deriving already-verified logic).
+  * **`both` scope is a documented simplification, not an exact per-value fetch.** The plan
+    states deform costs "20 video seeks instead of 10" for `both` scope — exactly 2
+    timestamps/key × 10 keys. Since LeRobot's `delta_timestamps` are fixed once at dataset
+    construction (not variable per `__getitem__` call the way `midtrain.py`'s own
+    `rng.choice` per-item sampling is), there is no way to fetch "the one delay value this
+    particular sample happened to draw" without either (a) fetching every configured delay
+    value per key (more than 20 seeks for the default 4-value offset list) or (b) reaching
+    into LeRobot's internal per-item video query API to seek an arbitrary runtime-chosen
+    timestamp, bypassing `delta_timestamps` entirely. Implemented (a)-adjacent but bounded
+    to the plan's literal "20" figure: fetch only `[anchor, max(delay_offsets)]`, and for
+    any sampled nonzero `delay_k` use the max-delay frame as an approximation rather than an
+    exact per-value fetch. F6 does NOT have this limitation (numeric parquet, cheap to
+    extend to the full offset range) and gets an exact per-sample-`delay_k` value, which is
+    what the loader-level G17 test below actually checks. Flagged in the module docstring;
+    revisit once §8.1-D's real throughput measurement says whether `both` is worth using at
+    all.
+  * `test_delayed_lerobot_dataset.py` (4 tests, all pass, real fixture data via
+    `origami.convert.convert_season(..., max_frames_per_episode=...)`, same truncation
+    pattern as `test_convert.py`/`test_merge.py`): `_f6_offsets` extends by exactly
+    `max(delay_offsets)` entries (and matches upstream exactly for `scope="none"`); for
+    every configured delay `k`, forcing `delay_k=k` via a monkeypatched `np.random.default_rng`
+    makes `tactile_f6s_delayed`/`tactile_f6_history` equal `f6_window[:, W-1+k]` /
+    `f6_window[:, k:k+W]` (bf16-precision tolerance, since the model consumes bf16); `scope="none"`
+    leaves `tactile_f6s_delayed == tactile_f6s` (upstream's delay-≡-0 behavior, unchanged).
+    Needed a small `_FakeProcessor`/`_FakeAccelerator` to exercise the real (unmodified)
+    `TRexLeRobotDataset.collate_fn` without a real Qwen checkpoint on disk; also had to set
+    `--use_flare 1 --n_flare_steps 1` in the test config to avoid a **pre-existing upstream
+    quirk** (not something this subclass introduces): a single-offset `delta_timestamps`
+    entry is squeezed (no leading temporal dim, per the step-2 finding), so
+    `TRexLeRobotDataset.collate_fn`'s `head_seq[0]`/`head_seq[fi]` frame-indexing for
+    FLARE only works when `KEY_HEAD` has >=2 offsets — true of the real recipe too
+    (`--use_flare 1 --n_flare_steps 8` always), just not something a `use_flare=0` test
+    config would naturally hit.
+* **`train_origami.sh` (§7.3).** Copied verbatim from the plan; no flags invented beyond
+  what's listed there.
+* Full `origami/tests/` suite: **70/70 pass**, ~187s total (this session added 17 new
+  tests: `test_trex_patch.py` (8), `test_train_vendor.py` (3),
+  `test_delayed_lerobot_dataset.py` (4), plus 2 more from the 2 newly-hashed files'
+  parametrized cases in `test_upstream_drift.py`, on top of the existing 53).
+
+## `prepare.py` review-fix pass (7 issues, user-reported code review)
+
+A user code review of `prepare.py` found 7 real issues, all fixed:
+
+1. **LockedConfig computed per `--split`, not once over train (§3.2/§3.3 violation).**
+   `phase0_locked_config` was handed whatever `--split` resolved, so a val run silently
+   computed its own median and lived in a different absolute-state frame than train's.
+   Fixed: `LockedConfig` is now a persisted, shared artifact (`write_locked_config`/
+   `load_locked_config`, JSON at `--locked-config-path`, default
+   `<cache-root>/locked_config.json`). A train run bootstraps it fresh if absent; a val run
+   with none yet **refuses** (`AssertionError`, tested in
+   `test_main_refuses_to_bootstrap_locked_config_from_val_split`) instead of silently
+   computing over val's own seasons.
+2. **No standalone phase 0 / no persistence.** Added `--phase {locked, all}` (`locked` stops
+   after writing/loading the shared config) and the persistence from (1). A resumed run no
+   longer re-fetches all 126 seasons' meta+data or risks a digest clash discovered only after
+   hours of conversion.
+3. **Resume bookkeeping had two sources of truth** (manifest.jsonl for skip-decisions, a
+   separate `DONE` marker file for the returned shard list, written in that order with a
+   crash window between them). Fixed: `manifest.jsonl` is now the *only* source of truth for
+   both (`_read_manifest`); the `DONE`-marker mechanism is gone entirely.
+4. **Config-invalidation guard was vacuous.** `PrepConfig`'s `image_size`/`deform_size` had
+   no CLI flags and were never threaded into `ConvertConfig`, so the comparison could only
+   ever compare defaults to defaults; `--instruction` (which does vary and does invalidate)
+   wasn't in the compared dict at all. Fixed: added `--image-size`/`--deform-size` CLI flags,
+   wired through to `ConvertConfig`, and added `instruction` to `PrepConfig.as_dict()`.
+   `deform_codec`/`frame_stride` stay as documented fixed constants (hardcoded in
+   `convert.py`/fixed by D4 respectively) rather than fake-configurable fields.
+5. **Phase 2 never called `verify.py`**, despite PROGRESS.md previously claiming it did.
+   Fixed: `origami/verify.py` gained `run_all_gates(root, split, extra_seasons, ...)`
+   (factored out of `cmd_all`), and `prepare.py`'s `main()` now calls it right after
+   `merge_shards(...)` and **asserts** all gates pass before writing final metadata — a
+   synthetic single-season smoke run confirmed this actually halts the run (G18 correctly
+   fails on a 1-season "split") rather than silently completing.
+6. **Required metadata missing from `meta/origami_prep.json`.** Added `instruction`,
+   `urdf_sha256` (via `kinematics.urdf_sha256`), the **full** `LockedConfig` arrays (not just
+   the digest — closes the gap step 9 flagged as blocking a full G1c cross-check), and the
+   exact `total_frames` phase 1 actually measured (summed from `manifest_entries`, replacing
+   the §1.1a estimate) — all written directly in `prepare.py`'s final metadata write, no
+   changes needed to `convert.py`/`merge.py`.
+7. **Failed seasons left no durable record.** `run_phase1` now writes a
+   `{"status": "failed", "error": ...}` manifest entry for any season whose conversion
+   raises (instead of only a log line), and logs which seasons were excluded from the merge.
+   A failed season is retried on the next run (its manifest entry doesn't count as `"done"`).
+
+**A deeper, previously-undetected bug surfaced while verifying fix (1)/(2) against real
+data — `LockedConfig.digest()` was not actually dtype-invariant.** Hashing
+`np.round(arr, 6).tobytes()` depends on the array's dtype: float32 and float64 arrays
+holding the "same" 6-decimal value can hash differently, because float32's coarser
+representable grid can round to a bit-different float64 value than the same decimal number
+stored natively in float64 (confirmed empirically, not just reasoned about — a synthetic
+`1.234567` reproduced it, and so did the real fixture's medians). This matters because
+`phase0_locked_config`'s medians come out **float32** (float32 parquet columns), but
+`json.loads` -> `np.array(python_floats)` always produces **float64** — so every real
+locked-config write/reload round trip was hitting this and would have made the new
+digest-consistency check in `load_locked_config` **always** fail. Fixed in
+`kinematics.py::LockedConfig.digest()`: hash a fixed-precision **decimal string** rendering
+(`f"{v:.6f}"`) instead of raw bytes — verified dtype-invariant both syntactically (a
+synthetic float32-vs-float64 test) and against real data
+(`test_locked_config_digest_is_dtype_invariant`, `test_kinematics.py`). This bug predates
+this fix pass (nothing in steps 1-9 previously round-tripped a `LockedConfig` through JSON to
+expose it) but would have silently broken G1c and the train/val locked-config-sharing fix
+above without this catch.
+
+Verification: `main()` end-to-end (real FK, real convert/merge/verify, `run_phase1`
+monkeypatched to a fast truncated in-process conversion instead of real multiprocessing/
+network) confirmed the fixed pipeline against real fixture data — correct halt on a
+synthetic G18 mismatch, then a full clean pass writing all the new metadata fields
+correctly and consistently (`origami_prep.json`'s `locked_digest` from `merge_shards` ==
+`locked_config.digest` from `prepare.py`'s own final write). Full `origami/tests/` suite:
+**77/77 pass** (+7 new: 6 in `test_prepare.py`, 1 in `test_kinematics.py`), ~185s.
 
 ## Environment
 

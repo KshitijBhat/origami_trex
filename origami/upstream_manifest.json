@@ -1,14 +1,16 @@
 {
-  "f88e10c61da123c68bf0927cf4860bc97a0381f3": {
-    "utils/lerobot_common.py": "249f5c86518bb897780cb0a14e6a7e7ab1062918c635a57ffe9c854dbe0f4f42",
-    "qwen_vla/lerobot_dataset.py": "33e4ecc2fc94df4134eee0351f9b6a07ff86eb3a7c17a3914e6904a1c17bd384",
-    "qwen_vla/__init__.py": "abc39f645ad280d47cbaa872cc09ca0b0c610403bec728c6fcfe765cfc1a021c",
-    "scripts/test.py": "6af6866f0b76e62cf632318e42726d8179a50889b3ad9925489e808073a27f4b",
-    "hardware_code/eval/eval_trex_async.py": "3f49d3d9410247cf6d5da86956b7d1a9a0f006222dc867695b2b4031911cff91",
-    "hardware_code/teleop/ik_utils.py": "fbe3998e30ed73d916a32f96a07f385f154e3cf21dfb61cb59649912a16db745",
-    "hardware_code/teleop/robot_descriptions.py": "e19dd586ccc8a2b5c63bae25c5f754762fc040dcb5359388fd3b0565337c3b46"
-  },
-  "b23eafe564a1457cd4eacb889aaf6fbf29a29034": {
-    "scripts/midtrain.py": "3325b56d430ad8ea76fd45254ab4c92d6ea4ffaf295e13dec2bf47789c1b4d32"
-  }
+    "f88e10c61da123c68bf0927cf4860bc97a0381f3": {
+        "utils/lerobot_common.py": "249f5c86518bb897780cb0a14e6a7e7ab1062918c635a57ffe9c854dbe0f4f42",
+        "qwen_vla/lerobot_dataset.py": "33e4ecc2fc94df4134eee0351f9b6a07ff86eb3a7c17a3914e6904a1c17bd384",
+        "qwen_vla/__init__.py": "abc39f645ad280d47cbaa872cc09ca0b0c610403bec728c6fcfe765cfc1a021c",
+        "scripts/test.py": "6af6866f0b76e62cf632318e42726d8179a50889b3ad9925489e808073a27f4b",
+        "hardware_code/eval/eval_trex_async.py": "3f49d3d9410247cf6d5da86956b7d1a9a0f006222dc867695b2b4031911cff91",
+        "hardware_code/teleop/ik_utils.py": "fbe3998e30ed73d916a32f96a07f385f154e3cf21dfb61cb59649912a16db745",
+        "hardware_code/teleop/robot_descriptions.py": "e19dd586ccc8a2b5c63bae25c5f754762fc040dcb5359388fd3b0565337c3b46",
+        "qwen_vla/modeling_vla.py": "0b8b172de03852c78d7cee567b7b64b9fcb12dfc4c889e13e68a829e29f9b059",
+        "qwen_vla/modeling_qwen3vl_mot.py": "6ff0314e1cd196b7e319e5aa39e15fb04ba858c1a8f0f5cad8c6a1453a8a7e08"
+    },
+    "b23eafe564a1457cd4eacb889aaf6fbf29a29034": {
+        "scripts/midtrain.py": "3325b56d430ad8ea76fd45254ab4c92d6ea4ffaf295e13dec2bf47789c1b4d32"
+    }
 }

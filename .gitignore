@@ -13,3 +13,4 @@ __pycache__/
 .env
 *.egg-info/
 /season_*_train/
+__pycache__/

@@ -71,15 +71,30 @@ class LockedConfig:
         assert self.right_hand.shape == (22,)
 
     def digest(self) -> str:
-        rounded = np.concatenate(
-            [
-                np.round(self.lower_body, 6),
-                np.round(self.neck, 6),
-                np.round(self.left_hand, 6),
-                np.round(self.right_hand, 6),
-            ]
-        )
-        return hashlib.sha1(rounded.tobytes()).hexdigest()
+        """sha1 of a fixed-precision decimal-text rendering of the values.
+
+        Must be invariant to the *numpy dtype* of the input arrays, not just their numeric
+        values. Two things break a byte-level hash (``np.round(x, 6).tobytes()``):
+        (1) dtype width -- float32 and float64 arrays holding the "same" value hash
+        differently since ``.tobytes()`` encodes the byte width too; casting to a common
+        dtype before hashing (e.g. ``.astype(np.float64)``) fixes only this half.
+        (2) float32's coarser representable grid -- ``np.round(x, 6)`` on a float32 array
+        can land on a *different* float64 value than rounding the true float64 number to 6
+        decimals, even after upcasting, because the float32 storage already lost precision
+        beyond ~7 significant digits. Formatting to a fixed number of decimal places
+        (``f"{v:.6f}"``) sidesteps both: printf-style rounding at a given decimal precision
+        produces the same string for both dtypes as long as they represent the same
+        real-valued quantity to that precision (verified empirically). This matters in
+        practice -- ``phase0_locked_config``'s medians come out float32 (from float32
+        parquet columns), but ``json.loads`` -> ``np.array(python_floats)`` always produces
+        float64, so any round trip through ``locked_config.json`` (§5.5) would otherwise
+        silently change the digest for numerically identical values.
+        """
+        parts = np.concatenate(
+            [self.lower_body, self.neck, self.left_hand, self.right_hand]
+        ).astype(np.float64)
+        text = ",".join(f"{v:.6f}" for v in parts.tolist())
+        return hashlib.sha1(text.encode()).hexdigest()
 
     @classmethod
     def zeros(cls) -> "LockedConfig":
