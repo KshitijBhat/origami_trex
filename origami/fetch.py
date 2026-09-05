@@ -133,12 +133,19 @@ def drop_season(season: str, cache_root: Path) -> None:
 
 def season_has_lerobot3_data(season: str, token: str) -> bool:
     """Hub-side check, before any download is attempted: does this season actually have a
-    lerobot3.0 backfill (a ``data/`` dir and the ``.backfill_complete`` marker)?
+    lerobot3.0 ``data/`` dir?
 
     Some hub seasons were never backfilled to v3.0 -- their ``lerobot3.0/`` tree exists but
     holds only ``meta/`` (and sometimes a partial ``videos/``), no ``data/`` at all. Attempting
-    to download/read those season crashes deep inside pandas with a bare
+    to download/read those seasons crashes deep inside pandas with a bare
     ``FileNotFoundError``; catching it here up front lets callers skip the season cleanly.
+
+    Deliberately does NOT also require ``.backfill_complete``: a hub-wide scan shows only
+    46/143 seasons carry that marker even though 129/143 have real, readable ``data/``
+    parquet -- the marker was apparently never uploaded for most of the backfill, so
+    requiring it here would wrongly skip the majority of genuinely valid seasons. (It's
+    still required locally by ``have_season``, which is a different check: distinguishing a
+    freshly-interrupted local download from a complete one, not this hub-side pre-check.)
     """
     api = HfApi()
     try:
@@ -148,10 +155,7 @@ def season_has_lerobot3_data(season: str, token: str) -> bool:
         )
     except HfHubHTTPError:
         return False
-    paths = [e.path for e in entries]
-    has_data = any(p.startswith(f"{season}/lerobot3.0/data/") for p in paths)
-    has_marker = any(p == f"{season}/lerobot3.0/.backfill_complete" for p in paths)
-    return has_data and has_marker
+    return any(e.path.startswith(f"{season}/lerobot3.0/data/") for e in entries)
 
 
 def list_hub_seasons(token: str) -> set[str]:
