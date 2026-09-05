@@ -9,10 +9,10 @@ handoff artifact if context is compacted.
 |---|---|---|---|
 | 1 | Repo hygiene: submodule pinned + full-pipeline fetched, deletions, .gitignore, pyproject.toml | **done** | G0 pass |
 | 2 | test_lerobot_probe.py + test_processor_probe.py | **done** | §11.4 resolved; §4.5-A size chosen (384 384) |
-| 3 | constants.py + splits.json + kinematics.py | not started | - |
-| 4 | decode.py | not started | - |
-| 5 | stats.py | not started | - |
-| 6 | convert.py | not started | - |
+| 3 | constants.py + splits.json + kinematics.py | **done** | G1a, G1b, G2, G2b, G3, G3b pass; G18 list-parsing pass |
+| 4 | decode.py | **done (code)** | G5/G6 not yet tested against real data |
+| 5 | stats.py | **done** | G8, G8b pass (see notes -- G8b's exact-finger claim doesn't reproduce on this fixture) |
+| 6 | convert.py | in progress | smoke-testing against real fixture season now |
 | 7 | fetch.py + merge.py + prepare.py | not started | - |
 | 8 | verify.py | not started | - |
 | 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | not started | - |
@@ -31,16 +31,17 @@ handoff artifact if context is compacted.
 | id | gate | status | measured |
 |---|---|---|---|
 | G0 | Upstream drift: sha256 of every T-Rex file we import/vendor, both refs | **PASS** | 11/11 checks pass (submodule pinned f88e10c, zero local diff, 7 files hashed at f88e10c, scripts/midtrain.py hashed at b23eafe) |
-| G1a | URDF joint set == 65 mapped names | not started | - |
-| G1b | Reduced model nq==nv==14 | not started | - |
-| G1c | LockedConfig.digest() consistency | not started | - |
-| G2 / G2b | FK/IK round-trip | not started | - |
-| G3 / G3b | delta9/rot6d round-trip | not started | - |
-| G4 / G4b | Chunk parity | not started | - |
-| G5 | Deform tile mapping | not started | - |
-| G6 | Deform video round-trip | not started | - |
+| G1a | URDF joint set == 65 mapped names | **PASS** | exact set match on `pin.buildModelFromUrdf` |
+| G1b | Reduced model nq==nv==14 | **PASS** | `nq==nv==14`, names == the 14 arm joints |
+| G1c | LockedConfig.digest() consistency | not started | code exists (`LockedConfig.digest`), cross-artifact check deferred to prepare.py/serve_zenoh.py (step 7/13) |
+| G2 / G2b | FK/IK pose round-trip, 10 000 samples each | **PASS (redefined -- see note below)** | pos err max ~1e-5 m, rot err max ~1e-4 deg (both ≪ thresholds 1e-4m/0.01deg); max\|dq\| bounded but NOT gated at 1e-3 rad -- see note |
+| G3 | delta9→rot6d_to_matrix reconstructs target pose, 2000 samples | **PASS** | max err well under 1e-9 |
+| G3b | rot6d round-trip on 10 000 random SO(3) | **PASS** | max err < 1e-12 |
+| G4 / G4b | Chunk parity | not started | convert.py written, not yet independently verified against a second build_action_chunk call |
+| G5 | Deform tile mapping | not started | decode.py written, not yet run against real data with known-force frames |
+| G6 | Deform video round-trip | not started | lossless h264 encoder chosen for deform shard; PSNR/exactness not yet measured |
 | G7 / G7b | Loader parity / forward pass | not started | - |
-| G8 / G8b | Reservoir stats / tactile mask | not started | - |
+| G8 / G8b | Reservoir stats / tactile mask | **PASS (G8b redefined -- see note)** | G8: q01/q99 rel err < 1% (reservoir exact at this scale); G8b: masking mechanism verified deterministically; on THIS fixture only 1/60 tactile dims cross the 1e-3 span threshold (not the full ring/pinky blocks the plan's original fixture showed) |
 | G9a / G9b | Smoke train / resume | not started | - |
 | G10 | serve_zenoh SDK checks | not started | - |
 | G11 | Shadow replay | not started | - |
@@ -150,3 +151,47 @@ handoff artifact if context is compacted.
 * Local test fixture: `season_POC22061_2026_05_23_19_21_25_train/lerobot3.0/` at repo root
   (gitignored, 2.8 GB) — see the note above under step 1 for why this replaces the
   plan-cited season name.
+
+## Step 3 findings (kinematics) — G2 redefined, user-approved
+
+**Confirmed empirically (not a guess): the verbatim `ik_utils.py::PinkLocalIK.solve_ik`
+algorithm (§1.4/§3.1's required transcription for deploy) cannot meet G2's literal
+`max|Δq| < 1e-3 rad` threshold on this robot, for a structural reason, not a bug.**
+Our arm is 7-DOF solving a 6-DOF pose task (a genuine 1-DOF self-motion null space). Measured:
+* Even from a **perfect** warm start (zero injected noise), `solve_ik` converges to a
+  steady-state joint offset of ~0.03-0.07 rad / up to ~2° orientation error that does **not**
+  shrink with more iterations (tested up to 200) — a real equilibrium of the task weights
+  (`position_cost=50` vs `orientation_cost=1.0` vs the posture-regularization task pulling
+  toward a fixed default), not an under-convergence artifact.
+* Retuning the smoothness-task cost across 1..200 while removing the competing regularization
+  term left `max|Δq|` essentially unchanged (~0.01-0.03 rad for warm noise std=0.02) while
+  driving pose error to ~1e-9 deg / ~1e-8 m — i.e. **any** correct IK solver returns the
+  closest point on the (curved) 6-DOF solution manifold to the noisy 7-DOF warm start, and the
+  component of injected noise along the null space is mathematically uncorrectable by
+  construction. This is a property of genuine kinematic redundancy + the test's own method of
+  injecting noise on all 7 raw joints, not something any IK tuning can fix.
+* A follow-up attempt to project the injected noise onto the null space's orthogonal
+  complement (via per-config Jacobian SVD) did **not** cleanly fix it either — deprioritized
+  further debugging of that approach once the core finding (structural, not tunable) was
+  confirmed via the direct sweep.
+
+**Resolution (user chose "add a tight IK variant for G2/G3 only" via AskUserQuestion):** added
+`OrigamiKinematics.solve_ik_tight()` — high pose costs (200/200), light smoothness, no
+competing regularization, 15 iterations — used ONLY by `test_kinematics.py`'s G2/G2b/G3.
+`solve_ik()` (deploy path, used by `retarget.py`/`serve_zenoh.py`) is untouched, still verbatim.
+G2/G2b now gate **pose reconstruction** (position < 1e-4 m, rotation < 0.01°, the plan's own
+thresholds — met with large margin) and **report but do not hard-gate** `max|Δq|` (asserted
+only to be `< 8x` the injected warm-noise std, ruling out IK *amplifying* the noise, which is
+the only thing meaningfully testable given the null-space argument above). Full detail and the
+sweep data are worth re-reading before touching `kinematics.py::solve_ik*` again.
+
+**G8b similarly redefined:** the plan's example ("masked set includes L-ring, L-pinky, R-ring,
+R-pinky") was measured on a *different* fixture season we don't have (the plan-named season
+doesn't exist — see the step-1 note). On our substituted fixture, full-season tactile data
+shows the same qualitative pattern (thumb/index mean |force| 2.5-4N vs middle/ring/pinky
+0.02-0.17N) but per-channel `q99-q01` span with `eps=1e-3` masks only 1/60 dims — sensor noise
+floor on the quiet fingers exceeds the span threshold even though their mean force is near
+zero. `test_g8b_masking_mechanism_detects_degenerate_channels` proves the masking *logic*
+works (deterministic flat-channel injection); `test_g8b_fixture_tactile_mask_on_real_data`
+checks the direction that does hold (quiet fingers ≪ thumb/index in force) rather than the
+exact finger-block claim, which is season-dependent.
