@@ -1,410 +1,0 @@
->>> tier=full  stride=20  train_limit=0  val_limit=0
->>> out=/home/kshitij/origami_trex/data/origami_flat/full  cache=/home/kshitij/origami_trex/data/_src
->>> downloaders=3  converters=2  disk_budget=4 seasons
-22:49:17 [fast] train: 101 seasons -> /home/kshitij/origami_trex/data/origami_flat/full/train
-22:49:17 [fast] gpu=h264_cuvid (rgb only)  downloaders=3  converters=2  disk_budget=4 seasons
-22:49:17 [fast] 99/101 seasons already converted, not fetching
-22:49:18 [fetch] downloading season_POC22061_2026_07_07_10_52_58_train
-22:49:18 [fetch] downloading season_POC22061_2026_07_09_13_37_31_train
-Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]
-Fetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s][A
-Fetching 3 files:  33%|███▎      | 1/3 [00:00<00:00,  2.87it/s][AFetching 3 files: 100%|██████████| 3/3 [00:00<00:00,  8.52it/s]
-22:49:18 [fetch] dropped season_POC22061_2026_07_09_13_37_31_train
-Fetching 9 files:  89%|████████▉ | 8/9 [00:10<00:01,  1.31s/it]Fetching 9 files: 100%|██████████| 9/9 [00:11<00:00,  1.31s/it]Fetching 9 files: 100%|██████████| 9/9 [00:11<00:00,  1.31s/it]
-22:49:30 [fetch] dropped season_POC22061_2026_07_07_10_52_58_train
-22:49:30 [fast] 1384 episodes / 410145 samples / 99 seasons
-22:49:30 [fast] 2 season(s) failed:
-22:49:30          season_POC22061_2026_07_09_13_37_31_train: download: season_POC22061_2026_07_09_13_37_31_train: download finished but the expected lerobot3.0 tree is missing under /home/kshitij/origami_trex/data/_src/season_POC22061_2026_07_09_13_37_31_train — check the season name against the hub.
-22:49:30          season_POC22061_2026_07_07_10_52_58_train: download: season_POC22061_2026_07_07_10_52_58_train: download finished but the expected lerobot3.0 tree is missing under /home/kshitij/origami_trex/data/_src/season_POC22061_2026_07_07_10_52_58_train — check the season name against the hub.
->>> WARNING: train split is incomplete -- some seasons failed (see above)
-22:49:31 [fast] val: 25 seasons -> /home/kshitij/origami_trex/data/origami_flat/full/val
-22:49:31 [fast] gpu=h264_cuvid (rgb only)  downloaders=3  converters=2  disk_budget=4 seasons
-22:49:31 [fetch] downloading season_POC22061_2026_05_19_10_18_58_train
-22:49:31 [fetch] downloading season_POC22061_2026_05_23_15_56_33_train
-22:49:31 [fetch] downloading season_POC22061_2026_05_20_16_07_05_train
-Fetching 23 files:   0%|          | 0/23 [00:00<?, ?it/s]
-Fetching 30 files:   0%|          | 0/30 [00:00<?, ?it/s][A
-
-Fetching 23 files:   0%|          | 0/23 [00:00<?, ?it/s][A[AFetching 23 files:  35%|███▍      | 8/23 [00:03<00:06,  2.18it/s]
-
-Fetching 23 files:  35%|███▍      | 8/23 [00:18<00:34,  2.28s/it][A[A
-Fetching 30 files:  27%|██▋       | 8/30 [00:18<00:50,  2.28s/it][A
-
-Fetching 23 files:  39%|███▉      | 9/23 [00:18<00:29,  2.10s/it][A[AFetching 23 files:  48%|████▊     | 11/23 [00:20<00:21,  1.82s/it]
-
-Fetching 23 files:  43%|████▎     | 10/23 [00:20<00:26,  2.01s/it][A[A
-Fetching 30 files:  30%|███       | 9/30 [00:20<00:48,  2.31s/it][A
-Fetching 30 files:  37%|███▋      | 11/30 [00:21<00:37,  1.98s/it][A
-
-Fetching 23 files:  48%|████▊     | 11/23 [00:21<00:23,  2.00s/it][A[AFetching 23 files:  52%|█████▏    | 12/23 [00:26<00:24,  2.21s/it]Fetching 23 files:  61%|██████    | 14/23 [00:27<00:17,  1.96s/it]Fetching 23 files:  70%|██████▉   | 16/23 [00:31<00:13,  1.97s/it]
-
-Fetching 23 files:  52%|█████▏    | 12/23 [00:31<00:28,  2.61s/it][A[A
-Fetching 30 files:  43%|████▎     | 13/30 [00:32<00:42,  2.48s/it][AFetching 23 files:  78%|███████▊  | 18/23 [00:36<00:10,  2.00s/it]
-
-Fetching 23 files:  57%|█████▋    | 13/23 [00:36<00:27,  2.78s/it][A[A
-
-Fetching 23 files:  61%|██████    | 14/23 [00:40<00:26,  2.92s/it][A[A
-
-Fetching 23 files:  65%|██████▌   | 15/23 [00:43<00:23,  2.90s/it][A[A
-Fetching 30 files:  47%|████▋     | 14/30 [00:43<00:49,  3.12s/it][A
-Fetching 30 files:  50%|█████     | 15/30 [00:44<00:44,  2.99s/it][A
-Fetching 30 files:  53%|█████▎    | 16/30 [00:46<00:40,  2.89s/it][A
-
-Fetching 23 files:  70%|██████▉   | 16/23 [00:47<00:20,  2.95s/it][A[A
-Fetching 30 files:  57%|█████▋    | 17/30 [00:48<00:36,  2.83s/it][AFetching 23 files:  83%|████████▎ | 19/23 [00:50<00:10,  2.63s/it]
-Fetching 30 files:  60%|██████    | 18/30 [00:50<00:33,  2.83s/it][A
-
-Fetching 23 files:  74%|███████▍  | 17/23 [00:52<00:18,  3.06s/it][A[AFetching 23 files:  87%|████████▋ | 20/23 [00:54<00:08,  2.73s/it]
-Fetching 30 files:  63%|██████▎   | 19/30 [00:54<00:31,  2.86s/it][AFetching 23 files:  91%|█████████▏| 21/23 [00:54<00:05,  2.61s/it]Fetching 23 files:  96%|█████████▌| 22/23 [00:54<00:02,  2.50s/it]Fetching 23 files: 100%|██████████| 23/23 [00:55<00:00,  2.42s/it]Fetching 23 files: 100%|██████████| 23/23 [00:55<00:00,  2.42s/it]
-22:50:27 [fetch] downloading season_POC22061_2026_05_27_10_39_38_train
-Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]
-
-Fetching 23 files:  78%|███████▊  | 18/23 [00:55<00:15,  3.11s/it][A[A[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-000.mp4: [h264 @ 0x5e7a426ae6c0] No start 
-
-Fetching 30 files:  67%|██████▋   | 20/30 [00:59<00:29,  2.96s/it][A
-
-Fetching 23 files:  83%|████████▎ | 19/23 [01:00<00:12,  3.19s/it][A[A
-Fetching 30 files:  70%|███████   | 21/30 [01:01<00:26,  2.93s/it][A
-
-Fetching 23 files:  87%|████████▋ | 20/23 [01:01<00:09,  3.09s/it][A[A
-
-Fetching 23 files:  91%|█████████▏| 21/23 [01:02<00:05,  2.98s/it][A[A
-Fetching 30 files:  73%|███████▎  | 22/30 [01:03<00:23,  2.88s/it][A
-
-Fetching 23 files:  96%|█████████▌| 22/23 [01:04<00:02,  2.91s/it][A[A
-
-Fetching 23 files: 100%|██████████| 23/23 [01:06<00:00,  2.90s/it][A[AFetching 23 files: 100%|██████████| 23/23 [01:06<00:00,  2.90s/it]
-
-Fetching 30 files:  77%|███████▋  | 23/30 [01:06<00:20,  2.90s/it][A[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-000.mp4: [h264 @ 0x55d36f5c16c0] No start
-
-Fetching 30 files:  80%|████████  | 24/30 [01:07<00:16,  2.82s/it][A[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-000.mp4: [h264 @ 0x6184d6de46c0] No start 
-Fetching 28 files:  18%|█▊        | 5/28 [00:13<01:04,  2.79s/it]
-Fetching 30 files:  83%|████████▎ | 25/30 [01:11<00:14,  2.85s/it][A
-Fetching 30 files:  87%|████████▋ | 26/30 [01:11<00:11,  2.75s/it][A
-Fetching 30 files:  90%|█████████ | 27/30 [01:12<00:08,  2.67s/it][AFetching 28 files:  21%|██▏       | 6/28 [00:16<01:00,  2.75s/it][accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-000.mp4: [h264 @ 0x5b940d4776c0] No star
-Fetching 28 files:  29%|██▊       | 8/28 [00:22<00:55,  2.77s/it][accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-000.mp4: [h264 @ 0x5978187e16c0] No start
-Fetching 28 files:  36%|███▌      | 10/28 [00:23<00:41,  2.32s/it]
-Fetching 30 files:  93%|█████████▎| 28/30 [01:19<00:05,  2.85s/it][A
-Fetching 30 files:  97%|█████████▋| 29/30 [01:20<00:02,  2.77s/it][AFetching 28 files:  43%|████▎     | 12/28 [00:24<00:32,  2.05s/it]
-Fetching 30 files: 100%|██████████| 30/30 [01:21<00:00,  2.70s/it][AFetching 30 files: 100%|██████████| 30/30 [01:21<00:00,  2.70s/it]
-[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-000.mp4: [h264 @ 0x5ec0621966c0] No star
-Fetching 28 files:  50%|█████     | 14/28 [00:32<00:32,  2.34s/it]Fetching 28 files:  57%|█████▋    | 16/28 [00:33<00:25,  2.12s/it]Fetching 28 files:  64%|██████▍   | 18/28 [00:34<00:19,  1.90s/it]Fetching 28 files:  71%|███████▏  | 20/28 [00:34<00:13,  1.73s/it][accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-001.mp4: [h264 @ 0x5a5c2ee0b6c0] No start
-Fetching 28 files:  79%|███████▊  | 22/28 [00:42<00:11,  1.92s/it]Fetching 28 files:  86%|████████▌ | 24/28 [00:43<00:07,  1.79s/it]Fetching 28 files:  93%|█████████▎| 26/28 [00:43<00:03,  1.67s/it]Fetching 28 files: 100%|██████████| 28/28 [00:43<00:00,  1.56s/it]
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-001.mp4: [h264 @ 0x5c1e320ce6c0] No star
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-001.mp4: [h264 @ 0x5c9c8e6c26c0] No start
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-001.mp4: [h264 @ 0x596ab25b66c0] No start 
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-002.mp4: [h264 @ 0x57f94ee506c0] No start
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-002.mp4: [h264 @ 0x5e5da5bf46c0] No star
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-001.mp4: [h264 @ 0x5e60603c46c0] No star
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-002.mp4: [h264 @ 0x57534ec226c0] No start 
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-001.mp4: [h264 @ 0x59c5f97e66c0] No start 
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-003.mp4: [h264 @ 0x59a6d921c6c0] No start
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-002.mp4: [h264 @ 0x5829262c86c0] No start
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-003.mp4: [h264 @ 0x5bfbcfc736c0] No star
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-004.mp4: [h264 @ 0x584b9d3a26c0] No start
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-002.mp4: [h264 @ 0x6385f0f696c0] No star
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-004.mp4: [h264 @ 0x5a9a3c8dc6c0] No star
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-003.mp4: [h264 @ 0x58ddda5d86c0] No star
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-002.mp4: [h264 @ 0x64864dee36c0] No start 
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-003.mp4: [h264 @ 0x5d35d776e6c0] No start 
-[accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-005.mp4: [h264 @ 0x61e576e1c6c0] No start
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-003.mp4: [h264 @ 0x620e4d8ef6c0] No start
-[accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_20_16_07_05_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-005.mp4: [h264 @ 0x64c79258e6c0] No star
-22:52:25 [fetch] dropped season_POC22061_2026_05_20_16_07_05_train
-22:52:25 [fast] 1/25 seasons | 3548 samples | 2.9 min
-22:52:25 [fetch] downloading season_POC22061_2026_05_28_13_42_37_train
-Fetching 29 files:   0%|          | 0/29 [00:00<?, ?it/s][accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-000.mp4: [h264 @ 0x64b7804fa6c0] No start 
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-004.mp4: [h264 @ 0x5b6a2229e6c0] No star
-Fetching 29 files:  28%|██▊       | 8/29 [00:09<00:25,  1.21s/it][accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-000.mp4: [h264 @ 0x626b197eb6c0] No start
-[accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-005.mp4: [h264 @ 0x55589f8ae6c0] No star
-[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-000.mp4: [h264 @ 0x589e8b6776c0] No star
-Fetching 29 files:  55%|█████▌    | 16/29 [00:18<00:15,  1.16s/it][accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-003.mp4: [h264 @ 0x5cdb845ee6c0] No start 
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-004.mp4: [h264 @ 0x5b82834666c0] No start
-Fetching 29 files:  83%|████████▎ | 24/29 [00:30<00:06,  1.26s/it]Fetching 29 files:  86%|████████▌ | 25/29 [00:32<00:05,  1.29s/it]Fetching 29 files:  90%|████████▉ | 26/29 [00:32<00:03,  1.25s/it]Fetching 29 files:  93%|█████████▎| 27/29 [00:32<00:02,  1.21s/it]Fetching 29 files:  97%|█████████▋| 28/29 [00:34<00:01,  1.25s/it]Fetching 29 files: 100%|██████████| 29/29 [00:35<00:00,  1.21s/it]Fetching 29 files: 100%|██████████| 29/29 [00:35<00:00,  1.21s/it]
-[accel] GPU decode failed on file-006.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_19_10_18_58_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-006.mp4: [h264 @ 0x5aa5ba3366c0] No star
-22:53:06 [fetch] dropped season_POC22061_2026_05_19_10_18_58_train
-22:53:06 [fast] 2/25 seasons | 7973 samples | 3.6 min
-22:53:06 [fetch] downloading season_POC22061_2026_05_28_15_51_13_train
-Fetching 23 files:   0%|          | 0/23 [00:00<?, ?it/s][accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-001.mp4: [h264 @ 0x5c1bb7f8f6c0] No start
-[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-000.mp4: [h264 @ 0x5c83c74ee6c0] No start 
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-001.mp4: [h264 @ 0x5c97cb7ed6c0] No star
-Fetching 23 files:  35%|███▍      | 8/23 [00:10<00:20,  1.37s/it]Fetching 23 files:  39%|███▉      | 9/23 [00:11<00:17,  1.24s/it][accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-000.mp4: [h264 @ 0x61afe81306c0] No start
-Fetching 23 files:  43%|████▎     | 10/23 [00:11<00:14,  1.15s/it]Fetching 23 files:  48%|████▊     | 11/23 [00:11<00:13,  1.09s/it]Fetching 23 files:  52%|█████▏    | 12/23 [00:12<00:11,  1.04s/it]Fetching 23 files:  57%|█████▋    | 13/23 [00:13<00:10,  1.03s/it]Fetching 23 files:  61%|██████    | 14/23 [00:17<00:11,  1.29s/it][accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-001.mp4: [h264 @ 0x5e2959c1e6c0] No start 
-[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-000.mp4: [h264 @ 0x6278e005a6c0] No star
-Fetching 23 files:  65%|██████▌   | 15/23 [00:20<00:11,  1.38s/it][accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-002.mp4: [h264 @ 0x5ac44d8fa6c0] No star
-Fetching 23 files:  70%|██████▉   | 16/23 [00:22<00:09,  1.42s/it]Fetching 23 files:  74%|███████▍  | 17/23 [00:24<00:08,  1.41s/it]Fetching 23 files:  78%|███████▊  | 18/23 [00:24<00:06,  1.34s/it]Fetching 23 files:  83%|████████▎ | 19/23 [00:24<00:05,  1.28s/it][accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-002.mp4: [h264 @ 0x5f45e29cb6c0] No start 
-Fetching 23 files:  87%|████████▋ | 20/23 [00:25<00:03,  1.27s/it]Fetching 23 files:  96%|█████████▌| 22/23 [00:25<00:01,  1.17s/it]Fetching 23 files: 100%|██████████| 23/23 [00:26<00:00,  1.14s/it]
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-002.mp4: [h264 @ 0x5829281496c0] No start
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-003.mp4: [h264 @ 0x57b4ebfbe6c0] No star
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-001.mp4: [h264 @ 0x5fffbaf4e6c0] No start
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-003.mp4: [h264 @ 0x5ef9bfdfb6c0] No start
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-001.mp4: [h264 @ 0x58020bc416c0] No star
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-004.mp4: [h264 @ 0x58489a01f6c0] No star
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-001.mp4: [h264 @ 0x5fd042e3b6c0] No start 
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-003.mp4: [h264 @ 0x5a1b74f266c0] No start 
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-002.mp4: [h264 @ 0x5e264a8f56c0] No start
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-004.mp4: [h264 @ 0x646f934276c0] No start
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-002.mp4: [h264 @ 0x5baa37bf06c0] No star
-[accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-005.mp4: [h264 @ 0x614bd2e476c0] No star
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-003.mp4: [h264 @ 0x5830cb4716c0] No star
-[accel] GPU decode failed on file-006.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-006.mp4: [h264 @ 0x5f4a336ba6c0] No star
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-003.mp4: [h264 @ 0x59943a5406c0] No start
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-002.mp4: [h264 @ 0x64fde8a776c0] No start 
-[accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-005.mp4: [h264 @ 0x63946c7ca6c0] No start
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-004.mp4: [h264 @ 0x5756400956c0] No start 
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-004.mp4: [h264 @ 0x637ea0b4d6c0] No start
-[accel] GPU decode failed on file-006.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-006.mp4: [h264 @ 0x6494f24456c0] No start
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-004.mp4: [h264 @ 0x5abd94fe96c0] No star
-[accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-005.mp4: [h264 @ 0x5c83d01a76c0] No start
-[accel] GPU decode failed on file-007.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-007.mp4: [h264 @ 0x5dae8e9406c0] No star
-[accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-005.mp4: [h264 @ 0x5cc903e0e6c0] No star
-[accel] GPU decode failed on file-008.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-008.mp4: [h264 @ 0x555a28a896c0] No star
-[accel] GPU decode failed on file-007.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_23_15_56_33_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-007.mp4: [h264 @ 0x5e42e56156c0] No start
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-003.mp4: [h264 @ 0x5735491eb6c0] No start 
-22:55:24 [fetch] dropped season_POC22061_2026_05_23_15_56_33_train
-22:55:24 [fast] 3/25 seasons | 13221 samples | 5.9 min
-22:55:24 [fetch] downloading season_POC22061_2026_05_29_10_19_22_train
-Fetching 26 files:   0%|          | 0/26 [00:00<?, ?it/s][accel] GPU decode failed on file-006.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-006.mp4: [h264 @ 0x5c3bc4d836c0] No start
-Fetching 26 files:  31%|███       | 8/26 [00:09<00:20,  1.14s/it][accel] GPU decode failed on file-006.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-006.mp4: [h264 @ 0x5727ffb226c0] No star
-Fetching 26 files:  62%|██████▏   | 16/26 [00:20<00:12,  1.28s/it]Fetching 26 files:  65%|██████▌   | 17/26 [00:22<00:11,  1.30s/it][accel] GPU decode failed on file-007.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_27_10_39_38_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-007.mp4: [h264 @ 0x5c3570f496c0] No star
-Fetching 26 files:  69%|██████▉   | 18/26 [00:23<00:10,  1.30s/it]Fetching 26 files:  73%|███████▎  | 19/26 [00:24<00:09,  1.30s/it]Fetching 26 files:  77%|███████▋  | 20/26 [00:25<00:07,  1.26s/it]Fetching 26 files:  81%|████████  | 21/26 [00:25<00:06,  1.23s/it]Fetching 26 files:  85%|████████▍ | 22/26 [00:27<00:04,  1.24s/it]Fetching 26 files:  88%|████████▊ | 23/26 [00:27<00:03,  1.21s/it]22:55:52 [fetch] dropped season_POC22061_2026_05_27_10_39_38_train
-22:55:52 [fast] 4/25 seasons | 17998 samples | 6.4 min
-22:55:52 [fetch] downloading season_POC22061_2026_05_29_15_58_16_train
-Fetching 26 files:  92%|█████████▏| 24/26 [00:27<00:02,  1.16s/it]
-Fetching 27 files:   0%|          | 0/27 [00:00<?, ?it/s][AFetching 26 files:  96%|█████████▌| 25/26 [00:28<00:01,  1.13s/it][accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-000.mp4: [h264 @ 0x5dbb1d4b66c0] No start 
-Fetching 26 files: 100%|██████████| 26/26 [00:34<00:00,  1.34s/it]Fetching 26 files: 100%|██████████| 26/26 [00:34<00:00,  1.34s/it]
-
-Fetching 27 files:  30%|██▉       | 8/27 [00:09<00:22,  1.19s/it][A[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-000.mp4: [h264 @ 0x56c8d12e46c0] No start
-
-Fetching 27 files:  59%|█████▉    | 16/27 [00:18<00:12,  1.13s/it][A[accel] GPU decode failed on file-000.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-000.mp4: [h264 @ 0x5e6647b386c0] No star
-
-Fetching 27 files:  85%|████████▌ | 23/27 [00:28<00:05,  1.26s/it][A
-Fetching 27 files:  89%|████████▉ | 24/27 [00:29<00:03,  1.23s/it][A
-Fetching 27 files:  93%|█████████▎| 25/27 [00:30<00:02,  1.20s/it][A
-Fetching 27 files:  96%|█████████▋| 26/27 [00:31<00:01,  1.21s/it][AFetching 27 files: 100%|██████████| 27/27 [00:31<00:00,  1.17s/it]
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-001.mp4: [h264 @ 0x58f5e49c16c0] No start
-[accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-001.mp4: [h264 @ 0x64e80b4e26c0] No star
-22:57:05 [fetch] dropped season_POC22061_2026_05_28_13_42_37_train
-22:57:05 [fast] 5/25 seasons | 23581 samples | 7.6 min
-22:57:05 [fetch] downloading season_POC22061_2026_06_25_20_02_02_train
-Fetching 20 files:   0%|          | 0/20 [00:00<?, ?it/s][accel] GPU decode failed on file-001.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-001.mp4: [h264 @ 0x5585649c46c0] No start 
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-002.mp4: [h264 @ 0x62832191a6c0] No start
-Fetching 20 files:  40%|████      | 8/20 [00:09<00:14,  1.19s/it][accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-002.mp4: [h264 @ 0x5d041158f6c0] No star
-Fetching 20 files:  80%|████████  | 16/20 [00:20<00:05,  1.31s/it]Fetching 20 files:  85%|████████▌ | 17/20 [00:21<00:03,  1.26s/it]Fetching 20 files:  90%|█████████ | 18/20 [00:22<00:02,  1.24s/it]Fetching 20 files:  95%|█████████▌| 19/20 [00:23<00:01,  1.26s/it]Fetching 20 files: 100%|██████████| 20/20 [00:24<00:00,  1.25s/it]Fetching 20 files: 100%|██████████| 20/20 [00:24<00:00,  1.25s/it]
-[accel] GPU decode failed on file-002.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-002.mp4: [h264 @ 0x633d5d4996c0] No start 
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-003.mp4: [h264 @ 0x5f1ff32b66c0] No start
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-003.mp4: [h264 @ 0x5addd0a3c6c0] No star
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-004.mp4: [h264 @ 0x616d935bd6c0] No start
-[accel] GPU decode failed on file-004.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-004.mp4: [h264 @ 0x64a68ce5a6c0] No star
-[accel] GPU decode failed on file-003.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.head_left/chunk-000/file-003.mp4: [h264 @ 0x58996135b6c0] No start 
-22:58:38 [fetch] dropped season_POC22061_2026_05_29_10_19_22_train
-22:58:38 [fast] 6/25 seasons | 28392 samples | 9.1 min
-22:58:38 [fetch] downloading season_POC22061_2026_06_27_13_48_20_train
-Fetching 26 files:   0%|          | 0/26 [00:00<?, ?it/s][accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_left/chunk-000/file-005.mp4: [h264 @ 0x628b707726c0] No start
-Fetching 26 files:  31%|███       | 8/26 [00:09<00:21,  1.18s/it][accel] GPU decode failed on file-005.mp4, using CPU: ffmpeg failed on /home/kshitij/origami_trex/data/_src/season_POC22061_2026_05_28_15_51_13_train/lerobot3.0/videos/observation.images.wrist_right/chunk-000/file-005.mp4: [h264 @ 0x5fb3fdcfa6c0] No star
-Fetching 26 files:  62%|██████▏   | 16/26 [00:19<00:12,  1.21s/it]22:58:59 [fetch] dropped season_POC22061_2026_05_28_15_51_13_train
-22:58:59 [fast] 7/25 seasons | 33153 samples | 9.5 min
-22:58:59 [fetch] downloading season_POC22061_2026_06_27_19_13_22_train
-
-Fetching 24 files:   0%|          | 0/24 [00:00<?, ?it/s][AFetching 26 files:  92%|█████████▏| 24/26 [00:30<00:02,  1.27s/it]
-Fetching 24 files:  25%|██▌       | 6/24 [00:12<00:36,  2.02s/it][AFetching 26 files:  96%|█████████▌| 25/26 [00:34<00:01,  1.39s/it]
-Fetching 24 files:  29%|██▉       | 7/24 [00:14<00:34,  2.03s/it][A
-Fetching 24 files:  38%|███▊      | 9/24 [00:14<00:24,  1.61s/it][AFetching 26 files: 100%|██████████| 26/26 [00:35<00:00,  1.37s/it]Fetching 26 files: 100%|██████████| 26/26 [00:35<00:00,  1.37s/it]
-
-Fetching 24 files:  46%|████▌     | 11/24 [00:15<00:18,  1.42s/it][A
-Fetching 24 files:  54%|█████▍    | 13/24 [00:22<00:19,  1.74s/it][A
-Fetching 24 files:  62%|██████▎   | 15/24 [00:23<00:14,  1.57s/it][A
-Fetching 24 files:  71%|███████   | 17/24 [00:25<00:10,  1.53s/it][A
-Fetching 24 files:  79%|███████▉  | 19/24 [00:30<00:07,  1.58s/it][A
-Fetching 24 files:  88%|████████▊ | 21/24 [00:31<00:04,  1.48s/it][A
-Fetching 24 files:  96%|█████████▌| 23/24 [00:31<00:01,  1.39s/it][AFetching 24 files: 100%|██████████| 24/24 [00:34<00:00,  1.42s/it]
-23:00:55 [fetch] dropped season_POC22061_2026_06_25_20_02_02_train
-23:00:55 [fast] 8/25 seasons | 37372 samples | 11.4 min
-23:00:55 [fetch] downloading season_POC22061_2026_06_28_13_47_21_train
-Fetching 26 files:   0%|          | 0/26 [00:00<?, ?it/s]23:00:57 [fetch] dropped season_POC22061_2026_05_29_15_58_16_train
-23:00:57 [fast] 9/25 seasons | 42436 samples | 11.4 min
-23:00:57 [fetch] downloading season_POC22061_2026_06_29_19_18_53_train
-
-Fetching 23 files:   0%|          | 0/23 [00:00<?, ?it/s][AFetching 26 files:  31%|███       | 8/26 [00:08<00:20,  1.11s/it]
-Fetching 23 files:  35%|███▍      | 8/23 [00:12<00:23,  1.55s/it][A
-Fetching 23 files:  39%|███▉      | 9/23 [00:15<00:24,  1.77s/it][A
-Fetching 23 files:  43%|████▎     | 10/23 [00:20<00:27,  2.09s/it][A
-Fetching 23 files:  48%|████▊     | 11/23 [00:21<00:22,  1.91s/it][AFetching 26 files:  58%|█████▊    | 15/26 [00:26<00:19,  1.76s/it]Fetching 26 files:  62%|██████▏   | 16/26 [00:28<00:18,  1.81s/it]
-Fetching 23 files:  52%|█████▏    | 12/23 [00:26<00:24,  2.24s/it][AFetching 26 files:  65%|██████▌   | 17/26 [00:29<00:15,  1.73s/it]Fetching 26 files:  69%|██████▉   | 18/26 [00:30<00:13,  1.69s/it]
-Fetching 23 files:  57%|█████▋    | 13/23 [00:28<00:21,  2.20s/it][AFetching 26 files:  73%|███████▎  | 19/26 [00:31<00:11,  1.65s/it]
-Fetching 23 files:  61%|██████    | 14/23 [00:28<00:18,  2.07s/it][AFetching 26 files:  77%|███████▋  | 20/26 [00:32<00:09,  1.64s/it]
-Fetching 23 files:  65%|██████▌   | 15/23 [00:33<00:17,  2.24s/it][A
-Fetching 23 files:  70%|██████▉   | 16/23 [00:36<00:15,  2.28s/it][A
-Fetching 23 files:  74%|███████▍  | 17/23 [00:36<00:12,  2.17s/it][AFetching 26 files:  81%|████████  | 21/26 [00:39<00:09,  1.89s/it]Fetching 26 files:  85%|████████▍ | 22/26 [00:40<00:07,  1.85s/it]Fetching 26 files:  88%|████████▊ | 23/26 [00:41<00:05,  1.82s/it]
-Fetching 23 files:  78%|███████▊  | 18/23 [00:39<00:11,  2.21s/it][AFetching 26 files:  92%|█████████▏| 24/26 [00:42<00:03,  1.77s/it]
-Fetching 23 files:  83%|████████▎ | 19/23 [00:42<00:08,  2.22s/it][AFetching 26 files:  96%|█████████▌| 25/26 [00:46<00:01,  1.87s/it]Fetching 26 files: 100%|██████████| 26/26 [00:47<00:00,  1.82s/it]Fetching 26 files: 100%|██████████| 26/26 [00:47<00:00,  1.82s/it]
-
-Fetching 23 files:  87%|████████▋ | 20/23 [00:44<00:06,  2.24s/it][A
-Fetching 23 files:  91%|█████████▏| 21/23 [00:45<00:04,  2.15s/it][A
-Fetching 23 files:  96%|█████████▌| 22/23 [00:45<00:02,  2.09s/it][A
-Fetching 23 files: 100%|██████████| 23/23 [00:46<00:00,  2.02s/it][AFetching 23 files: 100%|██████████| 23/23 [00:46<00:00,  2.02s/it]
-23:03:27 [fetch] dropped season_POC22061_2026_06_27_19_13_22_train
-23:03:27 [fast] 10/25 seasons | 47332 samples | 13.9 min
-23:03:27 [fetch] downloading season_POC22061_2026_06_30_10_16_20_train
-Fetching 23 files:   0%|          | 0/23 [00:00<?, ?it/s]23:03:31 [fetch] dropped season_POC22061_2026_06_27_13_48_20_train
-23:03:31 [fast] 11/25 seasons | 52532 samples | 14.0 min
-23:03:31 [fetch] downloading season_POC22061_2026_06_30_19_27_21_train
-
-Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s][AFetching 23 files:  35%|███▍      | 8/23 [00:07<00:14,  1.02it/s]
-Fetching 12 files:  58%|█████▊    | 7/12 [00:10<00:07,  1.46s/it][A
-Fetching 12 files:  67%|██████▋   | 8/12 [00:11<00:05,  1.40s/it][A
-Fetching 12 files:  75%|███████▌  | 9/12 [00:11<00:03,  1.26s/it][A
-Fetching 12 files:  83%|████████▎ | 10/12 [00:17<00:03,  1.73s/it][AFetching 23 files:  61%|██████    | 14/23 [00:23<00:15,  1.71s/it]
-Fetching 12 files:  92%|█████████▏| 11/12 [00:20<00:01,  1.86s/it][AFetching 23 files:  65%|██████▌   | 15/23 [00:24<00:13,  1.63s/it]Fetching 23 files:  70%|██████▉   | 16/23 [00:25<00:11,  1.62s/it]Fetching 23 files:  74%|███████▍  | 17/23 [00:27<00:09,  1.60s/it]Fetching 23 files:  78%|███████▊  | 18/23 [00:27<00:07,  1.55s/it]Fetching 23 files:  83%|████████▎ | 19/23 [00:29<00:06,  1.55s/it]Fetching 23 files:  87%|████████▋ | 20/23 [00:30<00:04,  1.55s/it]Fetching 23 files:  91%|█████████▏| 21/23 [00:31<00:03,  1.51s/it]Fetching 23 files:  96%|█████████▌| 22/23 [00:32<00:01,  1.46s/it]Fetching 23 files: 100%|██████████| 23/23 [00:32<00:00,  1.40s/it]Fetching 23 files: 100%|██████████| 23/23 [00:32<00:00,  1.40s/it]
-
-Fetching 12 files: 100%|██████████| 12/12 [00:30<00:00,  2.50s/it][AFetching 12 files: 100%|██████████| 12/12 [00:30<00:00,  2.50s/it]
-23:05:36 [fetch] dropped season_POC22061_2026_06_29_19_18_53_train
-23:05:36 [fast] 12/25 seasons | 56578 samples | 16.1 min
-23:05:36 [fetch] downloading season_POC22061_2026_06_30_19_45_01_train
-Fetching 30 files:   0%|          | 0/30 [00:00<?, ?it/s]Fetching 30 files:  27%|██▋       | 8/30 [00:09<00:25,  1.14s/it]Fetching 30 files:  53%|█████▎    | 16/30 [00:18<00:16,  1.16s/it]23:06:00 [fetch] dropped season_POC22061_2026_06_28_13_47_21_train
-23:06:00 [fast] 13/25 seasons | 61553 samples | 16.5 min
-23:06:00 [fetch] downloading season_POC22061_2026_07_04_13_39_40_train
-
-Fetching 25 files:   0%|          | 0/25 [00:00<?, ?it/s][AFetching 30 files:  80%|████████  | 24/30 [00:28<00:07,  1.20s/it]Fetching 30 files:  83%|████████▎ | 25/30 [00:31<00:06,  1.25s/it]Fetching 30 files:  87%|████████▋ | 26/30 [00:32<00:04,  1.24s/it]
-Fetching 25 files:  24%|██▍       | 6/25 [00:11<00:35,  1.88s/it][A
-Fetching 25 files:  28%|██▊       | 7/25 [00:11<00:30,  1.67s/it][A
-Fetching 25 files:  32%|███▏      | 8/25 [00:12<00:25,  1.52s/it][AFetching 30 files:  90%|█████████ | 27/30 [00:36<00:04,  1.35s/it]Fetching 30 files:  93%|█████████▎| 28/30 [00:36<00:02,  1.32s/it]
-Fetching 25 files:  36%|███▌      | 9/25 [00:16<00:29,  1.81s/it][A
-Fetching 25 files:  40%|████      | 10/25 [00:17<00:25,  1.72s/it][AFetching 30 files:  97%|█████████▋| 29/30 [00:41<00:01,  1.43s/it]Fetching 30 files: 100%|██████████| 30/30 [00:41<00:00,  1.39s/it]Fetching 30 files: 100%|██████████| 30/30 [00:41<00:00,  1.39s/it]
-
-Fetching 25 files:  48%|████▊     | 12/25 [00:17<00:18,  1.46s/it][A
-Fetching 25 files:  56%|█████▌    | 14/25 [00:22<00:17,  1.57s/it][A
-Fetching 25 files:  64%|██████▍   | 16/25 [00:26<00:14,  1.66s/it][A
-Fetching 25 files:  72%|███████▏  | 18/25 [00:30<00:11,  1.68s/it][A
-Fetching 25 files:  80%|████████  | 20/25 [00:30<00:07,  1.55s/it][A
-Fetching 25 files:  88%|████████▊ | 22/25 [00:33<00:04,  1.52s/it][A
-Fetching 25 files:  96%|█████████▌| 24/25 [00:33<00:01,  1.40s/it][AFetching 25 files: 100%|██████████| 25/25 [00:35<00:00,  1.41s/it]
-23:06:38 [fetch] dropped season_POC22061_2026_06_30_19_27_21_train
-23:06:38 [fast] 14/25 seasons | 62737 samples | 17.1 min
-23:06:38 [fetch] downloading season_POC22061_2026_07_05_16_23_24_train
-Fetching 24 files:   0%|          | 0/24 [00:00<?, ?it/s]Fetching 24 files:  33%|███▎      | 8/24 [00:06<00:12,  1.30it/s]Fetching 24 files:  67%|██████▋   | 16/24 [00:20<00:10,  1.28s/it]Fetching 24 files:  71%|███████   | 17/24 [00:21<00:08,  1.27s/it]Fetching 24 files:  75%|███████▌  | 18/24 [00:22<00:07,  1.26s/it]Fetching 24 files:  79%|███████▉  | 19/24 [00:24<00:06,  1.31s/it]Fetching 24 files:  83%|████████▎ | 20/24 [00:25<00:05,  1.25s/it]Fetching 24 files:  92%|█████████▏| 22/24 [00:25<00:02,  1.15s/it]Fetching 24 files: 100%|██████████| 24/24 [00:27<00:00,  1.15s/it]Fetching 24 files: 100%|██████████| 24/24 [00:27<00:00,  1.15s/it]
-23:07:46 [fetch] dropped season_POC22061_2026_06_30_10_16_20_train
-23:07:46 [fast] 15/25 seasons | 67359 samples | 18.2 min
-23:07:46 [fetch] downloading season_POC22061_2026_07_10_15_21_08_train
-Fetching 35 files:   0%|          | 0/35 [00:00<?, ?it/s]Fetching 35 files:  23%|██▎       | 8/35 [00:07<00:25,  1.08it/s]Fetching 35 files:  46%|████▌     | 16/35 [00:15<00:17,  1.07it/s]Fetching 35 files:  60%|██████    | 21/35 [00:25<00:16,  1.21s/it]Fetching 35 files:  63%|██████▎   | 22/35 [00:25<00:15,  1.17s/it]Fetching 35 files:  66%|██████▌   | 23/35 [00:29<00:15,  1.30s/it]Fetching 35 files:  69%|██████▊   | 24/35 [00:30<00:13,  1.26s/it]Fetching 35 files:  71%|███████▏  | 25/35 [00:33<00:13,  1.35s/it]Fetching 35 files:  74%|███████▍  | 26/35 [00:35<00:12,  1.36s/it]Fetching 35 files:  77%|███████▋  | 27/35 [00:36<00:10,  1.33s/it]Fetching 35 files:  80%|████████  | 28/35 [00:36<00:09,  1.30s/it]Fetching 35 files:  83%|████████▎ | 29/35 [00:37<00:07,  1.28s/it]Fetching 35 files:  86%|████████▌ | 30/35 [00:39<00:06,  1.33s/it]Fetching 35 files:  89%|████████▊ | 31/35 [00:40<00:05,  1.29s/it]Fetching 35 files:  91%|█████████▏| 32/35 [00:41<00:03,  1.30s/it]Fetching 35 files:  94%|█████████▍| 33/35 [00:42<00:02,  1.28s/it]Fetching 35 files: 100%|██████████| 35/35 [00:43<00:00,  1.23s/it]Fetching 35 files: 100%|██████████| 35/35 [00:43<00:00,  1.23s/it]
-23:09:20 [fetch] dropped season_POC22061_2026_06_30_19_45_01_train
-23:09:20 [fast] 16/25 seasons | 73331 samples | 19.8 min
-23:09:20 [fetch] downloading season_POC22061_2026_07_10_17_05_30_train
-Fetching 19 files:   0%|          | 0/19 [00:00<?, ?it/s]Fetching 19 files:  42%|████▏     | 8/19 [00:05<00:07,  1.51it/s]Fetching 19 files:  84%|████████▍ | 16/19 [00:14<00:02,  1.07it/s]Fetching 19 files: 100%|██████████| 19/19 [00:17<00:00,  1.11it/s]
-23:09:49 [fetch] dropped season_POC22061_2026_07_04_13_39_40_train
-23:09:49 [fast] 17/25 seasons | 78486 samples | 20.3 min
-23:09:49 [fetch] downloading season_POC22061_2026_07_11_13_34_49_train
-Fetching 19 files:   0%|          | 0/19 [00:00<?, ?it/s]Fetching 19 files:  42%|████▏     | 8/19 [00:07<00:09,  1.11it/s]Fetching 19 files:  84%|████████▍ | 16/19 [00:19<00:03,  1.22s/it]Fetching 19 files:  89%|████████▉ | 17/19 [00:19<00:02,  1.16s/it]Fetching 19 files:  95%|█████████▍| 18/19 [00:20<00:01,  1.11s/it]Fetching 19 files: 100%|██████████| 19/19 [00:20<00:00,  1.09s/it]Fetching 19 files: 100%|██████████| 19/19 [00:20<00:00,  1.09s/it]
-23:11:06 [fetch] dropped season_POC22061_2026_07_05_16_23_24_train
-23:11:06 [fast] 18/25 seasons | 83280 samples | 21.6 min
-23:11:06 [fetch] downloading season_POC22061_2026_07_13_19_20_33_train
-Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files:  62%|██████▏   | 8/13 [00:06<00:03,  1.31it/s]Fetching 13 files: 100%|██████████| 13/13 [00:12<00:00,  1.01it/s]
-23:12:19 [fetch] dropped season_POC22061_2026_07_10_17_05_30_train
-23:12:19 [fast] 19/25 seasons | 86161 samples | 22.8 min
-23:12:19 [fetch] downloading season_POC22061_2026_07_13_19_56_06_train
-Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files:  62%|██████▏   | 8/13 [00:04<00:03,  1.64it/s]Fetching 13 files: 100%|██████████| 13/13 [00:11<00:00,  1.09it/s]
-23:12:53 [fetch] dropped season_POC22061_2026_07_10_15_21_08_train
-23:12:53 [fast] 20/25 seasons | 93934 samples | 23.4 min
-23:12:53 [fetch] downloading season_POC22061_2026_07_13_20_50_09_train
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  80%|████████  | 8/10 [00:05<00:01,  1.40it/s]Fetching 10 files: 100%|██████████| 10/10 [00:09<00:00,  1.07it/s]
-23:13:42 [fetch] dropped season_POC22061_2026_07_13_19_20_33_train
-23:13:42 [fast] 21/25 seasons | 95758 samples | 24.2 min
-23:13:42 [fetch] downloading season_POC22061_2026_07_14_15_43_22_train
-Fetching 24 files:   0%|          | 0/24 [00:00<?, ?it/s]Fetching 24 files:  33%|███▎      | 8/24 [00:09<00:18,  1.19s/it]23:13:54 [fetch] dropped season_POC22061_2026_07_11_13_34_49_train
-23:13:54 [fast] 22/25 seasons | 99353 samples | 24.4 min
-Fetching 24 files:  67%|██████▋   | 16/24 [00:17<00:08,  1.08s/it]Fetching 24 files: 100%|██████████| 24/24 [00:26<00:00,  1.10s/it]Fetching 24 files: 100%|██████████| 24/24 [00:26<00:00,  1.10s/it]
-23:14:15 [fetch] dropped season_POC22061_2026_07_13_20_50_09_train
-23:14:15 [fast] 23/25 seasons | 100138 samples | 24.7 min
-23:14:23 [fetch] dropped season_POC22061_2026_07_13_19_56_06_train
-23:14:23 [fast] 24/25 seasons | 101674 samples | 24.9 min
-23:15:51 [fetch] dropped season_POC22061_2026_07_14_15_43_22_train
-23:15:51 [fast] 25/25 seasons | 106197 samples | 26.3 min
-23:15:51 [fast] 355 episodes / 106197 samples / 25 seasons
-23:15:54 [stats] 25/1384 episodes
-23:15:55 [stats] 50/1384 episodes
-23:15:57 [stats] 75/1384 episodes
-23:15:59 [stats] 100/1384 episodes
-23:16:00 [stats] 125/1384 episodes
-23:16:02 [stats] 150/1384 episodes
-23:16:03 [stats] 175/1384 episodes
-23:16:04 [stats] 200/1384 episodes
-23:16:06 [stats] 225/1384 episodes
-23:16:07 [stats] 250/1384 episodes
-23:16:08 [stats] 275/1384 episodes
-23:16:10 [stats] 300/1384 episodes
-23:16:11 [stats] 325/1384 episodes
-23:16:12 [stats] 350/1384 episodes
-23:16:14 [stats] 375/1384 episodes
-23:16:15 [stats] 400/1384 episodes
-23:16:16 [stats] 425/1384 episodes
-23:16:17 [stats] 450/1384 episodes
-23:16:19 [stats] 475/1384 episodes
-23:16:20 [stats] 500/1384 episodes
-23:16:21 [stats] 525/1384 episodes
-23:16:23 [stats] 550/1384 episodes
-23:16:24 [stats] 575/1384 episodes
-23:16:25 [stats] 600/1384 episodes
-23:16:26 [stats] 625/1384 episodes
-23:16:28 [stats] 650/1384 episodes
-23:16:29 [stats] 675/1384 episodes
-23:16:30 [stats] 700/1384 episodes
-23:16:31 [stats] 725/1384 episodes
-23:16:32 [stats] 750/1384 episodes
-23:16:33 [stats] 775/1384 episodes
-23:16:34 [stats] 800/1384 episodes
-23:16:35 [stats] 825/1384 episodes
-23:16:36 [stats] 850/1384 episodes
-23:16:37 [stats] 875/1384 episodes
-23:16:38 [stats] 900/1384 episodes
-23:16:39 [stats] 925/1384 episodes
-23:16:40 [stats] 950/1384 episodes
-23:16:41 [stats] 975/1384 episodes
-23:16:42 [stats] 1000/1384 episodes
-23:16:43 [stats] 1025/1384 episodes
-23:16:44 [stats] 1050/1384 episodes
-23:16:45 [stats] 1075/1384 episodes
-23:16:46 [stats] 1100/1384 episodes
-23:16:47 [stats] 1125/1384 episodes
-23:16:48 [stats] 1150/1384 episodes
-23:16:49 [stats] 1175/1384 episodes
-23:16:50 [stats] 1200/1384 episodes
-23:16:51 [stats] 1225/1384 episodes
-23:16:52 [stats] 1250/1384 episodes
-23:16:52 [stats] 1275/1384 episodes
-23:16:53 [stats] 1300/1384 episodes
-23:16:54 [stats] 1325/1384 episodes
-23:16:55 [stats] 1350/1384 episodes
-23:16:56 [stats] 1375/1384 episodes
-23:16:56 [stats] 1384/1384 episodes
-23:17:09 [stats] copied train stats into /home/kshitij/origami_trex/data/origami_flat/full/val
-23:17:09 [stats] action q01 shape (25, 65) | state q01 shape (65,) | tactile q01 shape (60,)
-23:17:09 [verify] /home/kshitij/origami_trex/data/origami_flat/full/train
-23:17:09 [verify] 1384 episodes / 410145 samples / 99 seasons | stride 20, chunk 25, 224px
-23:17:09 [verify] episode files OK (410145 rows)
-23:17:09 [verify] norm-stats ranks OK | 2 action dim(s) masked off (frozen -> clamped to delta 0 at inference)
-23:17:09 [verify]     dim 58 lower_body_joint_1     max q99-q01 spread 4.79e-04 rad (0.0275 deg)
-23:17:09 [verify]     dim 59 lower_body_joint_2     max q99-q01 spread 2.88e-04 rad (0.0165 deg)
-23:17:10 [verify] sampled 16 rows OK
-23:17:10 [verify] mean contact force per finger (N): left_thumb=3.94, left_index=2.70, left_middle=0.54, left_ring=0.01, left_little=0.02, right_thumb=2.99, right_index=3.42, right_middle=0.03, right_ring=0.01, right_little=0.02
-23:17:10 [verify] deform/force alignment over 156 frames on 5 contact finger(s) (left_thumb, left_index, left_middle, right_thumb, right_index): diag 0.909, off-diag 0.238
-23:17:10 [verify] wrote deform montage (left_thumb | left_index | left_middle | left_ring | left_little | right_thumb | right_index | right_middle | right_ring | right_little) to /home/kshitij/origami_trex/data/origami_flat/full/deform_montage.png
-23:17:10 [verify] all checks passed
-23:17:11 [verify] /home/kshitij/origami_trex/data/origami_flat/full/val
-23:17:11 [verify] 355 episodes / 106197 samples / 25 seasons | stride 20, chunk 25, 224px
-23:17:11 [verify] episode files OK (106197 rows)
-23:17:11 [verify] norm-stats ranks OK | 2 action dim(s) masked off (frozen -> clamped to delta 0 at inference)
-23:17:11 [verify]     dim 58 lower_body_joint_1     max q99-q01 spread 4.79e-04 rad (0.0275 deg)
-23:17:11 [verify]     dim 59 lower_body_joint_2     max q99-q01 spread 2.88e-04 rad (0.0165 deg)
-23:17:11 [verify] sampled 8 rows OK
-23:17:12 [verify] mean contact force per finger (N): left_thumb=3.46, left_index=1.99, left_middle=0.56, left_ring=0.02, left_little=0.02, right_thumb=3.13, right_index=3.15, right_middle=0.01, right_ring=0.01, right_little=0.05
-23:17:12 [verify] deform/force alignment over 155 frames on 5 contact finger(s) (left_thumb, left_index, left_middle, right_thumb, right_index): diag 0.927, off-diag 0.266
-23:17:12 [verify] all checks passed
-
->>> done. train=/home/kshitij/origami_trex/data/origami_flat/full/train  val=/home/kshitij/origami_trex/data/origami_flat/full/val
-11G	/home/kshitij/origami_trex/data/origami_flat/full/train
-2.8G	/home/kshitij/origami_trex/data/origami_flat/full/val
->>> upload with:
-    huggingface-cli upload <your-user>/origami_flat_full /home/kshitij/origami_trex/data/origami_flat/full . --repo-type dataset --private
-
->>> incomplete split(s): train -- rerun this script to refetch only
-    the failed seasons; converted ones are skipped.

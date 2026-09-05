@@ -3,3 +3,12 @@ data/
 data.zip
 checkpoint-1-5000/
 checkpoint-2-8000/
+out/
+*.log
+wandb/
+outputs/
+.pytest_cache/
+__pycache__/
+*.pyc
+.env
+*.egg-info/

@@ -1,0 +1,31 @@
+[project]
+name = "origami"
+version = "0.1.0"
+description = "Origami x T-Rex: convert the Robotic Origami Challenge dataset to T-Rex eef-62 LeRobot format, train, and deploy. Implements REDESIGN_PLAN.md."
+requires-python = ">=3.12"
+dependencies = [
+    "pin>=3.2.0",
+    "pin-pink>=4.3.0",
+    "qpsolvers[daqp]>=4.13.0",
+    "av>=12.0.0",
+    "lerobot>=0.6.1",
+    "huggingface_hub>=0.25.0",
+    "pandas>=2.0.0",
+    "opencv-python-headless>=4.9.0",
+    "pyarrow>=14.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["origami"]
+
+[tool.pytest.ini_options]
+testpaths = ["origami/tests"]
