@@ -33,7 +33,6 @@ class DecodeError(RuntimeError):
 def decode_episode_stream(
     video_path: str,
     from_ts: float,
-    to_ts: float,
     n_frames: int,
     fmt: str = "rgb24",
 ) -> Iterator[np.ndarray]:
