@@ -73,9 +73,17 @@ def have_season(season: str, cache_root: Path, include_raw: bool = False) -> boo
 def download_season(
     season: str, cache_root: Path, token: str, include_raw: bool = False
 ) -> str:
-    """snapshot_download with exponential backoff, per §5.1."""
-    local_dir = Path(cache_root) / season
-    patterns = [p[len(season) + 1:] for p in season_allow_patterns(season, include_raw)]
+    """snapshot_download with exponential backoff, per §5.1.
+
+    ``allow_patterns`` are matched against full repo-relative paths (including the
+    ``season/`` prefix), and ``local_dir`` mirrors that full repo-relative layout -- so
+    ``local_dir`` must be ``cache_root`` (the download lands at ``cache_root/season/...``),
+    not ``cache_root/season``. Stripping the season prefix from the patterns while keeping
+    ``local_dir=cache_root/season`` matches nothing and silently downloads 0 files.
+    """
+    local_dir = Path(cache_root)
+    season_dir = local_dir / season
+    patterns = season_allow_patterns(season, include_raw)
     last_exc = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -87,7 +95,7 @@ def download_season(
                 max_workers=8,
                 token=token,
             )
-            return str(local_dir)
+            return str(season_dir)
         except HfHubHTTPError as e:
             last_exc = e
             if attempt < MAX_ATTEMPTS:
@@ -102,8 +110,9 @@ def download_season(
 
 def download_season_meta_and_data(season: str, cache_root: Path, token: str) -> str:
     """Phase 0 (§5.5): fetch only meta+data (~66MB, no video) for one season."""
-    local_dir = Path(cache_root) / season
-    patterns = [p[len(season) + 1:] for p in season_meta_data_only_patterns(season)]
+    local_dir = Path(cache_root)
+    season_dir = local_dir / season
+    patterns = season_meta_data_only_patterns(season)
     snapshot_download(
         repo_id=HF_REPO_ID,
         repo_type="dataset",
@@ -112,7 +121,7 @@ def download_season_meta_and_data(season: str, cache_root: Path, token: str) -> 
         max_workers=8,
         token=token,
     )
-    return str(local_dir)
+    return str(season_dir)
 
 
 def drop_season(season: str, cache_root: Path) -> None:

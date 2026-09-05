@@ -43,22 +43,32 @@ def decode_episode_stream(
     frames are available -- the caller (§4.4) is responsible for clamping episode length
     before calling this, never this function padding silently.
 
-    Buffers into a list before yielding (rather than streaming directly) so a PTS
-    discontinuity on the seek path can fall back to a full linear-scan retry without ever
-    having already handed the caller a short/duplicate sequence.
+    True streaming: yields each frame's ndarray as it's decoded, never materializing a whole
+    episode's frames as a Python list (a 4000+-frame, 480x480 episode across 4 video streams
+    held simultaneously that way is 10+GB and OOMs -- exactly what §5.4's bounded-memory
+    design is meant to avoid elsewhere). ``probe_available_frames`` (cheap: counts frames
+    without converting any to ndarray) decides seek-vs-linear-scan *before* any pixel data is
+    decoded, so a PTS discontinuity never means frames already handed to the caller need to be
+    thrown away or duplicated.
     """
-    frames = _decode_from_seek(video_path, from_ts, n_frames, fmt)
-    if len(frames) < n_frames:
-        logger.warning(
-            "decode_episode_stream: seek path only found %d/%d frames for %s @ %.3fs; "
-            "falling back to a linear scan from t=0",
-            len(frames), n_frames, video_path, from_ts,
+    if probe_available_frames(video_path, from_ts, n_frames) >= n_frames:
+        yield from _stream_from_seek(video_path, from_ts, n_frames, fmt)
+        return
+
+    logger.warning(
+        "decode_episode_stream: seek path can't supply %d frames for %s @ %.3fs; "
+        "falling back to a linear scan from t=0",
+        n_frames, video_path, from_ts,
+    )
+    if _count_linear_scan(video_path, from_ts, n_frames) < n_frames:
+        raise DecodeError(
+            f"{video_path}: linear-scan fallback can't supply {n_frames} frames from "
+            f"t={from_ts:.3f}s"
         )
-        frames = _decode_linear_scan(video_path, from_ts, n_frames, fmt)
-    yield from frames
+    yield from _stream_linear_scan(video_path, from_ts, n_frames, fmt)
 
 
-def _decode_from_seek(video_path, from_ts, n_frames, fmt) -> list[np.ndarray]:
+def _stream_from_seek(video_path, from_ts, n_frames, fmt) -> Iterator[np.ndarray]:
     container = av.open(video_path)
     try:
         stream = container.streams.video[0]
@@ -66,39 +76,52 @@ def _decode_from_seek(video_path, from_ts, n_frames, fmt) -> list[np.ndarray]:
         pre_roll_cutoff = from_ts - 0.5 / float(stream.average_rate or 30)
         container.seek(int(from_ts / time_base), stream=stream)
 
-        frames = []
+        n = 0
         for frame in container.decode(stream):
             pts_s = frame.pts * time_base
             if pts_s < pre_roll_cutoff:
                 continue
-            frames.append(frame.to_ndarray(format=fmt))
-            if len(frames) >= n_frames:
+            yield frame.to_ndarray(format=fmt)
+            n += 1
+            if n >= n_frames:
                 break
-        return frames
     finally:
         container.close()
 
 
-def _decode_linear_scan(video_path, from_ts, n_frames, fmt) -> list[np.ndarray]:
-    """Fallback: scan from t=0 and collect the first ``n_frames`` whose pts >= from_ts."""
+def _stream_linear_scan(video_path, from_ts, n_frames, fmt) -> Iterator[np.ndarray]:
+    """Fallback: scan from t=0 and yield the first ``n_frames`` whose pts >= from_ts."""
     container = av.open(video_path)
     try:
         stream = container.streams.video[0]
-        time_base = float(stream.time_base)
-        frames = []
+        n = 0
         for frame in container.decode(stream):
-            pts_s = frame.pts * time_base
+            pts_s = frame.pts * float(stream.time_base)
             if pts_s < from_ts:
                 continue
-            frames.append(frame.to_ndarray(format=fmt))
-            if len(frames) >= n_frames:
+            yield frame.to_ndarray(format=fmt)
+            n += 1
+            if n >= n_frames:
                 break
-        if len(frames) < n_frames:
-            raise DecodeError(
-                f"{video_path}: linear-scan fallback only found {len(frames)}/{n_frames} frames "
-                f"from t={from_ts:.3f}s"
-            )
-        return frames
+    finally:
+        container.close()
+
+
+def _count_linear_scan(video_path, from_ts, max_frames) -> int:
+    """Cheap (no ndarray decode) frame count for the linear-scan path, mirroring
+    ``probe_available_frames``'s seek-path counting."""
+    container = av.open(video_path)
+    try:
+        stream = container.streams.video[0]
+        n = 0
+        for frame in container.decode(stream):
+            pts_s = frame.pts * float(stream.time_base)
+            if pts_s < from_ts:
+                continue
+            n += 1
+            if n >= max_frames:
+                break
+        return n
     finally:
         container.close()
 

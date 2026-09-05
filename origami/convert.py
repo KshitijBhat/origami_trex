@@ -94,8 +94,10 @@ def convert_season(
     kin: OrigamiKinematics,
     cfg: ConvertConfig,
     max_episodes: int | None = None,
+    max_frames_per_episode: int | None = None,
 ) -> SeasonResult:
-    """``max_episodes`` (test/debug only): convert only the first N episodes."""
+    """``max_episodes``/``max_frames_per_episode`` (test/debug only): convert only the first N
+    episodes / first M frames of each episode, to keep smoke tests fast and memory-bounded."""
     season_dir = Path(season_dir)
     season = season_dir.name
     lerobot_root = season_dir / "lerobot3.0"
@@ -163,6 +165,8 @@ def convert_season(
             probe_available_frames(str(video_paths[v]), from_ts[v], length) for v in VIDEO_SRC_KEYS
         ]
         N = reconcile_episode_length(length, available + [len(state65), len(action65)])
+        if max_frames_per_episode is not None:
+            N = min(N, max_frames_per_episode)
         if N < length:
             result.truncated.append((ep_idx, length, N))
         if N < MIN_EPISODE_LENGTH:
@@ -232,6 +236,16 @@ def convert_season(
     cam_root.rename(final_root)
 
     acc.write(str(final_root))
+    acc.dump(final_root / "meta" / "trex_norm_stats.pkl")  # shard checkpointing, §5.3/§5.4
+
+    prep_meta = {
+        "season": season,
+        "locked_digest": kin.locked.digest(),
+        "truncated": result.truncated,
+        "rejected_short_episodes": result.rejected_short_episodes,
+    }
+    (final_root / "meta" / "origami_prep.json").write_text(json.dumps(prep_meta, indent=2))
+
     return result
 
 

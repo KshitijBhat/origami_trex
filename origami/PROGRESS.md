@@ -12,8 +12,8 @@ handoff artifact if context is compacted.
 | 3 | constants.py + splits.json + kinematics.py | **done** | G1a, G1b, G2, G2b, G3, G3b pass; G18 list-parsing pass |
 | 4 | decode.py | **done (code)** | G5/G6 not yet tested against real data |
 | 5 | stats.py | **done** | G8, G8b pass (see notes -- G8b's exact-finger claim doesn't reproduce on this fixture) |
-| 6 | convert.py | in progress | smoke-testing against real fixture season now |
-| 7 | fetch.py + merge.py + prepare.py | not started | - |
+| 6 | convert.py | **done** | smoke-tested against real fixture season (1 episode full-length + truncated unit tests); G4/G4b, G6 pass in `test_convert.py` |
+| 7 | fetch.py + merge.py + prepare.py | **done** (see notes) | - |
 | 8 | verify.py | not started | - |
 | 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | not started | - |
 | 10 | Full prep run (user-executed) | not started | - |
@@ -37,9 +37,9 @@ handoff artifact if context is compacted.
 | G2 / G2b | FK/IK pose round-trip, 10 000 samples each | **PASS (redefined -- see note below)** | pos err max ~1e-5 m, rot err max ~1e-4 deg (both ≪ thresholds 1e-4m/0.01deg); max\|dq\| bounded but NOT gated at 1e-3 rad -- see note |
 | G3 | delta9→rot6d_to_matrix reconstructs target pose, 2000 samples | **PASS** | max err well under 1e-9 |
 | G3b | rot6d round-trip on 10 000 random SO(3) | **PASS** | max err < 1e-12 |
-| G4 / G4b | Chunk parity | not started | convert.py written, not yet independently verified against a second build_action_chunk call |
-| G5 | Deform tile mapping | not started | decode.py written, not yet run against real data with known-force frames |
-| G6 | Deform video round-trip | not started | lossless h264 encoder chosen for deform shard; PSNR/exactness not yet measured |
+| G4 / G4b | Chunk parity | **PASS** | `test_g4_chunk_reconstructs_abs_target` (test_convert.py): chunk-base delta9 (k=0) + `observation.state` FK pose reconstructs `action_abs` FK pose to <1e-4 on real fixture frames |
+| G5 | Deform tile mapping | not started | decode.py written, not yet run against real data with known-force frames (only the round-trip below (G6) has been checked so far) |
+| G6 | Deform video round-trip | **PASS** | `test_deform_video_round_trips_losslessly`: source luma tile == decoded 3-ch-replicated tile, exact (`assert_array_equal`), on real fixture data |
 | G7 / G7b | Loader parity / forward pass | not started | - |
 | G8 / G8b | Reservoir stats / tactile mask | **PASS (G8b redefined -- see note)** | G8: q01/q99 rel err < 1% (reservoir exact at this scale); G8b: masking mechanism verified deterministically; on THIS fixture only 1/60 tactile dims cross the 1e-3 span threshold (not the full ring/pinky blocks the plan's original fixture showed) |
 | G9a / G9b | Smoke train / resume | not started | - |
@@ -143,6 +143,111 @@ handoff artifact if context is compacted.
   the deploy Docker image (step 15) has no `lerobot` dependency at all, so it can pin
   `4.57.3` in isolation without this conflict. `pyproject.toml` states `transformers>=4.53.0`
   (T-Rex's own floor) with no upper cap for the dev venv.
+
+## Step 6 findings (convert.py smoke test) — two real bugs found and fixed
+
+* **This session's environment had no venv packages or fixture data installed** (both are
+  gitignored and this was a fresh checkout) — `uv sync --extra dev` and a fresh
+  `download_season(...)` were required before anything could run. HF_TOKEN provided by the
+  user, stored in `.env` (gitignored), not committed.
+* **Bug in `fetch.py::download_season`/`download_season_meta_and_data` (never previously
+  exercised — added in the same WIP commit as convert.py, untested): 0 files ever
+  downloaded.** `snapshot_download`'s `allow_patterns` match full repo-relative paths
+  (including the `season_.../` prefix), and `local_dir` mirrors that same full repo-relative
+  layout. The code stripped the season prefix from the patterns while still setting
+  `local_dir=cache_root/season` — patterns and `local_dir` disagreed, so nothing matched.
+  Fixed: `local_dir=cache_root`, patterns keep the full season-prefixed path; return value
+  (`cache_root/season`) unchanged so callers (`have_season`, `convert_season`) are unaffected.
+* **Bug in `decode.py::decode_episode_stream`: OOM-killed (exit 137) on a real 2-episode
+  smoke run on a 15GB machine.** The function was a generator only in name — internally it
+  called `_decode_from_seek(...)`, which fully decoded and materialized *every* frame of an
+  episode into a Python list *before* the first `yield`. For a ~5000-frame, 480x480 episode
+  across 4 concurrently-open video streams (head/wrist_left/wrist_right/deform), that's
+  10+GB of ndarrays held at once — the same anti-pattern `stats.py`'s `StreamingNormStats`
+  was explicitly built to avoid (§5.4), just in the video path instead of the stats path.
+  Fixed: rewrote as true frame-by-frame streaming (`_stream_from_seek`/`_stream_linear_scan`
+  generators, one frame in flight at a time). The seek-vs-linear-scan decision now uses the
+  already-existing cheap `probe_available_frames` (counts frames without ever calling
+  `to_ndarray`) *before* any pixel data is decoded, preserving the original
+  never-hand-the-caller-a-short/duplicate-sequence guarantee without buffering.
+  **After this fix, 1 real full-length episode (7924 frames, all 4 video streams, both
+  writer shards) converts successfully; a 2-episode run was not re-tried (not needed — the
+  fix is a strict memory-bound improvement, and per-episode processing is exactly what
+  `merge.py`/`prepare.py` (§5.2/§5.5) already assume).**
+* Added `convert_season(..., max_frames_per_episode=...)` (test/debug only, mirrors the
+  existing `max_episodes`) so `test_convert.py` can run the *real* pipeline (real FK, real
+  PyAV decode/encode, real `LeRobotDataset` writer, real lossless-deform round-trip) in ~28s
+  instead of minutes, without weakening what's being tested.
+* `test_convert.py` (5 tests, all pass): writer produces exactly N frames; the shard is
+  readable by the real `lerobot.datasets.lerobot_dataset.LeRobotDataset` with the exact
+  T-Rex-contract shapes (§1.4); `trex_norm_stats.json` is written with the right shapes;
+  **G4/G4b** now pass (chunk-base delta9 reconstructs `action_abs`'s FK pose to <1e-4 m/rot6d
+  on real fixture frames); **G6** now passes (deform video round-trips losslessly, exact
+  match, real fixture data).
+* Full `origami/tests/` suite: **36/36 pass**, ~72s total.
+
+## Step 7 findings (merge.py) — §5.3's first-choice API doesn't work for our schema
+
+* **`lerobot.datasets.aggregate.aggregate_datasets` exists in the pinned version (confirmed
+  step 2) but cannot merge our shards.** `aggregate_data` always rewrites each data parquet
+  via `to_parquet_one_row_group_per_episode(df, dst_path)`, which does
+  `pa.Table.from_pandas(df, preserve_index=False)` with **no explicit schema** -- confirmed
+  by reading the installed library's source, then reproducing the failure directly on two
+  real converted shards: `pyarrow.lib.ArrowTypeError: Conversion failed for column action
+  with type array[float32]`. Our `action` feature is `[16,62]` per row (§1.4); the
+  pandas-to-pyarrow round trip loses that fixed-shape-array typing regardless of
+  ``contains_images`` (the only place a schema is passed through is the images path, which
+  our video features don't hit either). This is a real limitation of the pinned lerobot
+  version for any multi-dimensional array feature, not a bug in our code.
+* **Resolution: implemented the plan's own explicit fallback** (§5.3: "otherwise
+  `merge_shards(...)`") as a genuine copy-and-renumber, made simple by §5.2's
+  `ONE_EPISODE_PER_FILE_MB` writer setting (every source data/video file holds exactly one
+  episode): read each data parquet with **`pyarrow` directly** (never through pandas, so the
+  2D array column is never re-inferred), patch only the `index`/`episode_index` int columns,
+  byte-copy video files untouched, and rewrite `meta/episodes` + `meta/info.json` with
+  renumbered indices. `merge_shards` also merges `trex_norm_stats.pkl` (added
+  `acc.dump(...)` to `convert_season`, needed for this -- previously only `acc.write()` the
+  assembled JSON) and a new `meta/origami_prep.json` (per-season truncation log +
+  `LockedConfig.digest()`, also newly written by `convert_season`), refusing to merge shards
+  converted under different `LockedConfig` digests (§3.2).
+* `test_merge.py` (4 tests, all pass, ~47s): builds 2 real truncated shards from the fixture
+  season and merges them, checking global episode/frame renumbering at the shard boundary,
+  merged `trex_norm_stats.json` transition/trajectory counts, merged `origami_prep.json`, and
+  that mismatched `LockedConfig` digests raise instead of silently merging.
+* Full `origami/tests/` suite: **40/40 pass**, ~116s total.
+
+## Step 7 findings (prepare.py) — CLI orchestrator
+
+* `prepare.py` implements §5.5's phase 0 (meta+data-only fetch per season -> exact frame
+  total + `LockedConfig`/arm-medians, §3.3) / phase 1 (per-season download+convert+drop,
+  resumable via `DONE` markers + `manifest.jsonl`) / phase 2 (`merge_shards`), plus G18
+  season-list resolution (`resolve_season_list`) and the §5.6 disk-budget refusal
+  (`check_disk_budget`) and §5.5 config-invalidation refusal (`PrepConfig` recorded in/compared
+  against `meta/origami_prep.json`).
+  **Simplification, documented in the module docstring:** §5.5 describes a
+  `ProcessPoolExecutor` over seasons *plus* a separate `ThreadPoolExecutor` prefetching
+  downloads so at most `--disk-budget` seasons are resident at once. Implemented instead as
+  one `ProcessPoolExecutor` with a `multiprocessing.Manager().Semaphore(disk_budget)` acquired
+  around each worker's download+convert+drop -- same resource bound (never more than
+  `disk-budget` seasons' raw video on disk simultaneously), simpler to get right, at the cost
+  of not overlapping "downloading season N+1" with "converting season N". Revisit only if the
+  real prep server turns out to be download-bound.
+* **Not yet exercised for real:** the `ProcessPoolExecutor`/semaphore plumbing in
+  `run_phase1` needs real network + real per-season conversion to test meaningfully (a worker
+  function pickled into a child process can't be monkeypatched from the parent test process),
+  so it's only covered by the "everything already DONE, skip" resumability path in
+  `test_prepare.py`. The season-by-season pipeline it calls (`download_season`,
+  `convert_season`, `merge_shards`) is independently real-data-tested (step 6/7 above) --
+  what's untested here specifically is the concurrency glue itself. Real coverage comes from
+  step 10 (the actual full prep run, user-executed on the large-RAM/large-disk server, §0 D3).
+* `test_prepare.py` (8 tests, all pass, ~3s, no network): `PrepConfig.as_dict` stability; G18
+  `resolve_season_list` (happy path, hub-missing-season assertion, fixture-in-split
+  assertion, extras-fold-into-train-only); `check_disk_budget` pass/fail; phase-1
+  all-already-done resumability skip. `phase0_locked_config` additionally spot-checked
+  manually (not as a committed test, since it needs a monkeypatched `download_season_meta_and_data`
+  writing synthetic parquet) against synthetic 65-D state data — frame totals and
+  `LockedConfig`/arm-default shapes came out correct.
+* Full `origami/tests/` suite: **48/48 pass**, ~115s total.
 
 ## Environment
 
