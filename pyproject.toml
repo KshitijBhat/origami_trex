@@ -8,11 +8,12 @@ dependencies = [
     "pin-pink>=4.3.0",
     "qpsolvers[daqp]>=4.13.0",
     "av>=12.0.0",
-    "lerobot>=0.6.1",
+    "lerobot[dataset]>=0.6.1",
     "huggingface_hub>=0.25.0",
     "pandas>=2.0.0",
     "opencv-python-headless>=4.9.0",
     "pyarrow>=14.0.0",
+    "transformers>=4.53.0",
 ]
 
 [project.optional-dependencies]
