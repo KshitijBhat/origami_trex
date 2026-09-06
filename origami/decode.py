@@ -25,9 +25,24 @@ from origami.constants import (
 
 logger = logging.getLogger(__name__)
 
+# PyAV/ffmpeg codec contexts default to thread_count=0 ("auto"), which for threaded decoders
+# (e.g. libdav1d for the hub's AV1-encoded source videos) grabs up to os.cpu_count() threads
+# per open stream. Phase 1 opens up to 4 video streams per episode (head/wrist_l/wrist_r/
+# deform) across --workers concurrent seasons, so uncapped auto-detection multiplies into
+# thousands of threads and saturates this container's pids cgroup limit
+# (see convert.py's ENCODER_THREADS for the matching encode-side fix). Cap explicitly.
+DECODE_THREADS = 4
+
 
 class DecodeError(RuntimeError):
     pass
+
+
+def _open_video(video_path: str) -> av.container.InputContainer:
+    """``av.open`` with the video stream's decoder thread count capped (see DECODE_THREADS)."""
+    container = av.open(video_path)
+    container.streams.video[0].codec_context.thread_count = DECODE_THREADS
+    return container
 
 
 def decode_episode_stream(
@@ -69,7 +84,7 @@ def decode_episode_stream(
 
 
 def _stream_from_seek(video_path, from_ts, n_frames, fmt) -> Iterator[np.ndarray]:
-    container = av.open(video_path)
+    container = _open_video(video_path)
     try:
         stream = container.streams.video[0]
         time_base = float(stream.time_base)
@@ -91,7 +106,7 @@ def _stream_from_seek(video_path, from_ts, n_frames, fmt) -> Iterator[np.ndarray
 
 def _stream_linear_scan(video_path, from_ts, n_frames, fmt) -> Iterator[np.ndarray]:
     """Fallback: scan from t=0 and yield the first ``n_frames`` whose pts >= from_ts."""
-    container = av.open(video_path)
+    container = _open_video(video_path)
     try:
         stream = container.streams.video[0]
         n = 0
@@ -110,7 +125,7 @@ def _stream_linear_scan(video_path, from_ts, n_frames, fmt) -> Iterator[np.ndarr
 def _count_linear_scan(video_path, from_ts, max_frames) -> int:
     """Cheap (no ndarray decode) frame count for the linear-scan path, mirroring
     ``probe_available_frames``'s seek-path counting."""
-    container = av.open(video_path)
+    container = _open_video(video_path)
     try:
         stream = container.streams.video[0]
         n = 0
@@ -130,7 +145,7 @@ def probe_available_frames(video_path: str, from_ts: float, max_frames: int) -> 
     """Count frames actually available from ``from_ts`` onward, capped at ``max_frames``,
     without raising -- used by the caller (§4.4) to reconcile episode length across streams
     before requesting an exact-count decode."""
-    container = av.open(video_path)
+    container = _open_video(video_path)
     try:
         stream = container.streams.video[0]
         time_base = float(stream.time_base)

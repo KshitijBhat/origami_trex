@@ -72,6 +72,17 @@ LOSSLESS_DEFORM_ENCODER = RGBEncoderConfig(vcodec="h264", crf=0, pix_fmt="yuv444
 # forcing a genuine one-episode-per-file split regardless of episode length.
 ONE_EPISODE_PER_FILE_MB = dict(data_files_size_in_mb=1e-6, video_files_size_in_mb=1e-6)
 
+# lerobot's ``encoder_threads=None`` default leaves each ffmpeg/SVT-AV1 encoder instance to
+# auto-detect and grab up to os.cpu_count() threads on its own. With phase 1's multi-worker
+# ProcessPoolExecutor and per-episode parallel_encoding (one encoder subprocess per video key,
+# 3 for cam / 10 for deform), concurrent encoder instances multiply: at --workers 10, cam alone
+# hits 10 workers x 3 keys = 30 concurrent SVT-AV1 instances x 256 auto-detected threads =
+# 7680 threads, which on this container exactly saturates the pids cgroup limit
+# (/sys/fs/cgroup/pids.max) and makes avcodec_open2 fail with ENOMEM ("insufficient
+# resources") -- not a real memory shortage. Cap threads per encoder instance explicitly so
+# total concurrent threads stays far below any reasonable pids limit regardless of --workers.
+ENCODER_THREADS = 4
+
 
 def gray_to_3ch(a: np.ndarray) -> np.ndarray:
     """[H,W] uint8 -> [H,W,3] uint8 (replicated), matching convert_inlab_to_lerobot._gray_to_3ch."""
@@ -143,12 +154,13 @@ def convert_season(
 
     ds = LeRobotDataset.create(
         repo_id=f"origami/eef62_{season}_cam", fps=info["fps"], features=cam_features,
-        root=cam_root, robot_type="north_poc2_2", use_videos=True, **ONE_EPISODE_PER_FILE_MB,
+        root=cam_root, robot_type="north_poc2_2", use_videos=True,
+        encoder_threads=ENCODER_THREADS, **ONE_EPISODE_PER_FILE_MB,
     )
     ds_deform = LeRobotDataset.create(
         repo_id=f"origami/eef62_{season}_deform", fps=info["fps"], features=deform_features,
         root=deform_root, robot_type="north_poc2_2", use_videos=True,
-        rgb_encoder=LOSSLESS_DEFORM_ENCODER, **ONE_EPISODE_PER_FILE_MB,
+        rgb_encoder=LOSSLESS_DEFORM_ENCODER, encoder_threads=ENCODER_THREADS, **ONE_EPISODE_PER_FILE_MB,
     )
 
     acc = StreamingNormStats()
@@ -231,6 +243,17 @@ def convert_season(
 
         ds.save_episode()
         ds_deform.save_episode()
+        # lerobot's data-file rollover check (_save_episode_data) reads the *on-disk* size of
+        # the currently-open parquet file to decide whether to start a new one, but the
+        # pq.ParquetWriter for that file stays open (buffered) across save_episode() calls, so
+        # the size it reads stays stale/near-zero until the writer is actually closed -- which
+        # only happens when the rollover fires, a chicken-and-egg that lets two short episodes
+        # land in the same file even under ONE_EPISODE_PER_FILE_MB's near-zero threshold.
+        # Force-close after every episode so the *next* episode's size check sees the true
+        # flushed size and the near-zero threshold reliably fires (video files don't need this:
+        # their episodes are fully-encoded temp files before the size check runs).
+        ds.writer.close_writer()
+        ds_deform.writer.close_writer()
         acc.add_episode_tracking(states, abs_targets)
         result.n_episodes += 1
         result.n_frames += N
