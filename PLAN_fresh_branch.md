@@ -33,14 +33,29 @@ mask-driven) but now fed by the norm-stats variance mask instead of an anchor sp
 Verified with a standalone import (bypassing an unrelated missing `cv2` dep), no leftover
 references to the deleted module.
 
-**Still not done, in rough order**: `policy.py`/`verify.py`/`preflight.py` still import the deleted
-`anchoring.py` -- will fail immediately, not yet started. Streaming/reservoir q01/q99 stats for
-full 126-season scale (`stats.py` not yet checked for whether it already handles this or would
-OOM). `final_layer` init script (hand warm-start + fresh arms, §6). VQ-VAE buffer re-fit script
-(§7). Training-time logging beyond the frozen-dims print above (confirmed in scope). `accel.py`'s
-NVDEC improvements from `dev/attempt2_server`'s tip were kept as-is (already anchor-free) but not
-yet diffed line-by-line against `85ab48e` to confirm nothing else worth keeping was missed in
-`prepare.py`/`prepare_fast.py` specifically -- worth a real diff pass before the full run.
+**Full training-relevant pipeline is now anchoring-free and verified end to end**:
+`preflight.py` -- `check_anchoring` removed entirely (nothing left to check under all-absolute;
+`check_frozen_dims` needed no changes, was already generic). Ran against the real smoke-test
+output: correctly reports its two *expected* gaps (stand-in val season, `stats.py` never run) with
+no import crash. `verify.py` -- gate 6 (was "anchor + action_chunk reconstructs action_abs")
+simplified to a direct `action_chunk[0] == action_abs` check; gate 7's src-root round-trip drops
+the anchor subtraction (`want_chunk = action_all[idx]`, not `- build_anchor(...)`). Ran against
+the real smoke-test output **with `--src-root` pointed at the actual source data**: reports
+"round-trip against raw season ... exact" -- a genuine confirmation against ground truth, not just
+"imports without crashing."
+
+That covers the full training path (prepare → loader → preflight → verify). `policy.py` (deploy)
+is untouched on purpose -- explicitly staged for after training works, per your own note.
+
+**Still not done, in rough order**: streaming/reservoir q01/q99 stats for full 126-season scale
+(`stats.py` not yet checked for whether it already handles this or would OOM). `final_layer` init
+script (hand warm-start + fresh arms, §6). VQ-VAE buffer re-fit script (§7). Training-time logging
+beyond the frozen-dims print already added (confirmed in scope, e.g. recording which flags
+actually got applied at launch). `accel.py`'s NVDEC improvements from `dev/attempt2_server`'s tip
+were kept as-is (already anchor-free) but not yet diffed line-by-line against `85ab48e` to confirm
+nothing else worth keeping was missed in `prepare.py`/`prepare_fast.py` specifically -- worth a
+real diff pass before the full run. `policy.py` still imports the deleted `anchoring.py` --
+deferred on purpose, not a bug.
 
 Two things below are flagged as **open decisions**, not settled — I have evidence and a leaning
 on each, but they're value calls that are yours to make, not mine to assume.
