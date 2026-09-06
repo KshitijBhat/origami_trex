@@ -630,7 +630,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 from .fetch import download_season, drop_season, have_season
                 downloaded = not have_season(cache_root, season)
-                download_season(season, cache_root, token=args.hf_token)
+                hub_revision = None if args.revision == "main" else args.revision
+                download_season(season, cache_root, token=args.hf_token,
+                                revision=hub_revision)
                 src_root = cache_root
             entries = prepare_season(season, src_root, args.out_root, cfg,
                                      overwrite=args.overwrite)

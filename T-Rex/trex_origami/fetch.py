@@ -59,11 +59,17 @@ def download_season(
     repo_id: str = HF_REPO_ID,
     token: Optional[str] = None,
     max_workers: int = 8,
+    revision: Optional[str] = None,
 ) -> str:
     """Download one season into `cache_root/<season>` and return that path.
 
     Uses `local_dir` (not the HF blob cache) so `drop_season` actually reclaims
     the space — a symlinked cache would leave the blobs behind.
+
+    `revision` is the HF git ref to pull from (e.g. the `competition-paper-set`
+    branch, which freezes a season set that has since partly rotated off
+    `main`). Left `None`, `snapshot_download` resolves it to the repo's
+    default branch, same as before this parameter existed.
     """
     from huggingface_hub import snapshot_download
 
@@ -73,11 +79,12 @@ def download_season(
     # cheap metadata round-trip when nothing is missing, and it repairs a
     # partial tree left behind by an interrupted run instead of letting the
     # converter fail on an absent mp4 halfway through.
-    logger.info("[fetch] %s %s", "verifying" if have_season(cache_root, season)
-                else "downloading", season)
+    logger.info("[fetch] %s %s (revision=%s)", "verifying" if have_season(cache_root, season)
+                else "downloading", season, revision or "default")
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
+        revision=revision,
         allow_patterns=season_allow_patterns(season),
         local_dir=cache_root,
         token=token,
@@ -86,7 +93,8 @@ def download_season(
     if not have_season(cache_root, season):
         raise RuntimeError(
             f"{season}: download finished but the expected lerobot3.0 tree is "
-            f"missing under {target} — check the season name against the hub.")
+            f"missing under {target} — check the season name against the hub "
+            f"revision {revision or 'default'}.")
     return target
 
 
@@ -98,13 +106,17 @@ def drop_season(cache_root: str, season: str) -> None:
         logger.info("[fetch] dropped %s", season)
 
 
-def list_hub_seasons(repo_id: str = HF_REPO_ID, token: Optional[str] = None) -> List[str]:
+def list_hub_seasons(repo_id: str = HF_REPO_ID, token: Optional[str] = None,
+                      revision: Optional[str] = None) -> List[str]:
     """Season directory names actually present on the hub.
 
     Useful to reconcile `seasons.py` (written from dataset.md) against the live
-    repo before starting a long sweep.
+    repo before starting a long sweep. Pass the same `revision` the sweep will
+    fetch from -- a season list pulled from the default branch can differ from
+    what a named revision (e.g. a frozen competition-set branch) still has.
     """
     from huggingface_hub import HfApi
 
-    files = HfApi().list_repo_files(repo_id, repo_type="dataset", token=token)
+    files = HfApi().list_repo_files(repo_id, repo_type="dataset", token=token,
+                                     revision=revision)
     return sorted({f.split("/", 1)[0] for f in files if f.startswith("season_")})
