@@ -4,6 +4,39 @@ Goal: stay as close to original T-Rex (`/home/sai/Desktop/ORI/T-Rex`) as reasona
 while cutting origami_trex-fork-specific complexity — starting with anchoring — and defining a
 dataset-prep approach for the real 65D origami robot that's evidenced, not guessed.
 
+## Status
+
+Branch `dev/all_absolute` (off `dev/attempt2_server` @ `641b189`). Commits so far: plan doc;
+anchoring.py + Zenoh stack deleted; `prepare.py`/`prepare_fast.py` restored to pre-anchoring form
+(`85ab48e`) and converted to all-absolute (`action_chunk = action[t+k]`, no delta) with
+`action_chunk` changed 25→16; season lists moved from ~130 hardcoded lines in `seasons.py` into
+`splits_main.json`/`splits_competition_paper_set.json` (one per HF revision, `--revision` flag
+added to both prepare scripts).
+
+**Smoke-tested end to end and verified correct** on the real local season
+(`season_POC22061_2026_07_09_16_23_46_train`, on `main`'s train split), `sample_stride=3`, both
+`--split train` and `--split val` code paths (same season used for both — no val season available
+locally, no HF token to fetch one, clearly labeled as a substitution, not a real val run): 14
+episodes, 30,451 samples each, ~1.5-4 min on CPU-only. Verified in the actual output data, not
+just "it ran": `action_chunk[0]` exactly equals `action_abs`, and is close-but-distinct from
+`state` (a real tracking offset, not an accidental collapse to delta-like behavior);
+`meta/dataset.json`'s config has zero anchor-related fields.
+
+**Still not done, in rough order**: `policy.py`/`verify.py`/`preflight.py` still reference the
+deleted `anchoring.py` (imports will fail) — need rewriting against the all-absolute target, not
+yet started. `origami_dataset.py` (the loader) also still imports from `trex_origami.anchoring`
+and does its own `reanchor_chunk`/`build_anchor` reconstruction — same treatment needed. The
+default `instruction` baked into the restored `prepare.py` is the paper-airplane phrasing, which
+`DEPLOY.md`'s own benchmark found underperforms the plain "north ces task" label — worth changing
+before a real run. Streaming/reservoir q01/q99 stats (for full 126-season scale, `stats.py`'s
+current form wasn't checked yet for whether it already handles this or would OOM). `final_layer`
+init script (hand warm-start + fresh arms, §6). VQ-VAE buffer re-fit script (§7). Training-time
+logging additions (confirmed in scope, not started). accel.py's NVDEC improvements from
+`dev/attempt2_server`'s tip were kept as-is (already anchor-free) but not yet diffed line-by-line
+against `85ab48e` to confirm nothing else worth keeping was missed in `prepare.py`/`prepare_fast.py`
+specifically (only the *anchor-related* lines were assumed to be the entire delta — worth a real
+diff pass before the full run, not just before this smoke test).
+
 Two things below are flagged as **open decisions**, not settled — I have evidence and a leaning
 on each, but they're value calls that are yours to make, not mine to assume.
 
