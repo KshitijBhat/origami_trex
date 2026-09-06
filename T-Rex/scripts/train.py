@@ -525,6 +525,29 @@ class SftDataset(Dataset):
 _CKPT_MARKER = "SAVE_COMPLETE"
 
 
+def _masked_mse(pred, target, mask=None):
+    """MSE over the last dim, optionally excluding dims where `mask` is False.
+
+    Excluded dims (e.g. norm-stats-frozen/degenerate joints) contribute zero
+    gradient instead of training on their near-constant target -- opt-in via
+    `--mask_frozen_loss 1`; the average is over unmasked elements only, not
+    diluted by the zeroed-out ones.
+    """
+    if mask is None:
+        return nn.MSELoss()(pred, target)
+    sq = (pred.float() - target.float()) ** 2
+    m = mask.to(device=sq.device).view(*([1] * (sq.dim() - 1)), -1)
+    sq = sq * m
+    denom = m.sum() * sq.shape[:-1].numel()
+    return (sq.sum() / denom).to(pred.dtype)
+
+
+def _action_mask_tensor(args, dataset):
+    if not getattr(args, "mask_frozen_loss", 0) or not hasattr(dataset, "action_mask"):
+        return None
+    return torch.tensor(dataset.action_mask, dtype=torch.bool)
+
+
 def _fmt_bytes(n):
     return f"{n / 1024**3:.1f} GiB"
 
@@ -814,6 +837,7 @@ def run_validation(model, val_dataloader, accelerator, args,
     val_flare = torch.tensor(0.0, device=device)
     n_val = 0
     max_batches = getattr(args, "max_val_batches", 50)
+    action_mask_t = _action_mask_tensor(args, val_dataloader.dataset)
 
     for i, batch in enumerate(val_dataloader):
         if i >= max_batches:
@@ -890,7 +914,7 @@ def run_validation(model, val_dataloader, accelerator, args,
             hidden = outputs.last_hidden_state
             act_start = L_latent + n_fast + n_state + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
-            loss_act = nn.MSELoss()(v_act, target)
+            loss_act = _masked_mse(v_act, target, action_mask_t)
 
             fe = fast_embeds if n_fast > 0 else None
             se = state_embeds if n_state > 0 else None
@@ -945,7 +969,7 @@ def run_validation(model, val_dataloader, accelerator, args,
             hidden = outputs.last_hidden_state
             act_start = L_latent + n_fast + n_state + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
-            loss_act = nn.MSELoss()(v_act, target)
+            loss_act = _masked_mse(v_act, target, action_mask_t)
             loss_tac = 0.0
 
         val_act += loss_act.item()
@@ -1197,6 +1221,12 @@ def train(args):
     else:
         dataset = SftDataset(args, processor, accelerator)
 
+    action_mask_t = _action_mask_tensor(args, dataset)
+    if action_mask_t is not None:
+        n_excluded = int((~action_mask_t).sum())
+        accelerator.print(f"[loss] mask_frozen_loss=1: excluding {n_excluded} dim(s) "
+                          f"from the action loss")
+
     val_dataloader = None
     if getattr(args, "val_ratio", 0) > 0 or getattr(args, "origami_val_root", ""):
         val_dataset = dataset.create_val_split(
@@ -1415,7 +1445,7 @@ def train(args):
             act_pred_start = L_latent + n_fast + n_state + 1
             v_act = raw_model.final_layer(
                 hidden[:, act_pred_start: act_pred_start + chunk, :])
-            loss_act = nn.MSELoss()(v_act, target)
+            loss_act = _masked_mse(v_act, target, action_mask_t)
 
             if has_any_tac and not is_stage1:
                 fe = fast_embeds if n_fast > 0 else None
@@ -1766,6 +1796,9 @@ if __name__ == "__main__":
                         help="freeze the vision-language expert; train action + tactile")
     parser.add_argument("--train_latent_last_n", type=int, default=0,
                         help="with --freeze_latent_expert 1, thaw the top N layers")
+    parser.add_argument("--mask_frozen_loss", type=int, default=0,
+                        help="zero the action loss on norm-stats-frozen dims (e.g. static "
+                             "torso joints) instead of training on their near-constant target")
     parser.add_argument("--gradient_checkpointing", type=int, default=0)
     parser.add_argument("--optim", type=str, default="adamw",
                         choices=["adamw", "adamw8bit"])
