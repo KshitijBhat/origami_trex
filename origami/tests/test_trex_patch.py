@@ -112,3 +112,122 @@ def test_patched_forward_replaces_class_method():
     trex_patch.apply()
     import qwen_vla.modeling_qwen3vl_mot as m
     assert m.Qwen3VLAttentionMoT.forward is trex_patch._patched_attention_forward
+
+
+# ── Patch 3: extract_merged_vision_features ──────────────────────────────────────────────
+# Found (and only exercisable) against a real forward pass on the real midtrain checkpoint
+# (§12 step 10b) -- see origami/PROGRESS.md for the end-to-end verification. These cover the
+# unwrap logic itself in isolation, CPU-only, no checkpoint needed.
+
+def test_extract_merged_vision_features_prefers_pooler_output():
+    """The actual bug scenario: our installed transformers' Qwen3VLVisionModel.forward always
+    returns this ModelOutput (never a bare tuple) -- `.pooler_output` is the real merged
+    sequence (`self.merger(hidden_states)`); `.last_hidden_state` is pre-merge and has the
+    wrong token count for the `<image_pad>` mask."""
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import BaseModelOutputWithDeepstackFeatures
+
+    last_hidden = torch.randn(40, 8)   # pre-merge: more tokens
+    pooled = torch.randn(10, 8)        # post-merge: matches the image-pad count
+    out = BaseModelOutputWithDeepstackFeatures(
+        last_hidden_state=last_hidden, pooler_output=pooled, deepstack_features=[])
+    assert torch.equal(trex_patch.extract_merged_vision_features(out), pooled)
+
+
+def test_extract_merged_vision_features_falls_back_to_last_hidden_state():
+    class _NoPooler:
+        last_hidden_state = torch.randn(3, 4)
+    obj = _NoPooler()
+    assert torch.equal(trex_patch.extract_merged_vision_features(obj), obj.last_hidden_state)
+
+
+def test_extract_merged_vision_features_falls_back_to_tuple():
+    """Upstream's assumed old-transformers-era shape: `(merged_hidden_states, deepstack)`."""
+    merged = torch.randn(6, 4)
+    deepstack = [torch.randn(6, 4)]
+    assert torch.equal(trex_patch.extract_merged_vision_features((merged, deepstack)), merged)
+
+
+def test_extract_merged_vision_features_falls_back_to_plain_tensor():
+    t = torch.randn(5, 4)
+    assert trex_patch.extract_merged_vision_features(t) is t
+
+
+def test_prepare_inputs_embeds_is_patched_by_apply():
+    trex_patch.apply()
+    import qwen_vla.modeling_vla as modeling_vla
+    assert modeling_vla.Qwen3VLVLAModel.prepare_inputs_embeds is trex_patch._patched_prepare_inputs_embeds
+
+
+# ── Patch 4: Qwen3VLRotaryEmbeddingWrapper.__init__'s rope_parameters shim ───────────────
+
+def test_rope_wrapper_builds_rope_parameters_and_forwards():
+    """Reproduces the exact bug: unpatched, this constructor raises
+    `AttributeError: '_RopeCfg' object has no attribute 'rope_parameters'` on our pinned
+    transformers before a single tensor is touched. Patched, it must both construct AND
+    produce correctly-shaped cos/sin for a real `Qwen3VLTextRotaryEmbedding`."""
+    from types import SimpleNamespace as _SNS
+    trex_patch.apply()
+    import qwen_vla.modeling_qwen3vl_mot as m
+
+    head_dim = 32
+    config = _SNS(
+        hidden_size=64, num_attention_heads=2, head_dim=head_dim,
+        max_position_embeddings=128, rope_theta=1000000.0,
+        rope_scaling={"rope_type": "default", "mrope_section": [8, 4, 4]},  # sums to head_dim/2
+        partial_rotary_factor=1.0,
+    )
+    wrapper = m.Qwen3VLRotaryEmbeddingWrapper(config)
+    x = torch.randn(1, 5, head_dim)
+    position_ids = torch.zeros(3, 1, 5, dtype=torch.long)   # M-RoPE [3, B, L]
+    cos, sin = wrapper(x, position_ids)
+    assert cos.shape == (1, 5, head_dim)
+    assert sin.shape == (1, 5, head_dim)
+
+
+# ── Patch 5: Qwen3VLVLAModel.get_rope_index's mm_token_type_ids forwarding ───────────────
+# Full path (including the `_RopeStub`-needs-a-real-`self` wrinkle) is only exercisable
+# against the real installed transformers `Qwen3VLModel.get_rope_index` with a real image --
+# verified end-to-end against the real midtrain checkpoint (§12 step 10b, see PROGRESS.md).
+# These test the dispatch logic in `_patched_get_rope_index` itself in isolation.
+
+def test_get_rope_index_forwards_mm_token_type_ids_when_supported():
+    from types import SimpleNamespace as _SNS
+
+    captured = {}
+
+    def fake_rope_fn(input_ids, mm_token_type_ids, image_grid_thw=None, attention_mask=None):
+        captured["mm"] = mm_token_type_ids
+        return "position_ids", "deltas"
+
+    fake_self = _SNS(_rope_index_fn=fake_rope_fn, image_token_id=999)
+    input_ids = torch.tensor([[1, 999, 2, 999]])
+    out = trex_patch._patched_get_rope_index(fake_self, input_ids)
+    assert out == ("position_ids", "deltas")
+    assert torch.equal(captured["mm"], (input_ids == 999).to(torch.int64))
+
+
+def test_get_rope_index_falls_back_when_fn_has_no_bound_self_and_no_mm_param():
+    from types import SimpleNamespace as _SNS
+
+    def fake_rope_fn(input_ids, image_grid_thw=None, attention_mask=None):
+        return "ok-old-signature"
+
+    fake_self = _SNS(_rope_index_fn=fake_rope_fn, image_token_id=999)
+    input_ids = torch.tensor([[1, 2, 3]])
+    assert trex_patch._patched_get_rope_index(fake_self, input_ids) == "ok-old-signature"
+
+
+def test_get_rope_index_none_fallback_is_sequential_positions():
+    from types import SimpleNamespace as _SNS
+
+    fake_self = _SNS(_rope_index_fn=None)
+    input_ids = torch.zeros((2, 5), dtype=torch.long)
+    position_ids, deltas = trex_patch._patched_get_rope_index(fake_self, input_ids)
+    assert position_ids.shape == (2, 5)
+    assert deltas is None
+
+
+def test_get_rope_index_is_patched_by_apply():
+    trex_patch.apply()
+    import qwen_vla.modeling_vla as modeling_vla
+    assert modeling_vla.Qwen3VLVLAModel.get_rope_index is trex_patch._patched_get_rope_index

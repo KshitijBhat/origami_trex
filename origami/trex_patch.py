@@ -27,6 +27,67 @@ Patch 2 -- assertion only, not a functional patch (modeling_vla.py). Upstream al
 ``[B, L_slow]`` mask against an action-only ``inputs_embeds`` would be a length mismatch.
 Verified at import time by source inspection; would need a real patch if a future upstream
 version added it back, which is not the case at the pinned commit.
+
+Patch 3 -- ``Qwen3VLVLAModel.prepare_inputs_embeds``'s vision-output unwrapping
+(modeling_vla.py). Found while building ``diagnose_shift.py``/``eval_offline.py`` (step 10b),
+which are the first callers to ever actually run this method against a real Qwen3-VL vision
+tower + real images in this project. Upstream (written against T-Rex's own transformers pin,
+``4.57.0.dev0`` per the released checkpoint's ``config.json``) does
+``image_features = out[0] if isinstance(out, (tuple, list)) else out`` on the vision tower's
+return value, with a comment claiming ``out[0]`` is ``[total_merged_tokens, hidden_size]`` --
+i.e. it assumes ``self.visual(...)`` returns a plain ``(merged_hidden_states,
+deepstack_feature_lists)`` tuple. On our pinned transformers (5.16.x), confirmed by direct
+source inspection and by calling it,
+``Qwen3VLVisionModel.forward`` instead always returns a ``BaseModelOutputWithDeepstackFeatures``
+-- a ``ModelOutput``, which subclasses ``OrderedDict`` (**not** tuple/list, so
+``isinstance(..., (tuple, list))`` is ``False``), whose ``.last_hidden_state`` is the
+**pre-merge** sequence (wrong token count -- doesn't match the ``<image_pad>`` mask) and whose
+``.pooler_output`` is the actual post-``self.merger(...)`` merged sequence upstream meant to
+grab. Unpatched, ``prepare_inputs_embeds`` hands the *whole ModelOutput object* to
+``image_features`` (the ``else`` branch fires) and crashes on ``image_features.to(dtype)``
+(``AttributeError`` -- dicts have no ``.to``) the moment any real image goes through it --
+i.e. every real forward pass in ``train_origami.py``'s ``train()``/``run_validation()`` and
+``scripts/test.py::CascadedServer`` on this transformers version. Fix: unwrap
+``.pooler_output`` when present, else ``.last_hidden_state``, else fall back to upstream's own
+tuple/plain-tensor handling -- covers both transformers eras without needing to know which one
+is installed.
+
+Patch 4 -- ``Qwen3VLRotaryEmbeddingWrapper.__init__``'s synthetic rope config
+(modeling_qwen3vl_mot.py). Also found while getting a real forward pass to run for step 10b.
+Upstream builds a throwaway ``_RopeCfg`` type carrying the separate, pre-consolidation rope
+fields (``rope_theta``, ``rope_scaling``, ``head_dim``, ...) that transformers' Qwen3-VL rotary
+embedding expected on T-Rex's own pin. On our pinned transformers (5.16.x), confirmed by
+direct source inspection, `Qwen3VLTextRotaryEmbedding.__init__` instead reads
+``config.rope_parameters["rope_type"]`` and, inside ``compute_default_rope_parameters``,
+``config.rope_parameters["rope_theta"]`` -- a single consolidated dict transformers introduced
+at some point between the two pins. ``_RopeCfg`` has no such attribute, so **every** model
+construction that reaches this wrapper (i.e. every real model on this transformers version,
+whether built via ``from_pretrained_qwen3vl`` or ``_build_qwen3vl_from_config``) raises
+``AttributeError: '_RopeCfg' object has no attribute 'rope_parameters'`` before a single
+forward pass can run. Fix: build the same ``_RopeCfg`` upstream builds, plus a
+``rope_parameters`` dict assembled from the same ``rope_theta``/``rope_scaling`` values --
+satisfies both the old-style direct-attribute reads (kept, harmless if unused) and the new
+consolidated-dict read.
+
+Patch 5 -- ``Qwen3VLVLAModel.get_rope_index``'s call into the base model's M-RoPE indexer
+(modeling_vla.py). Also found while getting a real forward pass to run for step 10b, one call
+further than patch 4. Upstream calls ``self._rope_index_fn(input_ids=..., image_grid_thw=...,
+attention_mask=...)``. On T-Rex's own pin, ``Qwen3VLModel.get_rope_index`` took exactly those
+three keyword arguments. On our pinned transformers (5.16.x), confirmed by direct source
+inspection, its signature gained a new **required** positional parameter,
+``mm_token_type_ids`` (an ``int`` tensor shaped like ``input_ids``, marking each token
+text=0/image=1/video=2) -- upstream's call is missing it and raises
+``TypeError: get_rope_index() missing 1 required positional argument``. `_rope_index_fn` is
+bound one of two ways (``scripts/test.py::model_load``'s ``_build_qwen3vl_from_config`` path
+binds a closure-local ``_RopeStub`` whose own ``get_rope_index`` wrapper *also* doesn't accept
+``mm_token_type_ids`` and can't be monkeypatched by name since it's a new class object per
+call; ``modeling_vla.py::from_pretrained_qwen3vl`` binds the real
+``Qwen3VLModel.get_rope_index`` directly), so the fix builds ``mm_token_type_ids`` from
+``input_ids == self.image_token_id`` (we never feed video, so text/image is the whole
+picture) and, when the bound function's own signature doesn't accept it (the ``_RopeStub``
+case), calls the real ``transformers`` method directly against the stub's bound `self` --
+exactly what the stub itself does one layer up, since `Qwen3VLModel.get_rope_index` only reads
+`self.config` internally, so a `_RopeStub` duck-types fine as `self` here too.
 """
 from __future__ import annotations
 
@@ -183,9 +244,119 @@ def _assert_attention_mask_absent_from_cached_prefix_calls() -> None:
         )
 
 
+def extract_merged_vision_features(out):
+    """Unwrap a vision-tower call's return value into the merged ``[total_merged_tokens,
+    hidden_size]`` tensor `prepare_inputs_embeds` needs, across both the tuple-returning
+    upstream transformers era T-Rex was written against and the ``ModelOutput``-returning one
+    we're pinned to. See patch 3's module-docstring section for why this exists.
+    """
+    pooler = getattr(out, "pooler_output", None)
+    if pooler is not None:
+        return pooler
+    if hasattr(out, "last_hidden_state"):
+        return out.last_hidden_state
+    if isinstance(out, (tuple, list)):
+        return out[0]
+    return out
+
+
+def _patched_prepare_inputs_embeds(self, input_ids, pixel_values=None, image_grid_thw=None):
+    """ORIGAMI-PATCH (§7.1 patch 3): identical to upstream except for the vision-output
+    unwrap -- see `extract_merged_vision_features`."""
+    inputs_embeds = self.model.get_input_embeddings()(input_ids)
+    if pixel_values is not None and self.visual is not None:
+        pixel_values = pixel_values.to(inputs_embeds.device, dtype=inputs_embeds.dtype)
+        out = self.visual(pixel_values, grid_thw=image_grid_thw)
+        image_features = extract_merged_vision_features(out)
+        image_mask = (input_ids == self.image_token_id)
+        if image_mask.any():
+            inputs_embeds[image_mask] = image_features.to(inputs_embeds.dtype)
+    return inputs_embeds
+
+
+def _patched_rope_wrapper_init(self, config, device=None):
+    """ORIGAMI-PATCH (§7.1 patch 4): identical to upstream except `_rope_cfg` also carries a
+    consolidated `rope_parameters` dict -- see patch 4's module-docstring section."""
+    import torch.nn as nn
+    from qwen_vla.modeling_qwen3vl_mot import _VLRotaryEmbedding
+
+    nn.Module.__init__(self)
+    if _VLRotaryEmbedding is not None:
+        rope_scaling = getattr(config, "rope_scaling", None)
+        if rope_scaling is None:
+            rope_scaling = {"rope_type": "default", "mrope_section": [16, 24, 24]}
+        rope_theta = getattr(config, "rope_theta", 1000000.0)
+        rope_parameters = {
+            "rope_type": rope_scaling.get("rope_type", "default"),
+            "rope_theta": rope_theta,
+            **{k: v for k, v in rope_scaling.items() if k != "rope_type"},
+        }
+        _rope_cfg = type("_RopeCfg", (), {
+            "hidden_size":             config.hidden_size,
+            "num_attention_heads":     config.num_attention_heads,
+            "head_dim":                getattr(config, "head_dim",
+                                               config.hidden_size // config.num_attention_heads),
+            "max_position_embeddings": getattr(config, "max_position_embeddings", 32768),
+            "rope_theta":              rope_theta,
+            "rope_scaling":            rope_scaling,
+            "rope_parameters":         rope_parameters,
+            "partial_rotary_factor":   getattr(config, "partial_rotary_factor", 1.0),
+        })()
+        self._rope = _VLRotaryEmbedding(config=_rope_cfg, device=device)
+    else:
+        rope_theta = getattr(config, "rope_theta", 10000.0)
+        head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        inv_freq = 1.0 / (
+            rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim)
+        )
+        self._rope = None
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.attention_scaling = 1.0
+
+
+def _patched_get_rope_index(self, input_ids, image_grid_thw=None, attention_mask=None):
+    """ORIGAMI-PATCH (§7.1 patch 5): identical to upstream except it builds and forwards
+    `mm_token_type_ids` -- see patch 5's module-docstring section."""
+    if self._rope_index_fn is None:
+        batch, seq_len = input_ids.shape
+        position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch, -1)
+        return position_ids, None
+
+    fn = self._rope_index_fn
+    mm_token_type_ids = (input_ids == self.image_token_id).to(torch.int64)
+    try:
+        accepts_mm = "mm_token_type_ids" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        accepts_mm = False
+
+    if accepts_mm:
+        return fn(input_ids=input_ids, mm_token_type_ids=mm_token_type_ids,
+                  image_grid_thw=image_grid_thw, attention_mask=attention_mask)
+
+    bound_self = getattr(fn, "__self__", None)
+    if bound_self is not None:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+        if isinstance(bound_self, Qwen3VLModel):
+            target_self = bound_self
+        else:
+            # scripts/test.py's `_RopeStub` duck-types only `.config`, but the real
+            # `get_rope_index` also calls other bound methods on `self`
+            # (`get_vision_position_ids`) that a bare config object doesn't have.
+            # Build an uninitialized real `Qwen3VLModel` (bypassing __init__, so no
+            # weights are ever allocated) and reuse the stub's `.config` on it --
+            # every method these two calls touch is config/tensor-math only.
+            target_self = Qwen3VLModel.__new__(Qwen3VLModel)
+            target_self.config = bound_self.config
+        return Qwen3VLModel.get_rope_index(
+            target_self, input_ids=input_ids, mm_token_type_ids=mm_token_type_ids,
+            image_grid_thw=image_grid_thw, attention_mask=attention_mask)
+    return fn(input_ids=input_ids, image_grid_thw=image_grid_thw, attention_mask=attention_mask)
+
+
 def apply() -> None:
-    """Apply both patches. Idempotent; safe to call multiple times."""
+    """Apply all five patches. Idempotent; safe to call multiple times."""
     import qwen_vla.modeling_qwen3vl_mot as modeling_qwen3vl_mot
+    import qwen_vla.modeling_vla as modeling_vla
 
     if getattr(modeling_qwen3vl_mot.Qwen3VLAttentionMoT, _PATCHED_MARKER, False):
         return
@@ -195,3 +366,11 @@ def apply() -> None:
 
     modeling_qwen3vl_mot.Qwen3VLAttentionMoT.forward = _patched_attention_forward
     setattr(modeling_qwen3vl_mot.Qwen3VLAttentionMoT, _PATCHED_MARKER, True)
+
+    modeling_vla.Qwen3VLVLAModel.prepare_inputs_embeds = _patched_prepare_inputs_embeds
+    setattr(modeling_vla.Qwen3VLVLAModel, _PATCHED_MARKER, True)
+
+    modeling_qwen3vl_mot.Qwen3VLRotaryEmbeddingWrapper.__init__ = _patched_rope_wrapper_init
+    setattr(modeling_qwen3vl_mot.Qwen3VLRotaryEmbeddingWrapper, _PATCHED_MARKER, True)
+
+    modeling_vla.Qwen3VLVLAModel.get_rope_index = _patched_get_rope_index

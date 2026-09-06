@@ -15,3 +15,6 @@ __pycache__/
 /season_*_train/
 __pycache__/
 data_trex_origami/
+/checkpoints/
+/trex_dataset_sample/
+/reports/

@@ -17,8 +17,8 @@ handoff artifact if context is compacted.
 | 8 | verify.py | **done** (scoped to gates checkable now; see notes) | - |
 | 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | **done** (see notes; real training run itself is GPU-only, untested here) | - |
 | 10 | Full prep run (user-executed) | not started | - |
-| 10b | diagnose_shift.py + eval_offline.py --zero-shot | not started | - |
-| 10c | refit_vqvae_stats.py (if needed) | not started | - |
+| 10b | diagnose_shift.py + eval_offline.py --zero-shot | **done** (see notes; both run for real against the real T-Rex midtrain checkpoint + the `eef62_train_smalltest` fixture, not just fixture-scale) | G15 **FAIL**; zero-shot floor recorded, does not beat hold-position |
+| 10c | refit_vqvae_stats.py (if needed) | not started -- **G15 failed, so this is next**, but stopping here per this session's instruction | - |
 | 11 | Pilot train 2000 steps (user-executed) | not started | - |
 | 11b | Optional phase 0 / phase A ablations | not started | - |
 | 12 | Phase B: 40000 steps (user-executed) | not started | - |
@@ -48,7 +48,7 @@ handoff artifact if context is compacted.
 | G12 | Prep<->deploy parity | not started | - |
 | G13 | Latency | not started | - |
 | G14 | Instruction identity | not started | - |
-| G15 | VQ-VAE codebook health | not started | - |
+| G15 | VQ-VAE codebook health | **FAIL** | real midtrain checkpoint's `tacf6_vqvae_{min,max,mask}` applied to 200 000 real origami F6 windows: L-ring/L-pinky collapse to 1/64 codes (top-code frac ~1.0, normalized entropy ~0); L/R-middle, R-ring/R-pinky also near-collapsed (18-40/64 codes used but >97% mass on 1 code); only thumb/index (both hands) use the codebook meaningfully (43-63/64 codes, entropy 0.45-0.69). Clamp-saturation only 0.85% (not the failure mode -- collapse, not saturation, per §11.8's "either way" framing) |
 | G16 | Token budget | not started | - |
 | G17 | Delay-curriculum parity | **PARTIAL** | loader half (`tactile_f6s_delayed`/`tactile_f6_history` == the extended F6 window's slice at each configured delay) passes in `test_delayed_lerobot_dataset.py`, real fixture data; the deploy-parity half needs `serve_zenoh.py` (step 13), not implemented yet |
 | G18 | Season-set integrity | not started | - |
@@ -530,3 +530,190 @@ zero. `test_g8b_masking_mechanism_detects_degenerate_channels` proves the maskin
 works (deterministic flat-channel injection); `test_g8b_fixture_tactile_mask_on_real_data`
 checks the direction that does hold (quiet fingers ≪ thumb/index in force) rather than the
 exact finger-block claim, which is season-dependent.
+
+## Step 10b findings (diagnose_shift.py + eval_offline.py) — 5 real transformers-version compatibility bugs found; G15 FAILS for real; zero-shot does not beat hold-position
+
+**What "step 10" actually means here.** REDESIGN_PLAN.md §12 step 10 is "full prep run on the
+large server, 126 seasons, both splits" -- **not done, and out of scope for this session**
+(no such server/corpus here). Per this session's explicit instruction, `data_trex_origami/
+eef62_train_smalltest/` (a real merged/post-`prepare.py` root -- 17 seasons, 180 episodes,
+1 389 294 frames, `image_size=224`, NOT the plan's 384x384 -- someone else's prior prep run,
+scope/provenance unknown beyond what's in its own `meta/origami_prep.json`) stood in as the
+"val root" for exercising step 10b's two scripts. **This is a stand-in for testing the
+scripts, not a claim that step 10's real 126-season run has happened.** Don't read "10b done"
+as "10 done" in a future session.
+
+* **`origami/diagnose_shift.py` (§11.9 step 2).** Implements chunk-delta magnitude per action
+  block, F6 magnitude per finger, deform-tile occupancy per finger (new metric, not named
+  precisely in the plan -- defined here as the fraction of a decoded tile's pixels deviating
+  >8 gray levels from the tile's own median, a proxy for "this sensor is showing real contact
+  deformation, not a flat/dead readout"), **G15** (frozen VQ-VAE codebook health), and
+  frozen-ViT pooled-patch-token feature stats + cross-dataset cosine distance vs a
+  `zekaiwang/trex_dataset` sample. The first three sections need only the merged root (read
+  straight from `meta/trex_norm_stats.json` plus a handful of seek'd video frames -- no
+  checkpoint); G15 and the ViT section need the T-Rex midtrain checkpoint.
+  * **Perf bug caught before it shipped:** the first version of the frame-sampling helper
+    picked one uniform-random frame index per video file, then decoded *sequentially from
+    frame 0* to reach it. On real ~7 700-frame episodes this meant an average half-episode
+    decode per file -- 20 samples/finger across all 180 real episodes took **~4 minutes**.
+    Fixed by seeking to the target frame's approximate timestamp first (`container.seek`,
+    `backward=True`) -- safe because these videos use `video.g: 2` (a keyframe every 2
+    frames, per §5.2), so a seek lands within ~1 frame. Same 20-sample run: **~5 seconds**
+    after the fix. `_seek_sample_frames` is shared by the deform-occupancy and ViT-feature
+    frame sampling.
+  * **G15 result, real checkpoint + 200 000 real origami F6 windows (`miniFranka/
+    T-Rex_midtrain_mecka23k_ucb100_vqvae_epoch6`, downloaded from HF, 8.5 GB `model.pt`):
+    FAILS, exactly the failure mode §11.8 predicted.** L-ring and L-pinky collapse to a
+    single code each (top-code fraction ~1.0, normalized entropy ~0); L/R-middle and
+    R-ring/R-pinky are effectively collapsed too (18-40/64 codes technically "used" but
+    >97% of mass on one code); only the four live slots (L/R-thumb, L/R-index) use the
+    codebook in a meaningful spread (43-63/64 codes, normalized entropy 0.45-0.69). Clamp
+    saturation is only 0.85% overall -- **the failure is collapse (values sitting in a
+    narrow sliver of T-Rex's own min/max range), not clamping**, confirming the "or
+    origami forces occupy a sliver near -1" half of §11.8's "either way" framing, not the
+    saturation half. This directly explains eval_offline's tactile-ablation result below.
+  * **ViT feature cosine distance is ~0.0002 (near-identical) between origami and the
+    trex_dataset sample -- flagged as likely NOT meaningful, not read as "no visual shift."**
+    ViT activations are known to have a few very-large-magnitude "massive activation"
+    channels present regardless of input content; those can dominate a raw cosine similarity
+    between two mean feature vectors and mask real shift. `render_markdown` prints this
+    caveat inline so the report doesn't get over-read. A more robust statistic (per-channel
+    z-scored, or excluding the top-k magnitude channels) would be needed to actually test
+    §11.9's qualitative claim (FOV/fisheye/photometry shift) -- not built here, out of scope.
+  * Full real report (200k F6 windows, 60 deform + 60 ViT samples/dataset) saved this session
+    at `reports/diagnose_shift_report.md` (not committed -- regenerate via `python -m
+    origami.diagnose_shift --root <root> --checkpoint <ckpt> --trex-dataset-root <sample>`).
+  * `test_diagnose_shift.py`: checkpoint-free sections always run against the real
+    `eef62_train_smalltest` fixture (shape/sanity + directional checks, e.g. thumb/index
+    force RMS > middle/ring RMS); the G15 and full-`run()` tests are `skipif`-gated on
+    `checkpoints/midtrain/` existing on disk (gitignored, never committed -- ~8.5 GB) and
+    were confirmed passing against the real downloaded checkpoint in this session.
+
+* **`origami/eval_offline.py` (§8.1-A + a version of §8.1-D; §11.9 step 1).** Drives the
+  **real, unmodified deploy-time inference path** -- `scripts.test.CascadedServer` and
+  `model_load`, imported per §13's exact list, never reimplemented -- frame-by-frame (batch
+  size 1, matching how the SDK actually calls it) over real held-out `eef62_train_smalltest`
+  frames, across 4 configs: `cascaded` (deployed), `disable_tactile` (action-expert-only
+  ablation), `tactile_zeroed` (cascaded path, tactile inputs zeroed -- a 4th config beyond the
+  plan's named 3, cheap to add given the infra and directly useful given G15's finding), and
+  `hold_position` (trivial baseline, no model call: zero delta9 + current hand state, no FK
+  needed since `observation.state` is already in the same delta9+hand22 block layout as
+  `action`). Predicted actions are denormalized using the **checkpoint's own** stats (from
+  `stats_data.json` -- the honest zero-shot test: the model never saw origami's action scale),
+  compared to the real un-normalized `action` ground truth in physical units.
+  * **Real 100-sample result (§11.9 step 1's "run before step 11"):**
+    `cascaded k=0 mean MAE=0.1675` **does not beat** `hold-position k=0 mean MAE=0.01462`.
+    Breaking down by block clarifies *why*, and it isn't uniform: arm-pose blocks
+    (`{L,R}_trans3`/`{L,R}_rot6d6`) are actually competitive with hold-position (MAE same
+    order of magnitude, 0.006-0.04 vs 0.004-0.03; rotation `variance_share` 0.67-1.0, i.e.
+    the model captures real rotational variance) -- the **entire gap is the `hand22` blocks**
+    (cascaded MAE 0.44-0.47 vs hold-position 0.017-0.020, ~25x worse). This is the expected
+    shape of the shift: `hand22` is an *absolute joint target* in a hand-specific convention
+    (Sharpa Wave origami vs T-Rex midtrain's Dexmate-adjacent embodiment per §11.9's table),
+    so it has no reason to transfer zero-shot at all, while EEF pose deltas are a much more
+    embodiment-portable quantity that partially does. **Matches §11.9's warning exactly**
+    ("if it is no better than hold-position, the pretrained init is worth less than assumed")
+    for the hand-pose dimensions specifically, not uniformly across the whole action space --
+    a more precise diagnosis than the plan's single aggregate-floor framing suggests.
+  * **`cascaded` ≈ `disable_tactile` ≈ `tactile_zeroed` (all three nearly identical numbers,
+    every block).** The tactile expert currently contributes ~nothing to the zero-shot
+    prediction -- **directly cross-validates G15's finding** from `diagnose_shift.py`
+    (near-collapsed codebook -> near-constant tactile token -> negligible influence on the
+    cascaded output), found independently by two different mechanisms in the same session.
+  * Full real 100-sample report saved this session at `reports/eval_offline_report.md` (not
+    committed -- regenerate via `python -m origami.eval_offline --root <val_root> --checkpoint
+    <ckpt> --zero-shot`).
+  * `test_eval_offline.py`: checkpoint-free tests cover `hold_position_prediction`'s exact
+    block-wise construction and `action_space_accuracy`'s MSE/MAE/variance-share arithmetic
+    (zero-error and known-offset cases) without needing any model; one `skipif`-gated
+    real-checkpoint smoke test (2 samples) confirms the real cascaded path end-to-end.
+
+* **5 real, previously-undetected `transformers`-version compatibility bugs found and fixed
+  in `origami/trex_patch.py` (patches 3, 4, 5 -- patches 1/2 are from step 9) while getting
+  the FIRST real forward pass of this whole project to run.** Steps 1-9 only ever imported
+  `utils.lerobot_common` / `qwen_vla.lerobot_dataset` / vendored `train_origami.py` at
+  module level and unit-tested around real GPU forward passes (explicitly flagged in step 9's
+  notes above as "not verified for real: needs GPU + real data"). This session's scripts are
+  the first callers to actually run a real image through the real checkpoint's real
+  `Qwen3VLVLAModel`/`Qwen3VLModelMoT`/vision tower on our pinned `transformers` (confirmed
+  installed as a `5.16.x` release; T-Rex's own checkpoint was trained against
+  `4.57.0.dev0` per its `config.json` -- a large version gap). Without all 5 patches
+  (1/2 from step 9 plus these 3), **`model_load` and every real forward pass raise before
+  touching a single pixel** -- this would have been the first thing to break at step 11's
+  pilot train had it not surfaced here first. Each is hash-gated the same way as patches 1/2
+  (`_EXPECTED_HASHES` in `trex_patch.py`, so upstream drift re-triggers a re-check) and has
+  its own module-docstring section in `trex_patch.py` with the exact mechanism; summary:
+  1. **Patch 3 -- vision-tower output unwrap** (`Qwen3VLVLAModel.prepare_inputs_embeds`).
+     Upstream assumes `self.visual(...)` returns a plain `(merged_hidden_states,
+     deepstack_features)` tuple (`out[0]` = merged). On our transformers, it always returns a
+     `BaseModelOutputWithDeepstackFeatures` (an `OrderedDict` subclass -- NOT tuple/list, so
+     upstream's `isinstance` check silently takes the wrong branch), whose `.last_hidden_state`
+     is *pre-merge* (wrong token count) and whose `.pooler_output` is the actual merged
+     sequence. Unpatched: crashes on `image_features.to(dtype)` the moment any real image
+     goes through (`AttributeError` -- dicts have no `.to`).
+  2. **Patch 4 -- rotary-embedding config schema** (`Qwen3VLRotaryEmbeddingWrapper.__init__`).
+     Upstream builds a synthetic `_RopeCfg` with separate `rope_theta`/`rope_scaling` fields
+     (T-Rex's transformers era). Ours reads a single consolidated `config.rope_parameters`
+     dict instead. Unpatched: `AttributeError: '_RopeCfg' object has no attribute
+     'rope_parameters'` -- raised at **model construction time**, before any data at all.
+  3. **Patch 5 -- `get_rope_index` signature** (`Qwen3VLVLAModel.get_rope_index`). Our
+     transformers' `Qwen3VLModel.get_rope_index` gained a required `mm_token_type_ids`
+     positional arg upstream's call doesn't pass. Extra wrinkle: the `scripts/test.py`
+     zero-shot path (`_build_qwen3vl_from_config`) binds a closure-local `_RopeStub` object
+     that duck-types only `.config` -- the real method also calls `self.get_vision_position_
+     ids(...)` internally, which the stub doesn't have either. Fixed by building
+     `mm_token_type_ids` from `input_ids == image_token_id` (no video support needed) and,
+     for the stub case, calling the real `Qwen3VLModel.get_rope_index` against an
+     `object.__new__`'d real `Qwen3VLModel` instance (bypassing `__init__`/weight allocation
+     entirely) with the stub's `.config` copied over -- since position-id computation never
+     touches learned weights, this is safe and exact, not an approximation.
+  * All 3 new patches have CPU-only synthetic unit tests in `test_trex_patch.py` (18 tests
+    total in that file now, up from 8) that don't need the checkpoint; the real end-to-end
+    integration (all 5 patches together, real 8.5 GB checkpoint, real fixture frames, real
+    cascaded slow/fast inference producing a correctly-shaped `[16,62]` prediction) was
+    manually verified in this session and is what `eval_offline.py`'s `skipif`-gated
+    checkpoint smoke test now checks on any machine that has the checkpoint downloaded.
+  * **Not yet known:** whether the *training* forward path (`train_origami.py`'s `train()`/
+    `run_validation()`, which call `prepare_inputs_embeds`/`get_rope_index` the same way but
+    also exercise gradient checkpointing + the cascaded tactile-expert training step) hits
+    any *further* version-drift issues beyond these 5 -- only the CascadedServer inference
+    path was actually exercised this session. Flagging for step 11's pilot train.
+
+* **Added `pyzmq>=26.0.0` to `pyproject.toml`.** `scripts/test.py` (needed for `model_load`/
+  `CascadedServer`, per §13's import list) imports `zmq` at module level for its ZMQ server,
+  even though `model_load`/`CascadedServer` themselves never touch it -- wasn't previously a
+  dependency because nothing had imported `scripts.test` before this session.
+
+* Environment for this session: real GPU available (RTX 5060 Ti, 16 GB), 251 GB RAM, 221 GB
+  free disk, network reachable -- unlike prior sessions' "GPU-only, untested here" notes.
+  Downloaded (both gitignored, never committed): the full midtrain checkpoint to
+  `checkpoints/midtrain/` (8.5 GB `model.pt` + small config/processor/stats files) and a
+  6-video sample of `zekaiwang/trex_dataset`'s `head_left` camera to `trex_dataset_sample/`.
+  Both `.gitignore`d this session (`/checkpoints/`, `/trex_dataset_sample/`).
+
+* Full `origami/tests/` suite: **97/98 pass** (86/87 in the pre-existing suite + all 11 new
+  `test_diagnose_shift.py`/`test_eval_offline.py` tests), ~875s + ~145s. The 87-test run was
+  ~15x slower than the historical ~185-200s baseline for a similar-sized suite (14.5 min this
+  time) despite no code-path changes to the slow tests -- likely shared-machine
+  disk/GPU contention rather than a regression (nothing here uses more compute than before);
+  re-time on a quiet machine before reading anything into that number.
+  Checkpoint-loading tests are inherently slow regardless of contention: ~84s just to
+  construct+load the full 2B-param model once on CPU before moving to GPU bf16.
+
+* **Pre-existing test failure found, NOT caused by this session's changes (verified via `git
+  status` -- `splits.json`/`test_splits.py` are untouched in this session's diff):
+  `test_splits.py::test_fixture_season_absent_from_both_splits` now FAILS** --
+  `season_POC22061_2026_05_23_19_21_25_train` (this whole project's "the fixture season",
+  substituted in step 1 specifically *because* it was outside both splits) **is now inside
+  `splits["train"]`**. `splits.json` is regenerated fresh from `dataset.md` and
+  `test_splits_json_matches_fresh_parse_of_dataset_md` still passes, so this isn't a stale
+  `splits.json` -- **`dataset.md` itself changed** (commit `a5005d7 "update split"`, already
+  on `main` before this session started) to now include this season in the real train split.
+  Everything downstream still works because nothing else actually depended on the
+  exclusion -- `data_trex_origami/eef62_train_smalltest/` (this session's stand-in val root)
+  is named "train_smalltest" and its `origami_prep.json` already lists this season among its
+  17, consistent with it now genuinely being a train-split season -- but the test's premise
+  is stale and someone should either pick a new genuinely-excluded fixture season or update
+  the test/PROGRESS.md's framing. **Not fixed here** -- out of step 10b's scope and the
+  right fix (which season, and whether anything else quietly assumed the old exclusion) is a
+  judgment call, not a mechanical one.
