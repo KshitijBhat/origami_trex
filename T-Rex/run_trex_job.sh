@@ -70,6 +70,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 
 # --- Print config summary ---
 echo "============================================"
+echo "TRAIN_SCRIPT    : ${TRAIN_SCRIPT:-scripts/train_origami.sh}"
 echo "NUM_GPUS        : ${1:-1}"
 echo "TRAIN_BSZ       : ${TRAIN_BSZ:-8} (per GPU)"
 echo "GRAD_ACCUM      : ${GRAD_ACCUM:-4}"
@@ -90,10 +91,23 @@ if [[ ! "$NUM_GPUS" =~ ^(1|2|4|8)$ ]]; then
     exit 1
 fi
 
-NUM_GPUS="$NUM_GPUS" bash scripts/train_origami.sh
+# Which recipe script actually runs. Defaults to the original (stale, chunk25
+# / anchor-era) train_origami.sh for backward compat; point this at
+# scripts/run_all_abs_ori.sh for the all-absolute branch's corrected recipe.
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train_origami.sh}"
+
+NUM_GPUS="$NUM_GPUS" bash "$TRAIN_SCRIPT"
 
 # ============================================================================
 # Example submission commands -- see cmd_trex.sh for the full matrix.
 # ============================================================================
 # EXPERIMENT_NAME=aug28_pilot_4gpu \
 # phd run -ng 4 -p shr_gpu -GR H100 -l %J.log sh run_trex_job.sh 4
+
+#latest sept7
+# EXPERIMENT_NAME=all_abs_ori_run1 \
+# TRAIN_SCRIPT=scripts/run_all_abs_ori.sh \
+# DATA_ROOT_SRC=${HOME}/other/new_data/competition \
+# MASK_FROZEN_LOSS=1 MAX_EPISODES=0 \
+# TRAIN_BSZ=8 GRAD_ACCUM=4 LR=1.5e-4 N_EPOCHS=3 \
+#   phd run -ng 2 -p shr_gpu -GR H100 -l %J.log sh run_trex_job.sh 2
