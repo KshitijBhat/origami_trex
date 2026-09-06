@@ -2,9 +2,13 @@
 
 The split is season-level (never episode-level): demonstrations recorded in the
 same session share lighting, paper batch and operator drift, so mixing them
-across train/val would leak.  The lists below are the split recorded in
-`dataset.md` (seed 0, 20% val) — 101 train / 25 val out of the 126 usable
-seasons.
+across train/val would leak. Season lists live in `splits_<revision>.json`
+(loaded, not hardcoded) -- one file per HF dataset revision, since `main` and
+`competition-paper-set` are different season sets with no overlap. `main`'s
+split is the pre-existing one recorded in `dataset.md` (seed 0, 20% val — 101
+train / 25 val out of 126 usable seasons); `competition-paper-set` has no
+pre-existing split, so one was generated the same way (see that JSON file's own
+`source` field).
 
 The joint contract is copied verbatim from the competition's normative spec
 (`origami-inference-kit-participant/docs/robot_io_spec.md` §2, mirrored in
@@ -14,6 +18,8 @@ anything we emit.
 """
 from __future__ import annotations
 
+import json
+import os
 from typing import List, Sequence, Tuple
 
 HF_REPO_ID = "SharpaIT/Robotic_Origami_Challenge"
@@ -110,155 +116,47 @@ FINGER_NAMES = tuple(
 )
 
 
-# ── the split (dataset.md "My Split", seed 0, val_fraction 0.2) ───────────────
-TRAIN_SEASONS: List[str] = [
-    "season_POC22032_2026_05_14_19_21_01_train",
-    "season_POC22032_2026_05_14_20_40_58_train",
-    "season_POC22032_2026_05_14_21_08_06_train",
-    "season_POC22032_2026_05_15_16_43_23_train",
-    "season_POC22061_2026_05_18_19_25_41_train",
-    "season_POC22061_2026_05_19_13_40_31_train",
-    "season_POC22061_2026_05_19_15_37_17_train",
-    "season_POC22061_2026_05_19_19_08_43_train",
-    "season_POC22061_2026_05_19_21_17_23_train",
-    "season_POC22061_2026_05_20_10_23_55_train",
-    "season_POC22061_2026_05_20_14_02_17_train",
-    "season_POC22061_2026_05_20_17_13_24_train",
-    "season_POC22061_2026_05_20_19_24_50_train",
-    "season_POC22061_2026_05_23_10_50_01_train",
-    "season_POC22061_2026_05_23_13_39_47_train",
-    "season_POC22061_2026_05_24_10_23_04_train",
-    "season_POC22061_2026_05_24_13_41_09_train",
-    "season_POC22061_2026_05_24_19_33_29_train",
-    "season_POC22061_2026_05_25_13_50_44_train",
-    "season_POC22061_2026_05_25_16_02_56_train",
-    "season_POC22061_2026_05_26_10_13_09_train",
-    "season_POC22061_2026_05_26_13_55_16_train",
-    "season_POC22061_2026_05_26_19_13_22_train",
-    "season_POC22061_2026_05_26_20_26_01_train",
-    "season_POC22061_2026_05_27_13_36_59_train",
-    "season_POC22061_2026_05_27_15_57_42_train",
-    "season_POC22061_2026_05_27_19_13_53_train",
-    "season_POC22061_2026_05_28_10_34_44_train",
-    "season_POC22061_2026_05_28_19_19_16_train",
-    "season_POC22061_2026_05_28_20_12_14_train",
-    "season_POC22061_2026_05_29_13_40_14_train",
-    "season_POC22061_2026_05_29_19_14_17_train",
-    "season_POC22061_2026_05_30_10_12_51_train",
-    "season_POC22061_2026_05_30_16_15_19_train",
-    "season_POC22061_2026_06_24_13_45_15_train",
-    "season_POC22061_2026_06_25_13_34_16_train",
-    "season_POC22061_2026_06_25_15_41_29_train",
-    "season_POC22061_2026_06_26_13_37_24_train",
-    "season_POC22061_2026_06_26_19_05_35_train",
-    "season_POC22061_2026_06_27_10_08_03_train",
-    "season_POC22061_2026_06_27_15_56_17_train",
-    "season_POC22061_2026_06_28_10_10_11_train",
-    "season_POC22061_2026_06_28_15_55_53_train",
-    "season_POC22061_2026_06_28_19_26_39_train",
-    "season_POC22061_2026_06_29_10_12_41_train",
-    "season_POC22061_2026_06_29_13_34_29_train",
-    "season_POC22061_2026_06_29_14_27_15_train",
-    "season_POC22061_2026_06_29_15_46_06_train",
-    "season_POC22061_2026_06_29_16_37_08_train",
-    "season_POC22061_2026_06_30_13_40_03_train",
-    "season_POC22061_2026_07_01_10_15_18_train",
-    "season_POC22061_2026_07_01_13_35_43_train",
-    "season_POC22061_2026_07_01_15_48_25_train",
-    "season_POC22061_2026_07_01_19_29_05_train",
-    "season_POC22061_2026_07_02_14_23_26_train",
-    "season_POC22061_2026_07_02_16_04_24_train",
-    "season_POC22061_2026_07_02_19_10_24_train",
-    "season_POC22061_2026_07_04_10_09_32_train",
-    "season_POC22061_2026_07_04_16_13_34_train",
-    "season_POC22061_2026_07_04_20_38_34_train",
-    "season_POC22061_2026_07_05_10_11_10_train",
-    "season_POC22061_2026_07_05_13_37_13_train",
-    "season_POC22061_2026_07_06_11_05_16_train",
-    "season_POC22061_2026_07_07_10_52_58_train",
-    "season_POC22061_2026_07_07_13_37_02_train",
-    "season_POC22061_2026_07_07_19_15_51_train",
-    "season_POC22061_2026_07_08_10_10_59_train",
-    "season_POC22061_2026_07_08_11_10_11_train",
-    "season_POC22061_2026_07_08_13_37_45_train",
-    "season_POC22061_2026_07_08_16_01_38_train",
-    "season_POC22061_2026_07_08_17_17_40_train",
-    "season_POC22061_2026_07_08_19_05_30_train",
-    "season_POC22061_2026_07_09_10_08_39_train",
-    "season_POC22061_2026_07_09_13_37_31_train",
-    "season_POC22061_2026_07_09_16_23_46_train",
-    "season_POC22061_2026_07_09_19_08_15_train",
-    "season_POC22061_2026_07_10_10_04_17_train",
-    "season_POC22061_2026_07_10_11_05_01_train",
-    "season_POC22061_2026_07_10_19_07_06_train",
-    "season_POC22061_2026_07_11_10_07_34_train",
-    "season_POC22061_2026_07_12_10_06_51_train",
-    "season_POC22061_2026_07_12_13_50_31_train",
-    "season_POC22061_2026_07_12_17_04_27_train",
-    "season_POC22061_2026_07_13_14_31_37_train",
-    "season_POC22061_2026_07_13_14_54_37_train",
-    "season_POC22061_2026_07_14_10_09_42_train",
-    "season_POC22061_2026_07_14_11_01_49_train",
-    "season_POC22061_2026_07_14_13_36_02_train",
-    "season_POC22061_2026_07_14_15_06_58_train",
-    "season_POC22061_2026_07_14_16_42_30_train",
-    "season_POC22061_2026_07_14_19_16_15_train",
-    "season_POC22061_2026_07_14_20_09_08_train",
-    "season_POC22061_2026_07_15_10_13_37_train",
-    "season_POC22061_2026_07_15_13_58_14_train",
-    "season_POC22061_2026_07_15_16_41_55_train",
-    "season_POC22061_2026_07_15_19_11_36_train",
-    "season_POC22061_2026_07_17_10_23_21_train",
-    "season_POC22061_2026_07_17_13_35_14_train",
-    "season_POC22061_2026_07_17_15_59_04_train",
-    "season_POC22061_2026_07_17_19_08_00_train",
-    "season_POC22061_2026_07_18_10_03_25_train",
-]
-
-VAL_SEASONS: List[str] = [
-    "season_POC22061_2026_05_19_10_18_58_train",
-    "season_POC22061_2026_05_20_16_07_05_train",
-    "season_POC22061_2026_05_23_15_56_33_train",
-    "season_POC22061_2026_05_27_10_39_38_train",
-    "season_POC22061_2026_05_28_13_42_37_train",
-    "season_POC22061_2026_05_28_15_51_13_train",
-    "season_POC22061_2026_05_29_10_19_22_train",
-    "season_POC22061_2026_05_29_15_58_16_train",
-    "season_POC22061_2026_06_25_20_02_02_train",
-    "season_POC22061_2026_06_27_13_48_20_train",
-    "season_POC22061_2026_06_27_19_13_22_train",
-    "season_POC22061_2026_06_28_13_47_21_train",
-    "season_POC22061_2026_06_29_19_18_53_train",
-    "season_POC22061_2026_06_30_10_16_20_train",
-    "season_POC22061_2026_06_30_19_27_21_train",
-    "season_POC22061_2026_06_30_19_45_01_train",
-    "season_POC22061_2026_07_04_13_39_40_train",
-    "season_POC22061_2026_07_05_16_23_24_train",
-    "season_POC22061_2026_07_10_15_21_08_train",
-    "season_POC22061_2026_07_10_17_05_30_train",
-    "season_POC22061_2026_07_11_13_34_49_train",
-    "season_POC22061_2026_07_13_19_20_33_train",
-    "season_POC22061_2026_07_13_19_56_06_train",
-    "season_POC22061_2026_07_13_20_50_09_train",
-    "season_POC22061_2026_07_14_15_43_22_train",
-]
-
-assert len(TRAIN_SEASONS) == 101, len(TRAIN_SEASONS)
-assert len(VAL_SEASONS) == 25, len(VAL_SEASONS)
-assert not (set(TRAIN_SEASONS) & set(VAL_SEASONS)), "train/val overlap"
+# ── seasons come from splits_<revision>.json, not hardcoded here ──────────────
+# Two HF dataset revisions exist, kept as separate files (different season sets,
+# no overlap): `splits_main.json` (SharpaIT/Robotic_Origami_Challenge@main, 143
+# seasons on the hub, 126 in the documented split -- the 17 extras are opt-in
+# and not included here) and `splits_competition_paper_set.json`
+# (@competition-paper-set, 38 seasons, no pre-existing split was published for
+# this revision so one was generated here with the same seeded-random 80/20
+# convention as main's -- see that file's own `source` field).
+_SPLITS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REVISION_FILES = {
+    "main": "splits_main.json",
+    "competition-paper-set": "splits_competition_paper_set.json",
+}
 
 
-def select_seasons(split: str, limit: int = 0) -> List[str]:
-    """Seasons for `split`, optionally truncated to the first `limit`.
+def _load_split(revision: str) -> dict:
+    fname = _REVISION_FILES.get(revision)
+    if fname is None:
+        raise ValueError(
+            f"unknown revision {revision!r}; expected one of {sorted(_REVISION_FILES)}")
+    with open(os.path.join(_SPLITS_DIR, fname)) as f:
+        d = json.load(f)
+    assert len(d["train_seasons"]) == d["num_train"], revision
+    assert len(d["val_seasons"]) == d["num_val"], revision
+    assert not (set(d["train_seasons"]) & set(d["val_seasons"])), \
+        f"{revision}: train/val overlap"
+    return d
+
+
+def select_seasons(split: str, limit: int = 0, revision: str = "main") -> List[str]:
+    """Seasons for `split` on `revision`, optionally truncated to the first `limit`.
 
     Truncation is deterministic (list order, which is chronological) rather than
-    random so a pilot run and its later full rerun share a prefix — already
+    random so a pilot run and its later full rerun share a prefix -- already
     converted seasons are then skipped instead of redone.
     """
+    d = _load_split(revision)
     if split == "train":
-        seasons = list(TRAIN_SEASONS)
+        seasons = list(d["train_seasons"])
     elif split == "val":
-        seasons = list(VAL_SEASONS)
+        seasons = list(d["val_seasons"])
     else:
         raise ValueError(f"split must be 'train' or 'val', got {split!r}")
     return seasons[:limit] if limit > 0 else seasons

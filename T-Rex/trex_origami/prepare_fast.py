@@ -165,6 +165,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Pipelined, GPU-accelerated origami-flat conversion.")
     parser.add_argument("--out-root", required=True)
     parser.add_argument("--split", choices=["train", "val"], default="train")
+    parser.add_argument("--revision", choices=["main", "competition-paper-set"],
+                        default="main", help="which HF dataset revision's season split to use")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--seasons", nargs="*", default=None)
     parser.add_argument("--cache-root", default="")
@@ -203,7 +205,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         image_size=args.image_size, rgb_quality=args.rgb_quality,
         deform_quality=args.deform_quality, phase_mode=args.phase_mode)
 
-    seasons = args.seasons or select_seasons(args.split, args.limit)
+    seasons = args.seasons or select_seasons(args.split, args.limit, args.revision)
     cache_root = args.cache_root or os.path.join(
         os.path.dirname(os.path.abspath(args.out_root)), "_src")
     os.makedirs(args.out_root, exist_ok=True)

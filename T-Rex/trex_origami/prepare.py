@@ -19,18 +19,22 @@ Output layout (read by `qwen_vla.origami_dataset.OrigamiDataset`):
 Row schema, at source frame `t` of an episode of length `N` starting at `s`:
 
     state         [65]        observation.state[t]
-    action_chunk  [25*65]     action[min(t+k, s+N-1)] - state[t]      k = 0..24
-    action_abs    [65]        action[t]
+    action_chunk  [16*65]     action[min(t+k, s+N-1)]                 k = 0..15
+    action_abs    [65]        action[t]  (== action_chunk[0]; kept for convenience)
     phase         float       (t - s) / (N - 1)
     head/wrist_left/wrist_right  JPEG bytes, 224x224 RGB
     deform        JPEG bytes, 1200x480 (grayscale content, 2x5 grid of 240x240)
     tacf6_hist    [16*10*6]   tactile[clip(t-15+i, s, t)]             i = 0..15
 
-The chunk is a *delta from the current state* on all 65 dims, matching the pi0.5
-baseline that is known to work on this data; absolute radians are recovered at
-inference by adding `observation/state`.  The F6 history stays at the native
-30 Hz regardless of `sample_stride`, because the embedded VQ-VAE was trained on
-30 Hz windows.
+The chunk is **all-absolute** on all 65 dims -- no delta, no anchoring, matching
+the raw dataset's own native representation (`meta/modality.json` already marks
+the whole 65-D block absolute) and the competition's wire contract (65-D
+absolute-radian joints; `observation.state.tcp` is identically zero, so there's
+no eef pose to make a delta representation meaningful for anyway). This
+deliberately drops the delta-from-state approach a prior attempt used (and the
+hybrid per-dim anchoring that followed it) -- see PLAN_fresh_branch.md for why.
+The F6 history stays at the native 30 Hz regardless of `sample_stride`, because
+the embedded VQ-VAE was trained on 30 Hz windows.
 """
 from __future__ import annotations
 
@@ -71,7 +75,7 @@ F6_PER_FINGER = 6
 class PrepConfig:
     sample_stride: int = 5        # emit every Nth source frame (5 -> 6 Hz samples)
     chunk_stride: int = 1         # spacing *inside* the action chunk, in source frames
-    action_chunk: int = 25        # == the kit's action_horizon
+    action_chunk: int = 16        # matches original T-Rex's own action_chunk, not the kit's action_horizon
     action_dim: int = ACTION_DIM  # 65
     vqvae_window: int = 16        # F6 history length, at the native 30 Hz
     image_size: int = 224         # square, matching the 224x224 the wire delivers
@@ -339,9 +343,11 @@ def build_episode_rows(
 
     # Chunk targets: action[t + k*chunk_stride], clamped at the episode end so
     # the tail of an episode degrades to "hold the final commanded pose".
+    # All-absolute: no delta, no anchor -- the raw commanded joint values are
+    # the target, exactly as stored in the dataset's own `action` column.
     k_offsets = np.arange(cfg.action_chunk, dtype=np.int64) * cfg.chunk_stride
-    chunk_idx = np.clip(offsets[:, None] + k_offsets[None, :], 0, last)      # [M, 25]
-    chunks = action_all[chunk_idx] - state_all[offsets][:, None, :]          # [M, 25, 65]
+    chunk_idx = np.clip(offsets[:, None] + k_offsets[None, :], 0, last)      # [M, 16]
+    chunks = action_all[chunk_idx]                                          # [M, 16, 65]
 
     # F6 history stays on the native 30 Hz grid (the VQ-VAE's training rate),
     # left-padded by repeating the episode's first frame.
@@ -529,6 +535,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--out-root", required=True,
                         help="destination root (one per split)")
     parser.add_argument("--split", choices=["train", "val"], default="train")
+    parser.add_argument("--revision", choices=["main", "competition-paper-set"],
+                        default="main", help="which HF dataset revision's season split to use")
     parser.add_argument("--limit", type=int, default=0,
                         help="use only the first N seasons of the split (0 = all)")
     parser.add_argument("--seasons", nargs="*", default=None,
@@ -568,7 +576,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         phase_mode=args.phase_mode,
     )
 
-    seasons = args.seasons if args.seasons else select_seasons(args.split, args.limit)
+    seasons = args.seasons if args.seasons else select_seasons(args.split, args.limit, args.revision)
     cache_root = args.cache_root or os.path.join(os.path.dirname(os.path.abspath(args.out_root)),
                                                  "_src")
     os.makedirs(args.out_root, exist_ok=True)
