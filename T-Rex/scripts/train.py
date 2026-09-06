@@ -706,12 +706,11 @@ def save_checkpoint(model, processor, accelerator, args, epoch, global_step, sta
                 # exact string back rather than trust the client's.
                 "instruction": getattr(args, "instruction", ""),
                     "data_format": getattr(args, "data_format", "json"),
-                    # What the 65 outputs are measured from.  Serving has no dataset
-                    # to read it off, and reconstructing with the wrong rule is a
-                    # silent bias, not an error — so it travels with the weights.
-                    "action_anchor": getattr(args, "action_anchor", None),
-                    "anchor_noise_mode": getattr(args, "anchor_noise_mode", "none"),
-                    "anchor_dropout": getattr(args, "anchor_dropout", 0.0),
+                    # All-absolute: no anchoring rule to record.  frozen_action_dims
+                    # are the dims held at measured state instead of predicted --
+                    # serving has no dataset to read that off, so it travels with
+                    # the weights instead.
+                    "frozen_action_dims": getattr(args, "frozen_action_dims", None),
                 }, f, indent=2)
 
             with open(os.path.join(save_dir, "stats_data.json"), "w") as f:
@@ -1188,9 +1187,10 @@ def train(args):
     elif data_format == "origami":
         from qwen_vla.origami_dataset import OrigamiDataset
         dataset = OrigamiDataset(args, processor, accelerator)
-        # Record what the head is being trained to emit, so the checkpoint can
-        # be reconstructed without the dataset it was trained on.
-        args.action_anchor = list(dataset.anchor_spec)
+        # Record which dims aren't really predicted (held at measured state),
+        # so the checkpoint can be reconstructed without the dataset it was
+        # trained on. All-absolute: no anchoring rule exists to record.
+        args.frozen_action_dims = dataset.frozen_dims.tolist()
         args.instruction = getattr(dataset, "effective_instruction",
                                    getattr(args, "instruction", ""))
         accelerator.print(f"[origami] prompt: {args.instruction!r}")
