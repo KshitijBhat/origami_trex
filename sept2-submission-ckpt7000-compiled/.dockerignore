@@ -1,0 +1,23 @@
+.git
+.gitignore
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.idea/
+.vscode/
+*.swp
+
+*.log
+
+*.pem
+*.key
+*.env
+
+.DS_Store
+
+# dev-only, not needed at runtime
+scripts/
+*.md
