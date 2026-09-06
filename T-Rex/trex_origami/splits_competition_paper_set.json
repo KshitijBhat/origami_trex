@@ -1,10 +1,10 @@
 {
   "hf_repo": "SharpaIT/Robotic_Origami_Challenge",
   "hf_revision": "competition-paper-set",
-  "source": "NO pre-existing split found (checked dataset.md and this revision's own README.md) -- generated here, seeded random, same 80/20 convention as splits_main.json",
-  "num_train": 30,
-  "num_val": 8,
-  "val_fraction": 0.2,
+  "source": "NO pre-existing split found -- generated here, seeded random; val kept small (3 seasons) per request",
+  "num_train": 35,
+  "num_val": 3,
+  "val_fraction": 0.0789,
   "split_method": "random",
   "seed": 0,
   "train_seasons": [
@@ -19,6 +19,7 @@
     "season_POC22061_2026_07_15_13_58_14_train",
     "season_POC22061_2026_07_15_16_41_55_train",
     "season_POC22061_2026_07_15_19_11_36_train",
+    "season_POC22061_2026_07_16_14_33_56_train",
     "season_POC22061_2026_07_16_19_17_52_train",
     "season_POC22061_2026_07_17_10_23_21_train",
     "season_POC22061_2026_07_17_13_35_14_train",
@@ -27,26 +28,25 @@
     "season_POC22061_2026_07_18_10_03_25_train",
     "season_POC22061_2026_07_18_14_27_01_train",
     "season_POC22061_2026_07_18_16_25_10_train",
+    "season_POC22061_2026_07_19_11_07_12_train",
     "season_POC22061_2026_07_19_15_31_44_train",
     "season_POC22061_2026_07_19_17_03_24_train",
     "season_POC22061_2026_07_19_19_10_55_train",
     "season_POC22061_2026_07_20_10_07_49_train",
+    "season_POC22061_2026_07_20_13_39_45_train",
     "season_POC22061_2026_07_20_15_33_56_train",
     "season_POC22061_2026_07_20_19_18_42_train",
     "season_POC22061_2026_07_21_10_09_04_train",
     "season_POC22061_2026_07_21_13_48_47_train",
     "season_POC22061_2026_07_21_19_11_50_train",
     "season_POC22061_2026_07_21_19_41_05_train",
-    "season_POC22061_2026_07_22_13_37_20_train"
+    "season_POC22061_2026_07_22_10_09_42_train",
+    "season_POC22061_2026_07_22_13_37_20_train",
+    "season_POC22061_2026_07_23_10_20_33_train"
   ],
   "val_seasons": [
     "season_POC22061_2026_07_14_10_09_42_train",
-    "season_POC22061_2026_07_16_14_33_56_train",
     "season_POC22061_2026_07_16_16_38_49_train",
-    "season_POC22061_2026_07_18_19_17_14_train",
-    "season_POC22061_2026_07_19_11_07_12_train",
-    "season_POC22061_2026_07_20_13_39_45_train",
-    "season_POC22061_2026_07_22_10_09_42_train",
-    "season_POC22061_2026_07_23_10_20_33_train"
+    "season_POC22061_2026_07_18_19_17_14_train"
   ]
 }
