@@ -304,12 +304,30 @@ active outputs, with 3 (58, 59, 64) held at fixed/measured values instead of pre
 **Does motor being absolute affect the reused hand weights? No, for two independent reasons.**
 First, this isn't actually new — motor was already `absolute` under the *previous* hybrid scheme
 too (confirmed from the real submitted checkpoint's own `action_anchor`, §4 note); only the arms
-changed representation. Second, even if it were new: `final_layer` is a plain
-`nn.Linear(hidden_size, 65)` — each output dimension is an independent row of the weight matrix,
-with zero mathematical coupling between rows at initialization. Copying pretrained values into
-the hand rows and randomly initializing the motor rows are separate slices of the same matrix;
-the only interaction is through shared upstream gradients during *training*, which is a property
-of any multi-output linear head and isn't introduced or worsened by this choice.
+changed representation. Second, even if it were new: `final_layer` is actually a 2-layer
+`Mlp` (`qwen_vla/diffusion.py`'s `FinalLayer.mlp`, from `timm`), not a plain `nn.Linear` as
+originally framed here — `fc1` (hidden→hidden) is shared across *all* output dims and is
+action_dim-count-independent, so it transplants wholesale regardless of 62-vs-65; only `fc2`
+(hidden→action_dim) has one independent row per output dim, with zero mathematical coupling
+between rows at initialization. Copying pretrained values into `fc2`'s hand rows and randomly
+initializing its motor/arm rows are separate slices of the same matrix; the only interaction is
+through shared upstream gradients (via `fc1` and beyond) during *training*, a property of any
+multi-output head and not introduced or worsened by this choice.
+
+**Status: implemented and verified.** `T-Rex/trex_origami/init_final_layer.py` (commit `db32604`)
+copies `final_layer.mlp.fc1.{weight,bias}` wholesale (asserted shape-equal) and
+`final_layer.mlp.fc2.{weight,bias}` only on the hand-row slices, leaving arm/motor rows as
+whatever the target checkpoint already has. Verified two ways: (1) synthetic unit test — fc1 full
+copy, fc2 hand rows correctly remapped, arm/motor rows and unrelated keys untouched, no in-place
+mutation of either input dict; (2) real target-side shape check against local
+`checkpoint-2-8000/model.pt`: confirmed `fc1.weight (2048,2048)`, `fc1.bias (2048,)`,
+`fc2.weight (65,2048)`, `fc2.bias (65,)`. Source checkpoint identified: HF
+`miniFranka/T-Rex_midtrain_mecka23k_ucb100_vqvae_epoch6` — its own `training_args.json` confirms
+`action_dim: 62, action_chunk: 16`, i.e. genuinely original T-Rex's 62D format, exactly what
+`init_final_layer.py`'s `SOURCE_LEFT_HAND`/`SOURCE_RIGHT_HAND` slices assume. Still pending: a
+real (non-synthetic) end-to-end run of the script against this checkpoint's actual `model.pt`
+(8.5GB, downloading) to confirm real fc2 hand-row values look sane post-transplant, and copying
+the resulting warm-started checkpoint to wherever training will actually resume from.
 
 ---
 
