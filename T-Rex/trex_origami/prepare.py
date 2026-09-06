@@ -23,9 +23,13 @@ Row schema, at source frame `t` of an episode of length `N` starting at `s`:
     action_chunk  [16*65]     action[min(t+k, s+N-1)]                 k = 0..15
     action_abs    [65]        action[t]  (== action_chunk[0]; kept for convenience)
     phase         float       (t - s) / (N - 1)
-    frame_index   int32       t - s  (episode-relative; pairs with meta's
-                               season/episode_index for an exact post-hoc join,
-                               e.g. adding phase labels later without re-deriving offsets)
+    frame_index         int32  t - s  (episode-relative)
+    season_frame_index  int32  row_from + (t - s)  (position in the season's own
+                               concatenated raw arrays, i.e. the source's row order
+                               before episode splitting)
+                        Both pair with meta's season/episode_index for an exact
+                        post-hoc join, e.g. adding phase labels later without
+                        re-deriving offsets.
     head/wrist_left/wrist_right  JPEG bytes, 224x224 RGB
     deform        JPEG bytes, 1200x480 (grayscale content, 2x5 grid of 240x240)
     tacf6_hist    [16*10*6]   tactile[clip(t-15+i, s, t)]             i = 0..15
@@ -380,6 +384,7 @@ def build_episode_rows(
         "action_abs": action_all[offsets],
         "phase": phase,
         "frame_index": offsets.astype(np.int32),
+        "season_frame_index": (spec.row_from + offsets).astype(np.int32),
         "tacf6_hist": hist.reshape(len(offsets), -1),
     }
     for column in ("head", "wrist_left", "wrist_right", "deform"):
@@ -399,6 +404,7 @@ _SCHEMA = pa.schema([
     ("action_abs", pa.list_(pa.float32())),
     ("phase", pa.float32()),
     ("frame_index", pa.int32()),
+    ("season_frame_index", pa.int32()),
     ("tacf6_hist", pa.list_(pa.float32())),
     ("head", pa.binary()),
     ("wrist_left", pa.binary()),
@@ -423,7 +429,7 @@ def write_episode_parquet(path: str, rows: Dict[str, object], cfg: PrepConfig) -
         value = rows[name]
         if name == "phase":
             columns[name] = pa.array(np.asarray(value, dtype=np.float32), type=pa.float32())
-        elif name == "frame_index":
+        elif name in ("frame_index", "season_frame_index"):
             columns[name] = pa.array(np.asarray(value, dtype=np.int32), type=pa.int32())
         elif isinstance(value, np.ndarray):
             columns[name] = _list_column(value)
