@@ -22,20 +22,25 @@ just "it ran": `action_chunk[0]` exactly equals `action_abs`, and is close-but-d
 `state` (a real tracking offset, not an accidental collapse to delta-like behavior);
 `meta/dataset.json`'s config has zero anchor-related fields.
 
-**Still not done, in rough order**: `policy.py`/`verify.py`/`preflight.py` still reference the
-deleted `anchoring.py` (imports will fail) — need rewriting against the all-absolute target, not
-yet started. `origami_dataset.py` (the loader) also still imports from `trex_origami.anchoring`
-and does its own `reanchor_chunk`/`build_anchor` reconstruction — same treatment needed. The
-default `instruction` baked into the restored `prepare.py` is the paper-airplane phrasing, which
-`DEPLOY.md`'s own benchmark found underperforms the plain "north ces task" label — worth changing
-before a real run. Streaming/reservoir q01/q99 stats (for full 126-season scale, `stats.py`'s
-current form wasn't checked yet for whether it already handles this or would OOM). `final_layer`
-init script (hand warm-start + fresh arms, §6). VQ-VAE buffer re-fit script (§7). Training-time
-logging additions (confirmed in scope, not started). accel.py's NVDEC improvements from
-`dev/attempt2_server`'s tip were kept as-is (already anchor-free) but not yet diffed line-by-line
-against `85ab48e` to confirm nothing else worth keeping was missed in `prepare.py`/`prepare_fast.py`
-specifically (only the *anchor-related* lines were assumed to be the entire delta — worth a real
-diff pass before the full run, not just before this smoke test).
+**Also done since**: `--instruction` is now a required CLI flag on both prepare scripts (no more
+silent default, was "fold the paper into a paper airplane" which `DEPLOY.md` found underperforms),
+recorded once in `meta/dataset.json`'s top-level config, not per-row. `origami_dataset.py` (the
+training loader) stripped of anchoring entirely -- `action` is exactly `action_chunk`, no
+reconstruction; `frozen_action_dims`/`clamp_frozen_absolute` kept (they were already generic,
+mask-driven) but now fed by the norm-stats variance mask instead of an anchor spec, computed as
+`self.frozen_dims` and printed at startup. `action_eval`/`prev_command` kept as plain aliases so
+`collate_fn`'s eval-only extras don't `KeyError` -- real semantics land with the eval rewrite.
+Verified with a standalone import (bypassing an unrelated missing `cv2` dep), no leftover
+references to the deleted module.
+
+**Still not done, in rough order**: `policy.py`/`verify.py`/`preflight.py` still import the deleted
+`anchoring.py` -- will fail immediately, not yet started. Streaming/reservoir q01/q99 stats for
+full 126-season scale (`stats.py` not yet checked for whether it already handles this or would
+OOM). `final_layer` init script (hand warm-start + fresh arms, §6). VQ-VAE buffer re-fit script
+(§7). Training-time logging beyond the frozen-dims print above (confirmed in scope). `accel.py`'s
+NVDEC improvements from `dev/attempt2_server`'s tip were kept as-is (already anchor-free) but not
+yet diffed line-by-line against `85ab48e` to confirm nothing else worth keeping was missed in
+`prepare.py`/`prepare_fast.py` specifically -- worth a real diff pass before the full run.
 
 Two things below are flagged as **open decisions**, not settled — I have evidence and a leaning
 on each, but they're value calls that are yours to make, not mine to assume.
