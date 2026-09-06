@@ -1,0 +1,76 @@
+{
+  "_purpose": "Reference snapshot of exactly what this pipeline pulls and how it converts it. Not read by any script -- update by hand if the defaults in prepare.py/seasons.py/fetch.py change.",
+
+  "source": {
+    "hf_repo": "SharpaIT/Robotic_Origami_Challenge",
+    "repo_type": "dataset",
+    "format": "lerobot3.0",
+    "robot_type": "north_ces",
+    "source_fps": 30,
+    "revisions": {
+      "main": {"split_file": "splits_main.json", "train": 101, "val": 25},
+      "competition-paper-set": {"split_file": "splits_competition_paper_set.json", "train": 30, "val": 8}
+    }
+  },
+
+  "raw_features_available": {
+    "observation.state": "[65] float32 -- used, as `state`",
+    "observation.state.joint_torque": "[65] float32 -- used, as `torque`",
+    "observation.state.tcp": "[24] float32 -- NOT used, confirmed identically zero for this platform (no EEF tracking)",
+    "action": "[65] float32 -- used, as `action_chunk`/`action_abs`",
+    "observation.tactile": "[60] float32 (5 fingers x 6 F6 dims x 2 hands) -- used, as `tacf6_hist` (30 Hz window)",
+    "observation.images.head_left": "480x480 video -- used, as `head`",
+    "observation.images.wrist_left": "480x480 video -- used, as `wrist_left`",
+    "observation.images.wrist_right": "480x480 video -- used, as `wrist_right`",
+    "observation.images.tactile_deform": "1200x480 video -- used, as `deform`",
+    "observation.images.head_right": "480x480 video -- NOT fetched (slow expert takes a single head image)",
+    "observation.images.tactile_raw": "480x1600 video -- NOT fetched (73% of a season's bytes, no encoder consumes it)"
+  },
+
+  "action_dim_layout_65": {
+    "left_arm": "[0:7]", "left_hand": "[7:29]", "right_arm": "[29:36]",
+    "right_hand": "[36:58]", "motor": "[58:65]"
+  },
+
+  "action_representation": "all-absolute -- no delta, no anchoring; action_chunk[k] = action[min(t+k, episode_end)] for k in 0..15",
+
+  "prep_config_defaults": {
+    "sample_stride": "5 (pilot) / 20 (full tier) -- emits every Nth source frame",
+    "chunk_stride": 1,
+    "action_chunk": 16,
+    "action_dim": 65,
+    "vqvae_window": 16,
+    "image_size": 224,
+    "rgb_quality": 3,
+    "deform_quality": 4,
+    "instruction": "required, no implicit default (--instruction)",
+    "phase_mode": "none (or 'progress' to bake '(fold k of 6)' into the prompt)",
+    "row_group_size": 64
+  },
+
+  "output_row_schema": {
+    "state": "[65] float32 -- observation.state[t]",
+    "torque": "[65] float32 -- observation.state.joint_torque[t]",
+    "action_chunk": "[16*65] float32 flat -- action[min(t+k, episode_end)], k=0..15",
+    "action_abs": "[65] float32 -- action[t] (== action_chunk[0])",
+    "phase": "float32 -- (t - episode_start) / (episode_len - 1)",
+    "frame_index": "int32 -- t - episode_start (episode-relative; join key for post-hoc annotation)",
+    "tacf6_hist": "[16*60] float32 flat -- tactile[clip(t-15+i, episode_start, t)], native 30Hz regardless of sample_stride",
+    "head / wrist_left / wrist_right": "binary JPEG, 224x224 RGB",
+    "deform": "binary JPEG, 1200x480 (2x5 grid of 240x240 per-finger deform maps)"
+  },
+
+  "output_layout": "<out_root>/{meta/dataset.json, meta/norm_stats.json, data/<season>/ep<NNN>.parquet}",
+
+  "single_season_smoke_test": {
+    "date": "2026-09-06",
+    "season": "season_POC22032_2026_05_14_19_21_01_train",
+    "instance": "vast.ai, 96 vCPU / 251GB RAM / RTX 4080 Super, ~2.2Gbps down",
+    "raw_download_size_gb": 3.0,
+    "wall_clock_download_plus_convert": "2m 26s",
+    "output_episodes": 9,
+    "output_samples": 4939,
+    "output_size_mb": 140,
+    "verify_round_trip_vs_raw_source": "exact"
+  }
+}

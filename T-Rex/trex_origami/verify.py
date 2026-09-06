@@ -49,13 +49,13 @@ F6_PER_FINGER = 6
 MIN_NORM_RANGE_JOINT = 1e-3
 CONTACT_THRESHOLD_N = 0.5
 MIN_CONTACT_FRACTION = 0.05
-COLUMNS = ("state", "action_chunk", "action_chunk_abs", "action_abs",
-           "prev_command", "phase", "tacf6_hist", "head", "wrist_left",
-           "wrist_right", "deform")
+COLUMNS = ("state", "torque", "action_chunk", "action_chunk_abs", "action_abs",
+           "prev_command", "phase", "frame_index", "tacf6_hist", "head",
+           "wrist_left", "wrist_right", "deform")
 # Columns added after splits were already prepared in the wild.  A dataset
 # missing them still verifies -- the checks that need them are skipped -- so
 # `verify` runs against an older dataset instead of failing on schema.
-OPTIONAL_COLUMNS = ("prev_command", "action_chunk_abs")
+OPTIONAL_COLUMNS = ("prev_command", "action_chunk_abs", "torque", "frame_index")
 LEGACY_COLUMNS = tuple(c for c in COLUMNS if c not in OPTIONAL_COLUMNS)
 
 

@@ -19,9 +19,13 @@ Output layout (read by `qwen_vla.origami_dataset.OrigamiDataset`):
 Row schema, at source frame `t` of an episode of length `N` starting at `s`:
 
     state         [65]        observation.state[t]
+    torque        [65]        observation.state.joint_torque[t]
     action_chunk  [16*65]     action[min(t+k, s+N-1)]                 k = 0..15
     action_abs    [65]        action[t]  (== action_chunk[0]; kept for convenience)
     phase         float       (t - s) / (N - 1)
+    frame_index   int32       t - s  (episode-relative; pairs with meta's
+                               season/episode_index for an exact post-hoc join,
+                               e.g. adding phase labels later without re-deriving offsets)
     head/wrist_left/wrist_right  JPEG bytes, 224x224 RGB
     deform        JPEG bytes, 1200x480 (grayscale content, 2x5 grid of 240x240)
     tacf6_hist    [16*10*6]   tactile[clip(t-15+i, s, t)]             i = 0..15
@@ -160,7 +164,8 @@ def read_season_arrays(root: str, season: str) -> Dict[str, np.ndarray]:
     files = sorted(glob.glob(os.path.join(root, "data", "**", "*.parquet"), recursive=True))
     if not files:
         raise FileNotFoundError(f"{season}: no data/**/*.parquet under {root}")
-    wanted = ["observation.state", "action", "observation.tactile"]
+    wanted = ["observation.state", "action", "observation.tactile",
+              "observation.state.joint_torque"]
     parts = defaultdict(list)
     for path in files:
         table = pq.read_table(path, columns=wanted)
@@ -171,6 +176,9 @@ def read_season_arrays(root: str, season: str) -> Dict[str, np.ndarray]:
         raise ValueError(f"{season}: state is {out['observation.state'].shape}, expected [:,65]")
     if out["observation.tactile"].shape[1] != F6_FINGERS * F6_PER_FINGER:
         raise ValueError(f"{season}: tactile is {out['observation.tactile'].shape}, expected [:,60]")
+    if out["observation.state.joint_torque"].shape[1] != ACTION_DIM:
+        raise ValueError(f"{season}: torque is {out['observation.state.joint_torque'].shape}, "
+                         f"expected [:,65]")
     return out
 
 
@@ -342,6 +350,7 @@ def build_episode_rows(
     state_all = arrays["observation.state"][spec.row_from:spec.row_to]
     action_all = arrays["action"][spec.row_from:spec.row_to]
     tactile_all = arrays["observation.tactile"][spec.row_from:spec.row_to]
+    torque_all = arrays["observation.state.joint_torque"][spec.row_from:spec.row_to]
     n = spec.length
     last = n - 1
 
@@ -366,9 +375,11 @@ def build_episode_rows(
     # Python floats per episode, which dominated peak RSS.
     rows = {
         "state": state_all[offsets],
+        "torque": torque_all[offsets],
         "action_chunk": chunks.reshape(len(offsets), -1),
         "action_abs": action_all[offsets],
         "phase": phase,
+        "frame_index": offsets.astype(np.int32),
         "tacf6_hist": hist.reshape(len(offsets), -1),
     }
     for column in ("head", "wrist_left", "wrist_right", "deform"):
@@ -383,9 +394,11 @@ def build_episode_rows(
 
 _SCHEMA = pa.schema([
     ("state", pa.list_(pa.float32())),
+    ("torque", pa.list_(pa.float32())),
     ("action_chunk", pa.list_(pa.float32())),
     ("action_abs", pa.list_(pa.float32())),
     ("phase", pa.float32()),
+    ("frame_index", pa.int32()),
     ("tacf6_hist", pa.list_(pa.float32())),
     ("head", pa.binary()),
     ("wrist_left", pa.binary()),
@@ -410,6 +423,8 @@ def write_episode_parquet(path: str, rows: Dict[str, object], cfg: PrepConfig) -
         value = rows[name]
         if name == "phase":
             columns[name] = pa.array(np.asarray(value, dtype=np.float32), type=pa.float32())
+        elif name == "frame_index":
+            columns[name] = pa.array(np.asarray(value, dtype=np.int32), type=pa.int32())
         elif isinstance(value, np.ndarray):
             columns[name] = _list_column(value)
         else:
