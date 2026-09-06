@@ -27,12 +27,9 @@ Row schema, at source frame `t` of an episode of length `N` starting at `s`:
     tacf6_hist    [16*10*6]   tactile[clip(t-15+i, s, t)]             i = 0..15
 
 The chunk is **all-absolute** on all 65 dims -- no delta, no anchoring, matching
-the raw dataset's own native representation (`meta/modality.json` already marks
-the whole 65-D block absolute) and the competition's wire contract (65-D
-absolute-radian joints; `observation.state.tcp` is identically zero, so there's
-no eef pose to make a delta representation meaningful for anyway). This
-deliberately drops the delta-from-state approach a prior attempt used (and the
-hybrid per-dim anchoring that followed it) -- see PLAN_fresh_branch.md for why.
+the dataset's own native representation (`meta/modality.json`) and the
+competition's wire contract. Drops the delta-from-state / hybrid-anchoring
+approaches prior attempts used -- see PLAN_fresh_branch.md for why.
 The F6 history stays at the native 30 Hz regardless of `sample_stride`, because
 the embedded VQ-VAE was trained on 30 Hz windows.
 """
@@ -56,7 +53,6 @@ import pyarrow.parquet as pq
 
 from .seasons import (
     ACTION_DIM,
-    INSTRUCTION,
     SRC_FPS,
     VIDEO_KEYS,
     VIDEO_KEY_TO_COLUMN,
@@ -81,10 +77,18 @@ class PrepConfig:
     image_size: int = 224         # square, matching the 224x224 the wire delivers
     rgb_quality: int = 3          # ffmpeg -q:v for the three RGB cameras (2..31, lower=better)
     deform_quality: int = 4       # ffmpeg -q:v for the deform strip
-    instruction: str = INSTRUCTION
+    # No implicit default -- prior hardcoded default underperformed per
+    # DEPLOY.md's own benchmark. Must be set explicitly (--instruction).
+    instruction: str = ""
     n_phases: int = 6             # the target figure is a 6-fold plane
     phase_mode: str = "none"      # "progress" bakes "(fold k of 6)" into the prompt
     row_group_size: int = 64      # BlockShuffleSampler shuffles at this granularity
+
+    def __post_init__(self):
+        if not self.instruction:
+            raise ValueError(
+                "PrepConfig.instruction must be set explicitly (--instruction) -- "
+                "no implicit default, see the comment on this field")
 
 
 # ── source metadata ───────────────────────────────────────────────────────────
@@ -555,6 +559,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--image-size", type=int, default=PrepConfig.image_size)
     parser.add_argument("--rgb-quality", type=int, default=PrepConfig.rgb_quality)
     parser.add_argument("--deform-quality", type=int, default=PrepConfig.deform_quality)
+    parser.add_argument("--instruction", required=True,
+                        help="training prompt, recorded once in meta/dataset.json's "
+                             "config -- no default on purpose, must be chosen explicitly")
     parser.add_argument("--phase-mode", choices=["none", "progress"], default="none")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", "") or None)
     parser.add_argument("--stats", action="store_true",
@@ -573,6 +580,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         image_size=args.image_size,
         rgb_quality=args.rgb_quality,
         deform_quality=args.deform_quality,
+        instruction=args.instruction,
         phase_mode=args.phase_mode,
     )
 

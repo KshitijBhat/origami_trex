@@ -1,14 +1,9 @@
 """Season inventory, the train/val split, and the 65-D joint contract.
 
-The split is season-level (never episode-level): demonstrations recorded in the
-same session share lighting, paper batch and operator drift, so mixing them
-across train/val would leak. Season lists live in `splits_<revision>.json`
-(loaded, not hardcoded) -- one file per HF dataset revision, since `main` and
-`competition-paper-set` are different season sets with no overlap. `main`'s
-split is the pre-existing one recorded in `dataset.md` (seed 0, 20% val — 101
-train / 25 val out of 126 usable seasons); `competition-paper-set` has no
-pre-existing split, so one was generated the same way (see that JSON file's own
-`source` field).
+The split is season-level (never episode-level) to avoid leaking a recording
+session's lighting/paper-batch/operator drift across train/val. Season lists
+live in `splits_<revision>.json` (loaded, not hardcoded), one file per HF
+revision -- see each file's own `source` field for how it was derived.
 
 The joint contract is copied verbatim from the competition's normative spec
 (`origami-inference-kit-participant/docs/robot_io_spec.md` §2, mirrored in
@@ -24,25 +19,10 @@ from typing import List, Sequence, Tuple
 
 HF_REPO_ID = "SharpaIT/Robotic_Origami_Challenge"
 
-# The prompt every sample is trained with.  It is *not* the dataset's own task
-# string -- `meta/tasks.parquet` says "north ces task" in every season, which is
-# also the organizer's `default_prompt` (openpi config.py's north_ces entries)
-# and the string the T-Rex midtrain data's "I am T-Rex." plays the same role as:
-# an opaque label carrying no information about the task.
-#
-# The prompt is constant across the dataset either way, so it can add nothing
-# per-sample; what it *can* do is pick which of Qwen3-VL's pretrained
-# visual-language priors the shared prefix lands on.  "north ces task" grounds on
-# nothing; naming the deformable object and the target figure grounds on the
-# things actually in the head camera.  Kept short deliberately -- these tokens
-# are prepended to all ~410k samples, and length costs sequence budget on every
-# forward pass.
-#
-# Because we diverge from the organizer's default_prompt, serving MUST ignore the
-# `prompt` field the robot sends (it "may be empty", and the kit's own example
-# says "fold the plane") and inject this string instead; `scripts/test.py` reads
-# it back from the checkpoint's training_args.json to do exactly that.
-INSTRUCTION = "fold the paper into a paper airplane"
+# No default prompt lives here -- it's chosen per prep run via --instruction
+# and recorded in meta/dataset.json (see prepare.py's PrepConfig). Serving
+# reads it back from training_args.json rather than the robot's own `prompt`
+# field, which "may be empty".
 
 #: What the raw LeRobot data and the organizer's reference config call the task.
 #: Kept for provenance and for anything that needs to match the source dataset.
@@ -117,13 +97,8 @@ FINGER_NAMES = tuple(
 
 
 # ── seasons come from splits_<revision>.json, not hardcoded here ──────────────
-# Two HF dataset revisions exist, kept as separate files (different season sets,
-# no overlap): `splits_main.json` (SharpaIT/Robotic_Origami_Challenge@main, 143
-# seasons on the hub, 126 in the documented split -- the 17 extras are opt-in
-# and not included here) and `splits_competition_paper_set.json`
-# (@competition-paper-set, 38 seasons, no pre-existing split was published for
-# this revision so one was generated here with the same seeded-random 80/20
-# convention as main's -- see that file's own `source` field).
+# One file per HF revision (main / competition-paper-set), non-overlapping
+# season sets. See each file's own `source` field for how it was derived.
 _SPLITS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REVISION_FILES = {
     "main": "splits_main.json",

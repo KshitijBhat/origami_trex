@@ -14,7 +14,6 @@ Entry points:
 
 from .seasons import (
     HF_REPO_ID,
-    INSTRUCTION,
     JOINT_NAMES,
     JOINT_GROUPS,
     select_seasons,
@@ -22,7 +21,6 @@ from .seasons import (
 
 __all__ = [
     "HF_REPO_ID",
-    "INSTRUCTION",
     "JOINT_NAMES",
     "JOINT_GROUPS",
     "select_seasons",

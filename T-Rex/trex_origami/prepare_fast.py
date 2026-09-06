@@ -180,6 +180,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--image-size", type=int, default=PrepConfig.image_size)
     parser.add_argument("--rgb-quality", type=int, default=PrepConfig.rgb_quality)
     parser.add_argument("--deform-quality", type=int, default=PrepConfig.deform_quality)
+    parser.add_argument("--instruction", required=True,
+                        help="training prompt, recorded once in meta/dataset.json")
     parser.add_argument("--phase-mode", choices=["none", "progress"], default="none")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", "") or None)
     parser.add_argument("--downloaders", type=int, default=3,
@@ -203,7 +205,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sample_stride=args.sample_stride, chunk_stride=args.chunk_stride,
         action_chunk=args.action_chunk, vqvae_window=args.vqvae_window,
         image_size=args.image_size, rgb_quality=args.rgb_quality,
-        deform_quality=args.deform_quality, phase_mode=args.phase_mode)
+        deform_quality=args.deform_quality, instruction=args.instruction,
+        phase_mode=args.phase_mode)
 
     seasons = args.seasons or select_seasons(args.split, args.limit, args.revision)
     cache_root = args.cache_root or os.path.join(
