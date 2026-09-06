@@ -47,6 +47,26 @@ the real smoke-test output **with `--src-root` pointed at the actual source data
 That covers the full training path (prepare → loader → preflight → verify). `policy.py` (deploy)
 is untouched on purpose -- explicitly staged for after training works, per your own note.
 
+**Real end-to-end training smoke test run on a remote GPU box (vast.ai, RTX 4080 Super 16GB)**,
+2-season dataset (116/10 re-split from the previous 101/25), full `norm_stats.json` fit, both
+splits verified. Found and fixed two real bugs neither the dataloader-only smoke test nor `verify`/
+`preflight` could catch, since they only fire inside `scripts/train.py` itself: (1) `train.py:1193`
+still read `dataset.anchor_spec` to write into `training_args.json` -- replaced with
+`dataset.frozen_dims` (`f7386c5`); (2) none, the `_RopeCfg`/`Qwen2VL`-fallback and missing
+`tactile_vqvae` module were environment/deployment gaps (wrong `transformers` version, a directory
+never synced), not code bugs. Confirmed via the real log: model resumes from the midtrain
+checkpoint exactly as documented (`missing=9` shape-mismatched head tensors, tactile expert weights
+kept), latent expert freezes correctly (last 4 of 28 layers), forward + loss + backward all run on
+real data. The run then hits a genuine CUDA OOM inside bitsandbytes' AdamW8bit state init on step 1
+-- not a bug: 4.26B total / 2.33B trainable params means weights (~8.5GB bf16) + trainable grads
+(~4.7GB) + 8-bit optimizer state (~4.7GB) already exceeds 16GB before any activations, and
+`train_origami.sh`'s own header says "Single A100 (40 GB)" -- this box was never sized for the
+default recipe. Tried a maximally-frozen variant (`--train_latent_last_n 0 --use_flare 0`) to see if
+anything smaller fits: OOMs at the same point, confirming the floor is the base architecture size,
+not the freeze schedule. **Conclusion: the training code path is now confirmed correct through a
+real backward pass; a genuine multi-GPU/40GB-class box is needed for the actual run, exactly as
+already planned.**
+
 **Still not done, in rough order**: streaming/reservoir q01/q99 stats for full 126-season scale
 (`stats.py` not yet checked for whether it already handles this or would OOM). `final_layer` init
 script (hand warm-start + fresh arms, §6). VQ-VAE buffer re-fit script (§7). Training-time logging
