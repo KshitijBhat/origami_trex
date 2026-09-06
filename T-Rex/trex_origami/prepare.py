@@ -19,24 +19,18 @@ Output layout (read by `qwen_vla.origami_dataset.OrigamiDataset`):
 Row schema, at source frame `t` of an episode of length `N` starting at `s`:
 
     state         [65]        observation.state[t]
-    action_chunk  [25*65]     action[min(t+k, s+N-1)] - anchor[t]     k = 0..24
-    action_chunk_abs [25*65]  action[min(t+k, s+N-1)]                 k = 0..24
+    action_chunk  [25*65]     action[min(t+k, s+N-1)] - state[t]      k = 0..24
     action_abs    [65]        action[t]
-    prev_command  [65]        action[t-1]  (action[t] at the episode start)
     phase         float       (t - s) / (N - 1)
     head/wrist_left/wrist_right  JPEG bytes, 224x224 RGB
     deform        JPEG bytes, 1200x480 (grayscale content, 2x5 grid of 240x240)
     tacf6_hist    [16*10*6]   tactile[clip(t-15+i, s, t)]             i = 0..15
 
-`anchor[t]` is per-dimension and comes from `trex_origami.anchoring`: under the
-default `--anchor-mode hybrid` the arms (dims 0-6, 29-35) are anchored to
-`prev_command[t]` and the 51 hand/motor dims are absolute joint angles (anchor
-0), which is how the paper anchors the two groups and how T-Rex's midtrain
-trunk saw them.  `--anchor-mode state` reproduces the older all-delta-from-state
-prep.  The rule is written into `meta/dataset.json` as a 65-entry
-`action_anchor` list, and every consumer reads it from there rather than
-assuming.  The F6 history stays at the native 30 Hz regardless of
-`sample_stride`, because the embedded VQ-VAE was trained on 30 Hz windows.
+The chunk is a *delta from the current state* on all 65 dims, matching the pi0.5
+baseline that is known to work on this data; absolute radians are recovered at
+inference by adding `observation/state`.  The F6 history stays at the native
+30 Hz regardless of `sample_stride`, because the embedded VQ-VAE was trained on
+30 Hz windows.
 """
 from __future__ import annotations
 
@@ -56,7 +50,6 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .anchoring import ANCHOR_MODES, anchor_spec, build_anchor, describe as describe_anchor
 from .seasons import (
     ACTION_DIM,
     INSTRUCTION,
@@ -87,7 +80,6 @@ class PrepConfig:
     instruction: str = INSTRUCTION
     n_phases: int = 6             # the target figure is a 6-fold plane
     phase_mode: str = "none"      # "progress" bakes "(fold k of 6)" into the prompt
-    anchor_mode: str = "hybrid"   # see trex_origami.anchoring; "state" = the old prep
     row_group_size: int = 64      # BlockShuffleSampler shuffles at this granularity
 
 
@@ -224,13 +216,10 @@ def decode_frames(
 
     ffmpeg does the select, the resize and the JPEG encode, so raw frames never
     cross into Python — the whole conversion is bounded by video decode.  The
-    `lerobot3.0` exports we read are *mostly AV1* with some h264 seasons (the
-    dataset card: "lerobot3.0 is primarily AV1, lerobotv2.1 is primarily
-    H.264"), and this CPU path handles both through whatever decoder ffmpeg
-    picks — libdav1d for AV1, which runs roughly 2-4x slower per frame than
-    h264.  `accel.install()` reroutes the RGB streams through the matching
-    NVDEC decoder chosen per file; see that module for the per-codec numbers and
-    for why the deform strip stays here.
+    release ships h264 (not AV1): measured on this box, 480x480 RGB decodes at
+    ~1950 fps and the 1200x480 deform strip at ~3200 fps.  `accel.install()`
+    reroutes the RGB streams through NVDEC for ~2.6x; see that module for why
+    the deform strip stays here.
     """
     vf = f"select='{_select_expr(ranges)}'"
     if scale:
@@ -348,29 +337,11 @@ def build_episode_rows(
     n = spec.length
     last = n - 1
 
-    # The previous *command*, which is what the arms are anchored to.  At the
-    # first frame of an episode there is none, so fall back to the command at t
-    # itself: the teleoperator's first target, which is where the robot already
-    # is.  (Anchoring row 0 to `state[0]` instead would inject the tracking
-    # offset into exactly one sample per episode for no benefit.)
-    prev_command = np.empty_like(action_all)
-    prev_command[0] = action_all[0]
-    prev_command[1:] = action_all[:-1]
-
     # Chunk targets: action[t + k*chunk_stride], clamped at the episode end so
     # the tail of an episode degrades to "hold the final commanded pose".
     k_offsets = np.arange(cfg.action_chunk, dtype=np.int64) * cfg.chunk_stride
     chunk_idx = np.clip(offsets[:, None] + k_offsets[None, :], 0, last)      # [M, 25]
-    anchor = build_anchor(state_all[offsets], prev_command[offsets],
-                          anchor_spec(cfg.anchor_mode))                      # [M, 65]
-    # The raw future commands, kept alongside the anchored targets.  They are
-    # what `anchor + action_chunk` reconstructs, so nothing downstream *needs*
-    # them -- but having them on the wire means a consumer can re-anchor (or
-    # score in absolute radians) without knowing the prep's anchoring rule, and
-    # `verify` can check the round-trip against stored ground truth rather than
-    # against its own re-derivation.
-    future_abs = action_all[chunk_idx].astype(np.float32)                    # [M, 25, 65]
-    chunks = (future_abs - anchor[:, None, :]).astype(np.float32)            # [M, 25, 65]
+    chunks = action_all[chunk_idx] - state_all[offsets][:, None, :]          # [M, 25, 65]
 
     # F6 history stays on the native 30 Hz grid (the VQ-VAE's training rate),
     # left-padded by repeating the episode's first frame.
@@ -386,9 +357,7 @@ def build_episode_rows(
     rows = {
         "state": state_all[offsets],
         "action_chunk": chunks.reshape(len(offsets), -1),
-        "action_chunk_abs": future_abs.reshape(len(offsets), -1),
         "action_abs": action_all[offsets],
-        "prev_command": prev_command[offsets],
         "phase": phase,
         "tacf6_hist": hist.reshape(len(offsets), -1),
     }
@@ -405,9 +374,7 @@ def build_episode_rows(
 _SCHEMA = pa.schema([
     ("state", pa.list_(pa.float32())),
     ("action_chunk", pa.list_(pa.float32())),
-    ("action_chunk_abs", pa.list_(pa.float32())),
     ("action_abs", pa.list_(pa.float32())),
-    ("prev_command", pa.list_(pa.float32())),
     ("phase", pa.float32()),
     ("tacf6_hist", pa.list_(pa.float32())),
     ("head", pa.binary()),
@@ -522,70 +489,14 @@ def season_already_done(out_root: str, season: str) -> bool:
     return bool(files) and all(os.path.exists(os.path.join(out_root, f)) for f in files)
 
 
-#: Config fields that are baked into every row.  Changing one of these and then
-#: resuming into the same out-root would merge rows built under two different
-#: contracts, and nothing downstream could tell them apart -- `dataset.json`
-#: records a single config for the whole split.
-BAKED_FIELDS = ("sample_stride", "chunk_stride", "action_chunk", "action_dim",
-                "vqvae_window", "image_size", "anchor_mode", "phase_mode")
-
-
-def check_config_compatible(out_root: str, cfg: PrepConfig, overwrite: bool) -> None:
-    """Refuse to append rows built under a different contract to an existing split.
-
-    The anchoring change is exactly the case this exists for: re-running the prep
-    with `--anchor-mode hybrid` over an out-root written with `state` would skip
-    every already-converted season (their parquets exist) and leave a split whose
-    `dataset.json` claims hybrid anchoring while most of its rows are deltas from
-    state.  Every metric downstream would be quietly wrong.
-    """
-    path = os.path.join(out_root, "meta", "dataset.json")
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path) as handle:
-            old = json.load(handle).get("config", {})
-    except (json.JSONDecodeError, OSError):
-        return
-    if not old:
-        return
-    new = asdict(cfg)
-    drift = [(k, old.get(k), new[k]) for k in BAKED_FIELDS
-             if k in old and old[k] != new[k]]
-    if not drift:
-        return
-    detail = ", ".join(f"{k}: {was!r} -> {now!r}" for k, was, now in drift)
-    if overwrite:
-        logger.warning("[prep] %s was prepared with %s; --overwrite will rebuild "
-                       "every episode under the new config", out_root, detail)
-        return
-    raise SystemExit(
-        f"{path} was prepared with {detail}. Already-converted seasons would be "
-        f"skipped and the split would mix two contracts. Re-run with --overwrite, "
-        f"or point --out-root at a fresh directory.")
-
-
 def write_dataset_meta(out_root: str, entries: List[dict], cfg: PrepConfig) -> str:
     os.makedirs(os.path.join(out_root, "meta"), exist_ok=True)
     path = os.path.join(out_root, "meta", "dataset.json")
     payload = {
         "config": asdict(cfg),
-        # Per-dim, not just the mode name: a consumer written against a future
-        # prep should read the rule it was given rather than re-derive it from a
-        # string whose meaning may have moved.
-        "action_anchor": list(anchor_spec(cfg.anchor_mode)),
         "n_episodes": len(entries),
         "n_samples": sum(e["n_samples"] for e in entries),
         "n_seasons": len({e["season"] for e in entries}),
-        # `--phase-mode progress` bakes "(fold k of N)" into the prompt from
-        # `(t - s) / (N - 1)`, which needs the episode's *total* length -- a
-        # number the robot does not have at deployment, where it only knows how
-        # long it has been folding.  Recording the median here is what lets a
-        # server approximate the same signal from elapsed wall-clock
-        # (`scripts/test.py --phase_mode progress --phase_episode_seconds`),
-        # so the prompt the policy trained against is reproducible online.
-        "median_episode_frames": int(np.median(
-            [e["source_frames"] for e in entries])) if entries else 0,
         "episodes": sorted(entries, key=lambda e: (e["season"], e["episode_index"])),
     }
     with open(path, "w") as handle:
@@ -637,11 +548,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--rgb-quality", type=int, default=PrepConfig.rgb_quality)
     parser.add_argument("--deform-quality", type=int, default=PrepConfig.deform_quality)
     parser.add_argument("--phase-mode", choices=["none", "progress"], default="none")
-    parser.add_argument("--anchor-mode", choices=list(ANCHOR_MODES),
-                        default=PrepConfig.anchor_mode,
-                        help="what each predicted dim is measured from; "
-                             "'hybrid' = arms from the previous command, hands and "
-                             "motor absolute; 'state' = the old all-delta prep")
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", "") or None)
     parser.add_argument("--stats", action="store_true",
                         help="also compute meta/norm_stats.json when done")
@@ -660,19 +566,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rgb_quality=args.rgb_quality,
         deform_quality=args.deform_quality,
         phase_mode=args.phase_mode,
-        anchor_mode=args.anchor_mode,
     )
 
     seasons = args.seasons if args.seasons else select_seasons(args.split, args.limit)
     cache_root = args.cache_root or os.path.join(os.path.dirname(os.path.abspath(args.out_root)),
                                                  "_src")
     os.makedirs(args.out_root, exist_ok=True)
-    check_config_compatible(args.out_root, cfg, args.overwrite)
 
     logger.info("[prep] %s: %d seasons -> %s (stride %d, chunk %d, %dpx)",
                 args.split, len(seasons), args.out_root,
                 cfg.sample_stride, cfg.action_chunk, cfg.image_size)
-    logger.info("[prep] action anchoring %s", describe_anchor(anchor_spec(cfg.anchor_mode)))
 
     all_entries: List[dict] = []
     failures: List[Tuple[str, str]] = []
