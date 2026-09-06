@@ -15,12 +15,10 @@ Checks:
      of 240x240 tiles (what DeformEncoder's hardcoded 128*15*15 requires)
   5. deform tile occupancy is consistent with the tactile force vector -- i.e.
      the image grid and the 60-D signal agree on which finger is in contact
-  6. anchoring round-trip: reconstructing `anchor + action_chunk` reproduces the
-     wire contract, and step 0 of the reconstruction equals `action_abs` on
-     every dim -- including the absolute dims, which must land there *without*
-     anyone adding the state
+  6. action_chunk[0] equals action_abs on every dim (all-absolute, no anchor
+     reconstruction needed)
   7. with --src-root, one sample's chunk/state/history is re-derived straight
-     from the raw season parquet under the declared anchoring rule
+     from the raw season parquet
 """
 from __future__ import annotations
 
@@ -36,9 +34,6 @@ from typing import List, Optional, Sequence
 import numpy as np
 import pyarrow.parquet as pq
 
-from .anchoring import (ANCHOR_ABSOLUTE, ANCHOR_PREV_COMMAND, build_anchor,
-                        describe as describe_anchor, masks as anchor_masks,
-                        spec_from_meta, to_absolute)
 from .seasons import ACTION_DIM, FINGER_NAMES, JOINT_NAMES
 
 logger = logging.getLogger(__name__)
@@ -100,15 +95,11 @@ def verify(root: str, n_samples: int = 8, seed: int = 0,
     chunk, dim = int(cfg["action_chunk"]), int(cfg["action_dim"])
     window = int(cfg["vqvae_window"])
     episodes = meta["episodes"]
-    spec = spec_from_meta(meta)
-    sel = anchor_masks(spec)
-    has_prev = bool(sel[ANCHOR_PREV_COMMAND].any())
 
     logger.info("[verify] %s", root)
     logger.info("[verify] %d episodes / %d samples / %d seasons | stride %d, chunk %d, %dpx",
                 len(episodes), meta["n_samples"], meta["n_seasons"],
                 cfg["sample_stride"], chunk, cfg["image_size"])
-    logger.info("[verify] anchoring %s", describe_anchor(spec))
 
     # ── 1. episode files ──────────────────────────────────────────────────────
     total = 0
@@ -123,10 +114,6 @@ def verify(root: str, n_samples: int = 8, seed: int = 0,
         names = set(pf.schema_arrow.names)
         _check(set(LEGACY_COLUMNS) <= names <= set(COLUMNS),
                f"{entry['file']}: columns {pf.schema_arrow.names}", problems)
-        _check(not has_prev or "prev_command" in names,
-               f"{entry['file']}: anchors arm dims to the previous command but has "
-               f"no `prev_command` column — prepared by an older trex_origami",
-               problems)
         total += pf.metadata.num_rows
     _check(total == meta["n_samples"],
            f"row total {total} != meta n_samples {meta['n_samples']}", problems)
@@ -185,47 +172,16 @@ def verify(root: str, n_samples: int = 8, seed: int = 0,
         chunk_arr = np.asarray(table["action_chunk"][i].as_py(), dtype=np.float32)
         hist = np.asarray(table["tacf6_hist"][i].as_py(), dtype=np.float32)
         action_abs = np.asarray(table["action_abs"][i].as_py(), dtype=np.float32)
-        prev_command = (np.asarray(table["prev_command"][i].as_py(), dtype=np.float32)
-                        if "prev_command" in table.column_names else action_abs)
-        future_abs = (np.asarray(table["action_chunk_abs"][i].as_py(), dtype=np.float32)
-                      if "action_chunk_abs" in table.column_names else None)
 
-        # ── 6. anchoring round-trip ──────────────────────────────────────────
-        # `anchor + stored target` must be the wire contract, and its step 0 is
-        # the command at t by construction.  Checking it here (rather than only
-        # under --src-root) is what makes a mis-declared `action_anchor` a
-        # prep-time failure instead of a silent 0.7 deg bias in every eval.
-        anchor = build_anchor(state, prev_command, spec)
-        recon0 = to_absolute(chunk_arr.reshape(chunk, dim), anchor)[0]
-        _check(np.allclose(recon0, action_abs, atol=1e-5),
-               f"{entry['file']}[{i}]: anchor + action_chunk[0] does not reproduce "
-               f"action_abs (max |diff| {np.abs(recon0 - action_abs).max():.2e} rad) "
-               f"— the declared anchoring rule does not match the stored targets",
+        # ── 6. action_chunk is already absolute -- no reconstruction needed ──
+        # step 0 must equal action_abs by construction (both are action[t]).
+        step0 = chunk_arr.reshape(chunk, dim)[0]
+        _check(np.allclose(step0, action_abs, atol=1e-5),
+               f"{entry['file']}[{i}]: action_chunk[0] does not equal action_abs "
+               f"(max |diff| {np.abs(step0 - action_abs).max():.2e} rad)",
                problems)
-        # The absolute dims must be readable straight off the wire.  If someone
-        # re-introduces a state offset there, this is where it shows up.
-        abs_dims = sel[ANCHOR_ABSOLUTE]
-        if abs_dims.any():
-            _check(np.allclose(chunk_arr.reshape(chunk, dim)[0][abs_dims],
-                               action_abs[abs_dims], atol=1e-5),
-                   f"{entry['file']}[{i}]: absolute-anchored dims do not equal "
-                   f"action_abs at step 0 — they carry an offset they should not",
-                   problems)
         _check(state.shape == (dim,), f"state shape {state.shape}", problems)
         _check(chunk_arr.size == chunk * dim, f"action_chunk size {chunk_arr.size}", problems)
-        if future_abs is not None:
-            # The raw future commands are stored, not derived, so this catches a
-            # mismatch between the two action columns directly rather than
-            # relying on the reconstruction above.
-            _check(future_abs.size == chunk * dim,
-                   f"action_chunk_abs size {future_abs.size}", problems)
-            if future_abs.size == chunk * dim:
-                recon = to_absolute(chunk_arr.reshape(chunk, dim), anchor)
-                _check(np.allclose(recon, future_abs.reshape(chunk, dim), atol=1e-5),
-                       f"{entry['file']}[{i}]: anchor + action_chunk does not reproduce "
-                       f"action_chunk_abs (max |diff| "
-                       f"{np.abs(recon - future_abs.reshape(chunk, dim)).max():.2e} rad)",
-                       problems)
         _check(hist.size == window * N_FINGERS * F6_PER_FINGER,
                f"tacf6_hist size {hist.size}", problems)
         _check(np.isfinite(state).all() and np.isfinite(chunk_arr).all()
@@ -377,7 +333,6 @@ def _verify_against_source(root: str, meta: dict, src_root: str) -> List[str]:
     stride, cstride = int(cfg["sample_stride"]), int(cfg["chunk_stride"])
     window = int(cfg["vqvae_window"])
 
-    spec = spec_from_meta(meta)
     entry = meta["episodes"][0]
     season = entry["season"]
     try:
@@ -397,15 +352,10 @@ def _verify_against_source(root: str, meta: dict, src_root: str) -> List[str]:
     tactile_all = arrays["observation.tactile"][ep_spec.row_from:ep_spec.row_to]
     last = ep_spec.length - 1
 
-    # `prepare` anchors row 0 of an episode to the command at t itself.
-    want_prev = np.empty_like(action_all)
-    want_prev[0] = action_all[0]
-    want_prev[1:] = action_all[:-1]
-
     for i in (0, table.num_rows // 2, table.num_rows - 1):
         t = i * stride
         idx = np.clip(t + np.arange(chunk) * cstride, 0, last)
-        want_chunk = action_all[idx] - build_anchor(state_all[t], want_prev[t], spec)
+        want_chunk = action_all[idx]                      # all-absolute: no anchor subtraction
         hidx = np.clip(t + np.arange(window) - (window - 1), 0, last)
         want_hist = tactile_all[hidx]
 
@@ -419,16 +369,11 @@ def _verify_against_source(root: str, meta: dict, src_root: str) -> List[str]:
         _check(np.array_equal(got_state, state_all[t]), f"state mismatch at row {i}", problems)
         _check(np.array_equal(got_abs, action_all[t]), f"action_abs mismatch at row {i}", problems)
         _check(np.allclose(got_chunk, want_chunk, atol=1e-6),
-               f"action_chunk mismatch at row {i} (re-derived under "
-               f"{describe_anchor(spec)})", problems)
+               f"action_chunk mismatch at row {i}", problems)
         _check(np.allclose(got_hist, want_hist, atol=1e-6),
                f"tacf6_hist mismatch at row {i}", problems)
-        if "prev_command" in table.column_names:
-            got_prev = np.asarray(table["prev_command"][i].as_py(), dtype=np.float32)
-            _check(np.array_equal(got_prev, want_prev[t]),
-                   f"prev_command mismatch at row {i}", problems)
-    logger.info("[verify] round-trip against raw %s ep%d: exact under %s",
-                season, ep_spec.episode_index, describe_anchor(spec))
+    logger.info("[verify] round-trip against raw %s ep%d: exact",
+                season, ep_spec.episode_index)
     return problems
 
 
