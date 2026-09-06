@@ -181,6 +181,9 @@ class OrigamiDataset(torch.utils.data.Dataset):
         with open(os.path.join(self.root, "meta", "dataset.json")) as f:
             self.meta = json.load(f)
         self.episodes = self.meta["episodes"]
+        max_episodes = int(getattr(config, "max_episodes", 0) or 0)
+        if max_episodes > 0:
+            self.episodes = self.episodes[:max_episodes]
         cfg = self.meta.get("config", {})
         self.sample_stride = int(cfg.get("sample_stride", 1))
         self.chunk_stride = int(cfg.get("chunk_stride", 1))

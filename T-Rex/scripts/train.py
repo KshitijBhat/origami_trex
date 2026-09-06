@@ -1756,6 +1756,10 @@ if __name__ == "__main__":
                         help="origami-flat dataset root (--data_format origami)")
     parser.add_argument("--origami_val_root", type=str, default="val",
                         help="held-out-season root used for validation")
+    parser.add_argument("--max_episodes", type=int, default=0,
+                        help="cap each origami root (train and val) to its first N "
+                             "episodes; 0 = use all. For quick pipeline checks, not "
+                             "real training runs.")
     parser.add_argument("--origami_sampler", type=str, default="block",
                         choices=["block", "random"],
                         help="block = shuffle at parquet row-group granularity")
