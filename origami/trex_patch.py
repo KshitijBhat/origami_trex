@@ -110,6 +110,30 @@ this one line assumes the now-gone delegating property. Fix: replace the whole c
 ``vla.visual = base_model.visual if hasattr(base_model, "visual") else base_model.model.visual``
 -- covers both transformers eras without needing to know which one is installed, exactly
 patch 3's strategy for the same kind of drift.
+
+Patch 7 -- ``forward_flow_action_partial`` / ``tactile_flow_train_step`` hardcoded dtype
+(modeling_vla.py). Found running TRAINING.md's smoke test (§12 step 11's precursor) for real
+on a rented A100 -- the first time either method ever actually ran the cascaded/tactile branch
+against ``origami/config/single_gpu_bf16.yaml`` (plain ``accelerate`` mixed_precision, no
+DeepSpeed). Both methods hardcode ``dtype = torch.bfloat16`` for the tensors they build
+(``x_t``/``dt``/``time``, and the ``fast_embeds``/``state_embeds`` placeholders in the first;
+``dtype`` for ``_embed_tactile_observations`` and the ``.to(dtype)`` casts in the second), then
+feed them into ``self.x_embedder``/``self.t_embedder``. On T-Rex's own DeepSpeed ZeRO-2 config
+(`T-Rex/config/sft_qwen.yaml`, `distributed_type: DEEPSPEED`) model parameters really are bf16,
+so the hardcoded literal happens to match. Under this project's single-GPU non-DeepSpeed
+config, ``accelerate``'s mixed precision keeps fp32 master weights and only autocasts
+``model.forward`` itself (confirmed by reading ``accelerate/accelerator.py``'s
+``prepare_model``) -- but both of these methods call ``raw_model.<method>(...)`` directly on
+the unwrapped model, and internally call submodules like ``self.model(...)``/``self.x_embedder(
+...)`` directly too, never through the autocast-wrapped top-level ``model.forward``. So under
+this config every activation in these two methods stays fp32 end to end -- except the
+hardcoded-bf16 tensors, which crash the first ``self.x_embedder(x_t)`` matmul with
+``RuntimeError: mat1 and mat2 must have the same dtype, but got BFloat16 and Float``. Fix: in
+both methods, replace the hardcoded literal with the ambient dtype already flowing through the
+caller (``inputs_embeds.dtype`` / ``x_tau.dtype`` respectively) -- identical to bf16 under
+DeepSpeed (where those tensors are already bf16), and now also correct under plain
+mixed-precision fp32-master-weights training. Whole methods copied (not isolable into a small
+helper), same strategy as patch 6.
 """
 from __future__ import annotations
 
@@ -471,8 +495,176 @@ def _patched_from_pretrained_qwen3vl(
     return vla
 
 
+@torch.no_grad()
+def _patched_forward_flow_action_partial(
+    self,
+    inputs_embeds,
+    position_ids,
+    noise,
+    attention_mask=None,
+    state_embeds=None,
+    fast_embeds=None,
+    num_steps_total: int = 10,
+    split_step: int = 6,
+    refresh_clean_kv: bool = True,
+):
+    """ORIGAMI-PATCH (§7.1 patch 7): identical to upstream `forward_flow_action_partial`
+    except `dtype` is taken from `inputs_embeds` instead of hardcoded `torch.bfloat16` --
+    see patch 7's module-docstring section. Whole method copied (not isolable into a small
+    helper, `dtype` is used throughout the Euler loop below)."""
+    if not (0 < split_step < num_steps_total):
+        raise ValueError(
+            f"split_step must be in (0, num_steps_total); got "
+            f"{split_step}/{num_steps_total}.")
+
+    device = noise.device
+    # ORIGAMI-PATCH (§7.1 patch 7): ambient dtype, not a hardcoded bf16 literal.
+    dtype  = inputs_embeds.dtype
+    # Same dt as the full flow, so the cascaded trajectory is consistent
+    # with what a 10-step monolithic flow would integrate.
+    dt     = torch.tensor(-1.0 / num_steps_total, dtype=dtype, device=device)
+    x_t    = noise.to(dtype)
+    time   = torch.tensor(1.0, dtype=dtype, device=device)
+    n_chunk = noise.shape[1]
+    B      = inputs_embeds.shape[0]
+    H      = inputs_embeds.shape[2]
+
+    if fast_embeds is None:
+        fast_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
+    if state_embeds is None:
+        state_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
+    n_state = state_embeds.shape[1]
+    L_latent = inputs_embeds.shape[1]
+
+    past_kv = None
+    n_act = 0
+    for i in range(split_step):
+        timesteps = self.t_embedder(time.expand(B)).unsqueeze(1)
+        noisy_act = self.x_embedder(x_t)
+        act_parts = [fast_embeds]
+        if n_state > 0:
+            act_parts.append(state_embeds)
+        act_parts += [timesteps, noisy_act]
+        act_seq = torch.cat(act_parts, dim=1)
+        n_act = act_seq.shape[1]
+
+        if past_kv is None:
+            full_embeds = torch.cat([inputs_embeds, act_seq], dim=1)
+            outputs = self.model(
+                inputs_embeds=full_embeds,
+                position_ids=position_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_kv,
+                use_cache=True,
+                latent_indexes=torch.arange(0, L_latent, device=device),
+                action_indexes=torch.arange(L_latent, L_latent + n_act, device=device),
+                tactile_indexes=torch.arange(0, 0, device=device),
+            )
+        else:
+            past_kv.crop(-n_act)
+            extended_pos = self.model._extend_position_ids(position_ids, n_act, 0)
+            act_pos = extended_pos[..., -n_act:]
+            outputs = self.model(
+                inputs_embeds=act_seq,
+                position_ids=act_pos,
+                past_key_values=past_kv,
+                use_cache=True,
+                latent_indexes=torch.arange(0, 0, device=device),
+                action_indexes=torch.arange(0, n_act, device=device),
+                tactile_indexes=torch.arange(0, 0, device=device),
+            )
+
+        hidden = outputs.last_hidden_state
+        v_act  = self.final_layer(hidden[:, -n_chunk:, :])
+        x_t    = x_t + dt * v_act
+        time   = time + dt
+        past_kv = outputs.past_key_values
+
+    # `time` is now τ_split.  Refresh KV with the partially-denoised state
+    # at τ_split so the tactile expert attends to a coherent action context.
+    if refresh_clean_kv and past_kv is not None:
+        past_kv.crop(-n_act)
+        split_timesteps = self.t_embedder(
+            time.expand(B)
+        ).unsqueeze(1)
+        split_actions = self.x_embedder(x_t)
+        clean_parts = [fast_embeds]
+        if n_state > 0:
+            clean_parts.append(state_embeds)
+        clean_parts += [split_timesteps, split_actions]
+        clean_seq = torch.cat(clean_parts, dim=1)
+        n_act_final = clean_seq.shape[1]
+        extended_pos = self.model._extend_position_ids(position_ids, n_act_final, 0)
+        act_pos_final = extended_pos[..., -n_act_final:]
+        _ = self.model(
+            inputs_embeds=clean_seq,
+            position_ids=act_pos_final,
+            past_key_values=past_kv,
+            use_cache=True,
+            latent_indexes=torch.arange(0, 0, device=device),
+            action_indexes=torch.arange(0, n_act_final, device=device),
+            tactile_indexes=torch.arange(0, 0, device=device),
+        )
+        n_action_in_cache = n_act_final
+    else:
+        n_action_in_cache = n_act
+
+    tau_split = float(time.item())
+    return x_t, past_kv, n_action_in_cache, tau_split
+
+
+def _patched_tactile_flow_train_step(
+    self,
+    cached_kv,
+    latent_position_ids,
+    n_action_in_cache: int,
+    x_tau,
+    tau,
+    tactile_f6=None,
+    tactile_deform=None,
+    tactile_codes=None,
+    tactile_f6_history=None,
+):
+    """ORIGAMI-PATCH (§7.1 patch 7): identical to upstream `tactile_flow_train_step` except
+    `dtype` is taken from `x_tau` instead of hardcoded `torch.bfloat16` -- see patch 7's
+    module-docstring section. Whole method copied (not isolable into a small helper)."""
+    device = x_tau.device
+    # ORIGAMI-PATCH (§7.1 patch 7): ambient dtype, not a hardcoded bf16 literal.
+    dtype  = x_tau.dtype
+    B      = x_tau.shape[0]
+    n_chunk = x_tau.shape[1]
+
+    tac_obs = self._embed_tactile_observations(
+        tactile_f6, tactile_deform, device, dtype,
+        tactile_codes=tactile_codes,
+        tactile_f6_history=tactile_f6_history)
+    n_obs = tac_obs.shape[1]
+
+    tau_emb = self.t_embedder(tau.to(dtype)).unsqueeze(1)            # [B, 1, H]
+    x_emb   = self.x_embedder(x_tau.to(dtype))                       # [B, n_chunk, H]
+    full_embeds = torch.cat([tac_obs, tau_emb, x_emb], dim=1)
+    n_tac_seq = full_embeds.shape[1]
+
+    extended_pos = self.model._extend_position_ids(
+        latent_position_ids, n_action_in_cache, n_tac_seq)
+    tac_pos = extended_pos[..., -n_tac_seq:]
+
+    outputs = self.model(
+        inputs_embeds=full_embeds,
+        position_ids=tac_pos,
+        past_key_values=cached_kv,
+        use_cache=True,
+        latent_indexes=torch.arange(0, 0, device=device),
+        action_indexes=torch.arange(0, 0, device=device),
+        tactile_indexes=torch.arange(0, n_tac_seq, device=device),
+    )
+    hidden = outputs.last_hidden_state
+    v_pred = self.final_layer_tactile(hidden[:, -n_chunk:, :])
+    return v_pred
+
+
 def apply() -> None:
-    """Apply all six patches. Idempotent; safe to call multiple times."""
+    """Apply all seven patches. Idempotent; safe to call multiple times."""
     import qwen_vla.modeling_qwen3vl_mot as modeling_qwen3vl_mot
     import qwen_vla.modeling_vla as modeling_vla
 
@@ -494,3 +686,6 @@ def apply() -> None:
     modeling_vla.Qwen3VLVLAModel.get_rope_index = _patched_get_rope_index
 
     modeling_vla.Qwen3VLVLAModel.from_pretrained_qwen3vl = classmethod(_patched_from_pretrained_qwen3vl)
+
+    modeling_vla.Qwen3VLVLAModel.forward_flow_action_partial = _patched_forward_flow_action_partial
+    modeling_vla.Qwen3VLVLAModel.tactile_flow_train_step = _patched_tactile_flow_train_step

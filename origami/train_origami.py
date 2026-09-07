@@ -1622,13 +1622,23 @@ def train(args):
                     if p.requires_grad and any(nd in n for nd in no_decay)],
          "weight_decay": 0.0},
     ]
-    # ORIGAMI-DELTA (§7.2 item 3): --optim {adamw,adamw8bit} -- bf16 params make torch's
-    # AdamW hold bf16 moments; bitsandbytes' 8-bit optimizer states cut that ~4x.
+    # ORIGAMI-DELTA (§7.2 item 3): --optim {adamw,adamw8bit,paged_adamw8bit} -- bf16 params
+    # make torch's AdamW hold bf16 moments; bitsandbytes' 8-bit optimizer states cut that ~4x.
     # bitsandbytes is a GPU-only, training-only dependency -- imported lazily so non-8bit
     # runs (and all CPU-only tests) never need it installed.
-    if getattr(args, "optim", "adamw") == "adamw8bit":
+    # ORIGAMI-DELTA: paged_adamw8bit added after TRAINING.md's A100 40GB smoke test OOM'd in
+    # `accelerator.backward` even at the floor (`--train_bsz_per_gpu 1`) -- fp32 params
+    # (~15.4 GB) + fp32 grads (~15.4 GB) + adamw8bit's own state (~7.7 GB) already sit right
+    # at the 40 GB ceiling (confirmed: OOM asked for just 48 MiB more with 15.5 MiB free), so
+    # there's no batch/accum knob left to turn within this tier. bitsandbytes' *paged* 8-bit
+    # Adam is the same algorithm, backed by CUDA unified/pinned memory that pages to host RAM
+    # instead of hard-OOMing when the GPU is this tight -- a memory-management change, not a
+    # precision or optimizer-math change.
+    optim_name = getattr(args, "optim", "adamw")
+    if optim_name in ("adamw8bit", "paged_adamw8bit"):
         import bitsandbytes as bnb
-        optimizer = bnb.optim.AdamW8bit(param_groups, lr=args.learning_rate)
+        cls = bnb.optim.PagedAdamW8bit if optim_name == "paged_adamw8bit" else bnb.optim.AdamW8bit
+        optimizer = cls(param_groups, lr=args.learning_rate)
     else:
         optimizer = torch.optim.AdamW(param_groups, lr=args.learning_rate)
 
@@ -1796,6 +1806,24 @@ def train(args):
             batch = {k: (v.to(device) if torch.is_tensor(v) else v)
                      for k, v in batch.items()}
             raw_model = accelerator.unwrap_model(model)
+
+            # ORIGAMI-DELTA: `accelerator.prepare(model)` only autocast-wraps the top-level
+            # `model.forward` (confirmed by reading accelerate/accelerator.py's
+            # `prepare_model`), but this loop never calls `model(...)` -- it calls
+            # `raw_model.<method>(...)` and `model.model(...)` directly throughout, which
+            # bypasses that wrapper entirely. Under `single_gpu_bf16.yaml`'s plain
+            # `mixed_precision: bf16` (no DeepSpeed), that meant the *whole* forward+backward
+            # ran in full fp32 -- not the "fp32 master weights, bf16 autocast forward/backward"
+            # TRAINING.md's memory-tier table assumed -- roughly doubling activation/gradient
+            # memory and leaving even `--train_bsz_per_gpu 1` OOM'ing in `accelerator.backward`
+            # on a 40 GB A100 (confirmed: identical ~38.85 GiB allocated / OOM on a 48 MiB
+            # allocation regardless of optimizer choice, i.e. before the optimizer's own memory
+            # is ever touched -- ruling out adamw8bit/paged_adamw8bit as the lever here).
+            # Entered/exited manually (not `with`) so the existing forward-pass block below
+            # doesn't need reindenting; exited right after `loss` is finalized, before
+            # `accelerator.backward`, which doesn't need to run under autocast itself.
+            _autocast_ctx = accelerator.autocast()
+            _autocast_ctx.__enter__()
 
             inputs_embeds = raw_model.prepare_inputs_embeds(
                 input_ids=batch["input_ids"],
@@ -1979,7 +2007,18 @@ def train(args):
 
                 with torch.no_grad():
                     vit_out = raw_model.visual(f_pv, grid_thw=f_thw)
-                    features = vit_out[0] if isinstance(vit_out, (tuple, list)) else vit_out
+                    # ORIGAMI-DELTA: same vision-output unwrapping bug trex_patch.py's patch 3
+                    # fixes for prepare_inputs_embeds -- raw_model.visual(...) returns a
+                    # BaseModelOutputWithDeepstackFeatures (a ModelOutput, not tuple/list) on
+                    # our pinned transformers (5.16.x), so the old
+                    # `vit_out[0] if isinstance(vit_out, (tuple, list)) else vit_out` fell into
+                    # the else branch and `features` became the whole ModelOutput; slicing it
+                    # below (`features[offset:offset+n_tok]`) then did ModelOutput's
+                    # tuple-of-fields indexing instead of a real token slice, handing
+                    # `frame_tokens` a `tuple` (crashing at `.unsqueeze` below) instead of a
+                    # `[n_tok, H]` tensor. Reuse trex_patch.py's helper, which already handles
+                    # both transformers eras.
+                    features = _trex_patch.extract_merged_vision_features(vit_out)
 
                     # Adaptive pool each frame to T_per_frame tokens
                     merge = getattr(raw_model.visual, "spatial_merge_size", 2)
@@ -2012,6 +2051,8 @@ def train(args):
                 loss = loss + args.cascaded_loss_weight * loss_tac
             if torch.is_tensor(loss_flare):
                 loss = loss + args.flare_loss_weight * loss_flare
+
+            _autocast_ctx.__exit__(None, None, None)
 
             metric.update(loss, loss_act, loss_tac, loss_flare)
             accelerator.backward(loss)
@@ -2136,7 +2177,8 @@ if __name__ == "__main__":
     parser.add_argument("--train_latent_last_n", type=int, default=0,
                         help="Number of trailing decoder layers' latent-expert params "
                              "left trainable when --freeze_latent_expert 1.")
-    parser.add_argument("--optim", type=str, default="adamw", choices=["adamw", "adamw8bit"])
+    parser.add_argument("--optim", type=str, default="adamw",
+                         choices=["adamw", "adamw8bit", "paged_adamw8bit"])
     parser.add_argument("--action_loss_weight", type=float, default=1.0,
                         help="Weight on the action-expert flow loss (§7.5-E phase 0: "
                              "0.1 alongside --flare_loss_weight 1.0 --cascaded_loss_weight 0).")
