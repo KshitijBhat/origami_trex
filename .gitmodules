@@ -1,3 +1,4 @@
 [submodule "T-Rex"]
 	path = T-Rex
-	url = https://github.com/ZhuoyangLiu2005/T-Rex.git
+	url = https://github.com/KshitijBhat/T-Rex.git
+	branch = fix/frame-timestamp-drift-skip
