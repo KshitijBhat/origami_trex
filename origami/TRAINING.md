@@ -96,6 +96,16 @@ flag unset (`load_deform_encoder_weights` prints a harmless `Warning: DeformEnco
 not found at` and no-ops, then the resume step overwrites those weights anyway -- confirmed in
 this session's logs).
 
+### Download the dataset
+
+```bash
+mkdir data_trex_origami
+cd data_trex_origami
+export HF_TOKEN=<token>
+hf download kshitij-hf/eef62_train --repo-type dataset --local-dir ./eef62_train
+hf download kshitij-hf/eef62_val --repo-type dataset --local-dir ./eef62_val
+```
+
 ## 3. Before spending real GPU-hours: check the tactile VQ-VAE (recommended, not required)
 
 `origami/PROGRESS.md`'s G15 gate **FAILED** against this exact midtrain checkpoint: its
