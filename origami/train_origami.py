@@ -85,6 +85,10 @@ def _world_size() -> int:
     return dist.get_world_size() if dist.is_initialized() else 1
 
 
+def _rank() -> int:
+    return dist.get_rank() if dist.is_initialized() else 0
+
+
 def _rot6d_to_mat(rot6d):
     """6D rotation (first two columns) → 3×3 rotation matrix."""
     col1 = rot6d[:3]
@@ -160,6 +164,21 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 # ────────────────────────────────────────────────────────────────────────────
 
 
+# ORIGAMI-DELTA (§7.2 item 2, EpisodeGroupedSampler support): TRexLeRobotDataset /
+# DelayedTRexLeRobotDataset expose no `_cum_frames`/`_num_episodes` of their own -- read
+# per-episode cumulative end-of-episode frame index + episode count from the wrapped
+# LeRobotDataset's own metadata instead. `dataset_to_index` is already the dataset-global
+# cumulative frame count at each episode's end, in `episode_index` order (REDESIGN_PLAN.md
+# §1.1's `meta/episodes/**.parquet` schema) -- sorted defensively rather than assumed, since
+# nothing guarantees row order for an arbitrary LeRobot version.
+def _episode_cum_frames(dataset):
+    episodes = dataset.ds.meta.episodes
+    ep_idx = np.asarray(episodes["episode_index"])
+    to_idx = np.asarray(episodes["dataset_to_index"], dtype=np.int64)
+    order = np.argsort(ep_idx, kind="stable")
+    return to_idx[order], int(dataset.ds.num_episodes)
+
+
 class EpisodeGroupedSampler(_DistributedSampler):
     """Distributed sampler that emits each episode's frames contiguously so
     that the per-worker episode cache stays warm. Episode *order* is shuffled
@@ -169,10 +188,23 @@ class EpisodeGroupedSampler(_DistributedSampler):
 
     def __init__(self, dataset, num_replicas=None, rank=None,
                  shuffle=True, seed=0, drop_last=True):
+        # ORIGAMI-DELTA (§7.2 item 2): torch's own DistributedSampler.__init__ calls bare
+        # dist.get_world_size()/dist.get_rank() whenever num_replicas/rank is None -- raises
+        # on any non-distributed launch (our §7.3 recipe: `--num_processes 1`, no process
+        # group). Resolve both through the same dist.is_initialized() guard as _world_size()
+        # before forwarding to torch's constructor.
+        if num_replicas is None:
+            num_replicas = _world_size()
+        if rank is None:
+            rank = _rank()
         super().__init__(dataset, num_replicas=num_replicas, rank=rank,
                          shuffle=shuffle, seed=seed, drop_last=drop_last)
-        self._cum_frames = dataset._cum_frames.copy()
-        self._num_episodes = dataset._num_episodes
+        # ORIGAMI-DELTA (§7.2 item 2): TRexLeRobotDataset/DelayedTRexLeRobotDataset carry no
+        # `_cum_frames`/`_num_episodes` attributes -- those never existed on the real dataset
+        # class (only on an assumed-but-never-built shape). Derive episode boundaries from the
+        # wrapped LeRobotDataset's own per-episode index table instead (`dataset_to_index` is
+        # the cumulative end-of-episode frame count, §1.1's `meta/episodes/**.parquet` schema).
+        self._cum_frames, self._num_episodes = _episode_cum_frames(dataset)
         self._frame_counts = np.diff(self._cum_frames, prepend=0)
         self._orig_starts = np.zeros(self._num_episodes, dtype=np.int64)
         if self._num_episodes > 1:
@@ -1176,6 +1208,23 @@ def save_checkpoint(model, processor, accelerator, args, epoch, global_step, sta
     logger.info(f"Checkpoint {epoch}-{global_step} saved.")
 
 
+# ORIGAMI-DELTA (§7.2 item 4, resume-state fix): factored out of train()'s resume block so
+# the epoch/global_step round trip is unit-testable without a real Accelerator/model/dataset.
+def _load_training_state(resume_checkpoint: str):
+    """Read (start_epoch, global_step) back from a checkpoint's training_state.json, for
+    --resume_full_state. Returns None if the file doesn't exist (caller keeps its own
+    zero-valued defaults in that case -- matches --resume_full_state's original "state/ exists
+    but training_state.json doesn't" tolerance)."""
+    ts_path = os.path.join(resume_checkpoint, "training_state.json")
+    if not os.path.isfile(ts_path):
+        return None
+    with open(ts_path) as f:
+        ts = json.load(f)
+    start_epoch = int(ts.get("epoch", 0)) + 1
+    global_step = int(ts.get("global_step", 0))
+    return start_epoch, global_step
+
+
 class TrainingMetrics:
     def __init__(self, device):
         self.n_step       = 0
@@ -1676,32 +1725,48 @@ def train(args):
     # batch_sampler in BatchSamplerShard and shard a SECOND time, giving each
     # rank 1/world_size² of the data. We move train batches to device
     # manually inside the loop.
+    #
+    # ORIGAMI-DELTA (§7.2 item 4, resume-state fix): lr_scheduler MUST also go through
+    # accelerator.prepare() -- accelerate's save_state()/load_state() only persist the
+    # schedulers in `accelerator._schedulers`, which prepare() is what populates (confirmed
+    # by reading accelerate's own save_state/AcceleratedScheduler source: an unprepared
+    # scheduler is invisible to checkpointing). Without this, --resume_full_state 1 restores
+    # the optimizer's momentum/state correctly (it *was* prepared) but the LR schedule
+    # silently restarts from step 0 (fresh warmup) every resume -- found while verifying the
+    # user's resume-correctness requirement against a real checkpoint/resume round trip.
+    # Harmless no-op for stepping semantics at our recipe's `--num_processes 1`
+    # (AcceleratedScheduler.step() loops `num_processes` times per call; num_processes=1
+    # here), so this only changes what gets checkpointed, not how the schedule advances.
+    # ORIGAMI-DELTA (§7.2 item 4): lr_scheduler added to both prepare() calls -- see above.
     if val_dataloader is not None:
-        model, optimizer, val_dataloader = accelerator.prepare(
-            model, optimizer, val_dataloader)
+        model, optimizer, lr_scheduler, val_dataloader = accelerator.prepare(
+            model, optimizer, lr_scheduler, val_dataloader)
     else:
-        model, optimizer = accelerator.prepare(model, optimizer)
+        model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
 
     # ORIGAMI-DELTA (§7.2 item 4): resume the training-loop position + optimizer/scheduler
     # state written by save_checkpoint's `state/`, opt-in via --resume_full_state (distinct
     # from --resume_checkpoint, which only loads model weights -- what §7.5-E's phase
     # chaining uses for a fresh optimizer/schedule).
     start_epoch = 0
+    global_step = 0
     if getattr(args, "resume_full_state", 0) and args.resume_checkpoint:
         state_dir = os.path.join(args.resume_checkpoint, "state")
         if os.path.isdir(state_dir):
             accelerator.load_state(state_dir)
-            ts_path = os.path.join(args.resume_checkpoint, "training_state.json")
-            if os.path.isfile(ts_path):
-                with open(ts_path) as f:
-                    ts = json.load(f)
-                start_epoch = int(ts.get("epoch", 0)) + 1
-            accelerator.print(f"Resumed full state from {state_dir} (start_epoch={start_epoch}).")
+            loaded = _load_training_state(args.resume_checkpoint)
+            if loaded is not None:
+                start_epoch, global_step = loaded
+            accelerator.print(
+                f"Resumed full state from {state_dir} "
+                f"(start_epoch={start_epoch}, global_step={global_step}, "
+                f"lr={lr_scheduler.get_last_lr()[0]:.3e}).")
         else:
             accelerator.print(f"WARN: --resume_full_state set but no {state_dir}; starting fresh.")
 
+    # ORIGAMI-DELTA (§7.2 item 4): global_step's declaration moved up next to start_epoch's
+    # (above) so the resume block can set it from training_state.json -- see above.
     metric = TrainingMetrics(device=torch.cuda.current_device())
-    global_step = 0
     T_per_frame = args.n_flare_tokens_per_frame
     S_steps = args.n_flare_steps
     K = T_per_frame * S_steps  # total flare tokens

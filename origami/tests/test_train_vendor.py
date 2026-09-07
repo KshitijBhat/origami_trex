@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from origami.constants import REPO_ROOT
+from origami.train_origami import _episode_cum_frames
 
 TREX_ROOT = REPO_ROOT / "T-Rex"
 VENDORED_PATH = REPO_ROOT / "origami" / "train_origami.py"
@@ -85,3 +86,74 @@ def test_every_changed_hunk_carries_origami_delta_marker():
 def test_vendored_file_is_valid_python():
     import ast
     ast.parse(VENDORED_PATH.read_text())
+
+
+def _make_fake_trex_dataset(cum_frames):
+    """A stand-in for TRexLeRobotDataset/DelayedTRexLeRobotDataset exposing exactly the
+    `.ds.meta.episodes` / `.ds.num_episodes` surface `_episode_cum_frames` reads -- the real
+    dataset classes carry no `_cum_frames`/`_num_episodes` of their own (see the bug this
+    covers below)."""
+    import numpy as np
+    from types import SimpleNamespace
+
+    cum_frames = np.asarray(cum_frames, dtype=np.int64)
+    total = int(cum_frames[-1])
+    meta = SimpleNamespace(episodes={
+        "episode_index": list(range(len(cum_frames))),
+        "dataset_to_index": cum_frames.tolist(),
+    })
+
+    class _FakeDataset:
+        ds = SimpleNamespace(meta=meta, num_episodes=len(cum_frames))
+
+        def __len__(self):
+            return total
+
+    return _FakeDataset()
+
+
+def test_episode_cum_frames_reads_dataset_to_index_from_lerobot_meta():
+    """Real bug found running the first real `train_origami.py` invocation against the
+    full-scale eef62_train root (§12 step 11's pilot, pulled forward into verification):
+    `EpisodeGroupedSampler.__init__` read `dataset._cum_frames`/`dataset._num_episodes` --
+    attributes that never existed on the real `TRexLeRobotDataset`/`DelayedTRexLeRobotDataset`
+    classes (verified by reading T-Rex/qwen_vla/lerobot_dataset.py's actual `__init__` --
+    it stores only `self.ds`, the wrapped `lerobot.datasets.lerobot_dataset.LeRobotDataset`).
+    No test had ever constructed `EpisodeGroupedSampler` against a real dataset instance
+    before this bug surfaced for real, hence it went uncaught since step 9. Fix: derive
+    episode boundaries from `dataset.ds.meta.episodes["dataset_to_index"]` (confirmed against
+    a real merged root: `dataset_to_index`'s last value equals the dataset's total frame
+    count, and rows come pre-sorted by `episode_index`) instead.
+    """
+    fake_dataset = _make_fake_trex_dataset([5, 12, 20])
+    cum_frames, num_episodes = _episode_cum_frames(fake_dataset)
+    assert num_episodes == 3
+    assert list(cum_frames) == [5, 12, 20]
+
+
+def test_episode_grouped_sampler_works_without_a_process_group():
+    """`EpisodeGroupedSampler(dataset, shuffle=True, ...)` is called at its one real call site
+    (train()'s dataloader construction) with num_replicas/rank left at their None defaults,
+    which torch's own `DistributedSampler.__init__` resolves via bare `dist.get_world_size()`/
+    `dist.get_rank()` -- raising `ValueError: Default process group has not been initialized`
+    on any non-distributed launch, i.e. every invocation of our §7.3 recipe
+    (`accelerate launch --num_processes 1`, no process group). Asserts the fix
+    (`_world_size()`/`_rank()` defaults, mirroring the existing `TrainingMetrics.world_size`
+    pattern) makes single-process construction succeed and resolve to a 1-replica, rank-0
+    sampler -- without needing `torch.distributed` initialized at all, exactly the CI/test
+    environment this suite already runs in.
+    """
+    from origami.train_origami import EpisodeGroupedSampler
+    import torch.distributed as dist
+
+    assert not dist.is_initialized(), "test assumes no process group -- the real-world failure mode"
+
+    fake_dataset = _make_fake_trex_dataset([5, 12, 20])
+    sampler = EpisodeGroupedSampler(fake_dataset, shuffle=True, seed=0, drop_last=True)
+    assert sampler.num_replicas == 1
+    assert sampler.rank == 0
+    # __iter__ must also run end-to-end (exercises the episode-grouping logic downstream
+    # of the fixed __init__, not just construction).
+    indices = list(sampler)
+    assert len(indices) == sampler.num_samples
+    assert all(0 <= i < 20 for i in indices)

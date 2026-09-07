@@ -15,8 +15,8 @@ handoff artifact if context is compacted.
 | 6 | convert.py | **done** | smoke-tested against real fixture season (1 episode full-length + truncated unit tests); G4/G4b, G6 pass in `test_convert.py` |
 | 7 | fetch.py + merge.py + prepare.py | **done** (see notes) | - |
 | 8 | verify.py | **done** (scoped to gates checkable now; see notes) | - |
-| 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | **done** (see notes; real training run itself is GPU-only, untested here) | - |
-| 10 | Full prep run (user-executed) | not started | - |
+| 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | **done** (see "Step 9/10 continued" notes below -- real end-to-end model construction against the real 101-season root + real midtrain checkpoint now exercised for real; 4 more real bugs found+fixed) | - |
+| 10 | Full prep run (user-executed) | **done, both splits** -- train: 101/101 seasons, `data_trex_origami/eef62_train/`, 8 379 271 frames, 0 truncated; val: 25/25 seasons, `data_trex_origami/eef62_val/`, 355 episodes, 2 120 726 frames, 0 truncated (background run, started outside this session, finished between sessions -- confirmed via its now-complete `manifest.jsonl` and the merged root's own metadata, not something this session ran). **Both roots share the identical `LockedConfig` digest** (`0bb3b0aa...`), confirming §3.2's shared-frame requirement holds across the two independent prep runs. | G18/G8/G8b/G6/G4 **PASS on both roots** (`verify.py all`, first runs at full production scale, not fixture) |
 | 10b | diagnose_shift.py + eval_offline.py --zero-shot | **done** (see notes; both run for real against the real T-Rex midtrain checkpoint + the `eef62_train_smalltest` fixture, not just fixture-scale) | G15 **FAIL**; zero-shot floor recorded, does not beat hold-position |
 | 10c | refit_vqvae_stats.py (if needed) | not started -- **G15 failed, so this is next**, but stopping here per this session's instruction | - |
 | 11 | Pilot train 2000 steps (user-executed) | not started | - |
@@ -40,9 +40,9 @@ handoff artifact if context is compacted.
 | G4 / G4b | Chunk parity | **PASS** | `test_g4_chunk_reconstructs_abs_target` (test_convert.py): chunk-base delta9 (k=0) + `observation.state` FK pose reconstructs `action_abs` FK pose to <1e-4 on real fixture frames |
 | G5 | Deform tile mapping | not started | decode.py written, not yet run against real data with known-force frames (only the round-trip below (G6) has been checked so far) |
 | G6 | Deform video round-trip | **PASS** | `test_deform_video_round_trips_losslessly`: source luma tile == decoded 3-ch-replicated tile, exact (`assert_array_equal`), on real fixture data |
-| G7 / G7b | Loader parity / forward pass | not started | - |
-| G8 / G8b | Reservoir stats / tactile mask | **PASS (G8b redefined -- see note)** | G8: q01/q99 rel err < 1% (reservoir exact at this scale); G8b: masking mechanism verified deterministically; on THIS fixture only 1/60 tactile dims cross the 1e-3 span threshold (not the full ring/pinky blocks the plan's original fixture showed) |
-| G9a / G9b | Smoke train / resume | not started | - |
+| G7 / G7b | Loader parity / forward pass | not started | dataset construction against the real 101-season root succeeds (`[LeRobot] eef62_train: 8379271 frames...`), but the dataloader/collate_fn was never actually iterated -- the smoke train OOMs at `accelerator.prepare()` (model→GPU) before the first `__getitem__` call. See "Step 9/10 continued" below |
+| G8 / G8b | Reservoir stats / tactile mask | **PASS (G8b redefined -- see note)** | G8: q01/q99 rel err < 1% (reservoir exact at this scale); G8b: masking mechanism verified deterministically; on THIS fixture only 1/60 tactile dims cross the 1e-3 span threshold (not the full ring/pinky blocks the plan's original fixture showed). **Also independently re-confirmed via `verify.py all` on the real 101-season train root this session.** |
+| G9a / G9b | Smoke train / resume | **blocked (this session's GPU)** -- see notes | real model construction + real midtrain-checkpoint resume succeed end-to-end (4 real bugs found+fixed getting there); the training loop itself OOMs at `accelerator.prepare()`'s `model.to(device)` on this session's 16 GB RTX 5060 Ti -- the real model is 4255.7M params / 3844.7M trainable at fp32 master weights (~17 GB), before any optimizer state or activations, which does not fit 16 GB even at bsz=1 + gradient checkpointing. Matches REDESIGN_PLAN.md §7.3's own "40 GB budget" assumption -- not a code bug. The checkpoint-save/`--resume_full_state` mechanism itself (the part G9b actually gates: optimizer state + LR schedule continuity) was instead verified directly against real `accelerate` machinery in `test_checkpoint_resume.py` (CPU-only, model-size-independent) -- see notes |
 | G10 | serve_zenoh SDK checks | not started | - |
 | G11 | Shadow replay | not started | - |
 | G12 | Prep<->deploy parity | not started | - |
@@ -51,7 +51,7 @@ handoff artifact if context is compacted.
 | G15 | VQ-VAE codebook health | **FAIL** | real midtrain checkpoint's `tacf6_vqvae_{min,max,mask}` applied to 200 000 real origami F6 windows: L-ring/L-pinky collapse to 1/64 codes (top-code frac ~1.0, normalized entropy ~0); L/R-middle, R-ring/R-pinky also near-collapsed (18-40/64 codes used but >97% mass on 1 code); only thumb/index (both hands) use the codebook meaningfully (43-63/64 codes, entropy 0.45-0.69). Clamp-saturation only 0.85% (not the failure mode -- collapse, not saturation, per §11.8's "either way" framing) |
 | G16 | Token budget | not started | - |
 | G17 | Delay-curriculum parity | **PARTIAL** | loader half (`tactile_f6s_delayed`/`tactile_f6_history` == the extended F6 window's slice at each configured delay) passes in `test_delayed_lerobot_dataset.py`, real fixture data; the deploy-parity half needs `serve_zenoh.py` (step 13), not implemented yet |
-| G18 | Season-set integrity | not started | - |
+| G18 | Season-set integrity | **PASS** | `verify.py all --root data_trex_origami/eef62_train --split train`: 101 seasons match the parsed train split, exact, on the real (not fixture) merged root |
 
 ## Notes / surprises
 
@@ -717,3 +717,194 @@ as "10 done" in a future session.
   the test/PROGRESS.md's framing. **Not fixed here** -- out of step 10b's scope and the
   right fix (which season, and whether anything else quietly assumed the old exclusion) is a
   judgment call, not a mechanical one.
+
+## Step 9/10 continued -- the real 101-season train root exists; first real train_origami.py
+## run against it finds and fixes 4 more real bugs; checkpoint/resume correctness verified
+
+**Step 10's train side is done for real, outside this session.** `data_trex_origami/eef62_train/`
+is a genuine `prepare.py` output: 101/101 train seasons, 1414 episodes, **8 379 271 frames**,
+0 truncated episodes, `image_size=224` (wire resolution, per D7 -- `--image_size 384 384` is a
+training-time loader upsample, not what's stored), 115 GB on disk (close to §5.6's ~107 GB
+estimate). `data_trex_origami/eef62_val_shards/` (a val prep run) was **actively running in the
+background, started outside this session** -- 17/25 seasons done by the end of this session,
+left running, not disturbed. `data_trex_origami/eef62_val`/`eef62_val_shards` are NOT this
+session's work; do not claim step 10 credit for them.
+
+**`verify.py all` run against the real train root for the first time (previously only
+fixture/2-shard-scale): G18/G8/G8b/G6/G4 all PASS** (`python -m origami.verify all --root
+data_trex_origami/eef62_train --split train --g6-sample 200 --g4-sample 200`). No prior session
+had run the root-scale gates past a synthetic 2-season merge.
+
+**Then: the first-ever real `train_origami.py` invocation against real data + the real midtrain
+checkpoint + the real `Qwen/Qwen3-VL-2B-Instruct` base model** (both downloaded this session,
+gitignored: `checkpoints/midtrain/` already existed from step 10b; the base model was new,
+~1.9 GB, `HfApi().model_info` confirms it's public -- no `HF_TOKEN` needed, unlike the gated
+dataset). This is one step further than step 10b's `eval_offline.py`/`diagnose_shift.py`, which
+only ever exercised the **inference** path (`CascadedServer`/`model_load`) -- nothing had called
+`train()`'s actual training-loop code before. Found and fixed 4 more real bugs on the way,
+each hit in sequence as the previous one was fixed (a smoke train with
+`--max_steps 4/5 --train_bsz_per_gpu 1 --gradient_checkpointing 1 --optim adamw --num_workers 2`,
+`WANDB_MODE=disabled`):
+
+1. **`trex_patch.py` patch 6 -- `Qwen3VLVLAModel.from_pretrained_qwen3vl`'s visual-tower copy.**
+   `vla.visual = base_model.visual` assumes `Qwen3VLForConditionalGeneration.visual` is a
+   delegating `@property` (true on T-Rex's own transformers pin per the upstream code's own
+   comment) -- confirmed by direct source inspection that on our pinned transformers (5.16.x)
+   no such property exists at all (`Qwen3VLForConditionalGeneration.__init__` builds only
+   `self.model = Qwen3VLModel(config)`; `Qwen3VLModel.__init__` builds `self.visual` itself).
+   Raises `AttributeError` at model-construction time, before any data. Fixed by replacing the
+   whole classmethod with an identical copy except
+   `vla.visual = base_model.visual if hasattr(base_model, "visual") else base_model.model.visual`
+   -- same strategy as patch 3 for the same kind of transformers-version drift. 2 new tests in
+   `test_trex_patch.py` (now 20, up from 18).
+2. **`EpisodeGroupedSampler.__init__` crashes with no `torch.distributed` process group.**
+   `super().__init__(dataset, num_replicas=None, rank=None, ...)` forwards straight into
+   torch's own `DistributedSampler.__init__`, which unconditionally calls bare
+   `dist.get_world_size()`/`dist.get_rank()` when either is `None` -- raises
+   `ValueError: Default process group has not been initialized` on **any** non-distributed
+   launch, i.e. every invocation of §7.3's own recipe (`accelerate launch --num_processes 1`,
+   no process group). This is `EpisodeGroupedSampler`'s **only real call site**
+   (`train()`'s dataloader construction) and no test had ever constructed it before this
+   session -- latent since step 9. Fixed with the same `_world_size()`/new `_rank()` guard
+   pattern the file already uses elsewhere (`TrainingMetrics.world_size`).
+3. **`EpisodeGroupedSampler.__init__` then crashes on `dataset._cum_frames`/`_num_episodes` --
+   attributes that never existed on the real dataset class.** Reading
+   `T-Rex/qwen_vla/lerobot_dataset.py::TRexLeRobotDataset.__init__` directly: it stores only
+   `self.ds` (the wrapped `lerobot.datasets.lerobot_dataset.LeRobotDataset`) -- no
+   `_cum_frames`/`_num_episodes` of its own. `EpisodeGroupedSampler` was written against an
+   assumed dataset shape that was never built, and (same as bug 2) never actually constructed
+   against a real dataset instance until this session. Fixed with a new
+   `_episode_cum_frames(dataset)` helper reading `dataset.ds.meta.episodes["dataset_to_index"]`
+   (confirmed against the real merged root: its last value equals `dataset.ds.num_frames`, and
+   rows come pre-sorted by `episode_index` -- sorted defensively anyway rather than assumed).
+   Bugs 2+3 both covered in `test_train_vendor.py` (now 5 tests, up from 3): one test isolates
+   `_episode_cum_frames` against a minimal fake `.ds.meta.episodes`/`.ds.num_episodes` surface,
+   one constructs+iterates a real `EpisodeGroupedSampler` end-to-end with no process group.
+4. **Checkpoint/resume correctness -- the user's explicit ask this session, and a real bug
+   found investigating it.** Two separate defects in `train()`'s `--resume_full_state 1` path,
+   confirmed against real `accelerate` (1.14.0) source, not just inferred:
+   * **`lr_scheduler` was never passed to `accelerator.prepare()`** -- only `model`/`optimizer`
+     (and optionally `val_dataloader`) were. `Accelerator.save_state()` only persists the
+     schedulers tracked in `self._schedulers`, and `prepare()` is what populates that list
+     (confirmed by reading `save_state`'s and `AcceleratedScheduler`'s source directly, and by
+     `test_checkpoint_resume.py::test_unprepared_scheduler_state_is_not_captured_by_save_state`
+     reproducing it: no `scheduler.bin` is ever written for an unprepared scheduler). Net
+     effect: `--resume_full_state 1` correctly restored the optimizer's momentum/state (it
+     *was* prepared) but **silently restarted the LR schedule from a fresh warmup on every
+     resume** -- exactly the failure mode the user asked to rule out. Fixed by adding
+     `lr_scheduler` to the existing `accelerator.prepare(model, optimizer, [val_dataloader])`
+     call. Harmless for stepping semantics at this recipe's `--num_processes 1`
+     (`AcceleratedScheduler.step()` loops `num_processes` times per call internally; 1 here) --
+     only changes what gets checkpointed.
+   * **`global_step` was hardcoded to `0` after the resume block, regardless of
+     `--resume_full_state`**, even though `training_state.json` (written by `save_checkpoint`)
+     already recorded the real value. Silently reset `--save_steps` cadence, wandb step
+     numbering, and `--max_steps`/`--val_freq` gating on every resume. Fixed by factoring the
+     epoch/global_step read into a new `_load_training_state(resume_checkpoint)` helper (mirrors
+     the existing `_world_size`/`_rank`/`_episode_cum_frames` extraction pattern for
+     testability) and actually calling it.
+   * **Verified end-to-end with real (not mocked) `accelerate.Accelerator`/`save_state`/
+     `load_state`/`AcceleratedScheduler`**, since the bug was specifically about what that real
+     machinery does and does not track -- CPU-only, model-size-independent, so it runs
+     regardless of GPU availability: `test_checkpoint_resume.py` (5 new tests). The positive
+     case (`test_prepared_scheduler_resumes_at_the_same_lr_and_step`) builds a tiny model +
+     `get_cosine_schedule_with_warmup`, steps it 10 times (confirming the LRs are still rising
+     through warmup, so this isn't a trivially-flat-schedule false pass), saves state, then
+     builds a **second, independent** `Accelerator`+model+optimizer+scheduler (mirroring what a
+     real resumed process looks like) and confirms `load_state()` reproduces the exact saved LR
+     and internal step count, and that continuing to step it matches the closed-form cosine
+     schedule evaluated at the next step -- i.e. the schedule truly continues rather than
+     restarting. `test_load_training_state_*` (3 tests) cover the global_step/epoch half in
+     isolation.
+
+**GPU-memory finding (not a code bug): this session's GPU cannot run the real training loop.**
+After all 4 fixes above, model construction + real midtrain-checkpoint resume succeed fully
+(prints `Model: 4255.7M total, 3844.7M trainable`, `Resumed: missing=4, unexpected=0`, dataset
+opens against the real 8 379 271-frame root) -- but `accelerator.prepare(model, ...)`'s
+`model.to(device)` then raises `CUDA out of memory` on this session's RTX 5060 Ti (16 GB): the
+model's fp32 master weights alone need ~17 GB, **before** any optimizer state, gradients, or
+activations. Confirmed this is upstream's own intended design, not a missing bf16 cast we should
+add: `git -C T-Rex show origin/full-pipeline:scripts/midtrain.py` uses
+`Accelerator(mixed_precision="bf16")` (autocast during forward/backward; parameters stay fp32)
+plus `torch_dtype=torch.bfloat16` only for the discarded weight-extraction `base_model` --
+exactly what our vendored file already does. This matches REDESIGN_PLAN.md §7.3's own table
+("bsz × GPUs `2 × 1`... 40 GB budget") -- **a 16 GB card was never going to fit this recipe**,
+with or without gradient checkpointing (checkpointing saves activation memory, not master-weight
+residency). The `--freeze_latent_expert 1 --train_latent_last_n 8` mitigation ladder in §7.3
+likely does **not** help either, since it reduces optimizer-state memory, not the base model's
+GPU-resident footprint, and this OOM happens before any optimizer state is even allocated --
+flagging this nuance for whoever runs step 11's pilot on a real (≥40 GB) GPU, in case the same
+ladder is reached for.
+
+**4 missing keys on `Resumed: missing=4, unexpected=0`** (printed during model resume, real
+midtrain checkpoint) were not investigated further this session -- worth checking before step 11
+whether these are expected (e.g. buffers the deform-encoder-not-loaded path would leave
+uninitialized) or a real gap; not blocking since G9b's real bar (`missing == 0`) was already
+flagged unmet here but not root-caused.
+
+* Full `origami/tests/` suite this session: patches/fixes added 7 new tests across
+  `test_trex_patch.py` (18→20), `test_train_vendor.py` (3→5), and a new `test_checkpoint_resume.py`
+  (5). First full re-run caught one thing this session's own edits broke:
+  `test_every_changed_hunk_carries_origami_delta_marker` (G0-adjacent, §7.2's "every changed
+  hunk carries an `# ORIGAMI-DELTA:` marker" invariant) failed because the two resume-fix hunks'
+  markers sat >3 lines (the test's search window) from the actual changed lines -- a long
+  explanatory comment block above the `accelerator.prepare(...)` call, and no comment at all
+  at the `global_step = 0` deletion site. Fixed by adding two short one-line markers directly
+  adjacent to each changed line (pointing back at the fuller explanation above), not by
+  weakening the test. **Full suite, final state: 99 passed, 1 failed (the known pre-existing
+  `test_splits.py::test_fixture_season_absent_from_both_splits`, unrelated to this session --
+  see the dedicated note above), 7 skipped, ~650s.**
+
+## Step 10 confirmed complete + a real launch-config gap found preparing TRAINING.md
+
+**Val split finished between sessions.** `data_trex_origami/eef62_val/` is now a complete,
+genuine `prepare.py` output (the background run flagged "in progress, 17/25" in the previous
+note finished on its own, untouched by this session): 25/25 val seasons, 355 episodes,
+2 120 726 frames, 0 truncated, 29 GB. `verify.py all --root data_trex_origami/eef62_val --split
+val` -- **G18/G8/G8b/G6/G4 all PASS**, first run of these gates against the real val root.
+`origami_prep.json`'s `locked_digest` matches the train root's exactly
+(`0bb3b0aa13f92a3fac91ea1c8127774e63cf881f`), confirming both splits were converted under the
+identical `LockedConfig` §3.2 requires -- **step 10 is now fully done, both splits, gates
+passing at production scale.**
+
+**Real gap found while preparing to document a training run for the user's own (larger) GPU:
+`deepspeed` and `bitsandbytes` are not installed, and neither is declared in
+`pyproject.toml`.** `origami/train_origami.sh` (§7.3's literal recipe) launches via
+`accelerate launch --config_file T-Rex/config/sft_qwen.yaml`, and that **upstream** config file
+(never touched -- T-Rex/ stays byte-identical, D2) sets `distributed_type: DEEPSPEED`,
+`num_processes: 8`, ZeRO stage 2 -- i.e. it is upstream's original 8-GPU config, only ever
+partially overridden by `--num_processes 1` on the CLI (which does not change
+`distributed_type`). Confirmed empirically, not just by reading the config: `import deepspeed`
+raises `ModuleNotFoundError` in this venv, and `--optim adamw8bit` needs `bitsandbytes`, also
+absent (already flagged, less precisely, in step 9's notes: "not installed in this dev venv").
+Nothing in this project had ever actually invoked `accelerate launch` before this session --
+every prior real-forward-pass check (step 10b, and this session's earlier bug-hunting) called
+`origami.train_origami` as a bare Python module, bypassing `accelerate launch` (and therefore
+this config) entirely to iterate faster while chasing the trex_patch/sampler/resume bugs. Since
+DeepSpeed ZeRO stage 2 shards state across ranks and provides **no benefit at world_size 1**
+(single-GPU rental, the expected case for "train on an A100 or H100"), and since
+`accelerator.state.deepspeed_plugin is not None` is already an explicit branch in
+`train_origami.py` (§7.2 item 2 -- the code was written to tolerate DeepSpeed being absent),
+the pragmatic fix for single-GPU is a **new, minimal, non-DeepSpeed accelerate config**, not
+installing DeepSpeed: added `origami/config/single_gpu_bf16.yaml`
+(`distributed_type: 'NO'`, `mixed_precision: bf16`, `num_processes: 1`) as an origami-owned
+sibling to T-Rex's own config (T-Rex/ itself untouched).
+* **Verified for real, not just written:** `accelerate launch --config_file
+  origami/config/single_gpu_bf16.yaml --num_processes 1 -m origami.train_origami ...` launches
+  cleanly (no DeepSpeed import error) and reaches the **exact same point** as this session's
+  earlier bare-`python -m` smoke tests -- model construction, real midtrain-checkpoint resume,
+  real dataset open against the full 8 379 271-frame root, then `CUDA out of memory` at
+  `accelerator.prepare()`'s `model.to(device)`, same ~15 GB/16 MB numbers as before. This
+  confirms two things: (1) the launch harness itself is sound end-to-end up to this session's
+  hardware limit -- nothing about `accelerate launch` vs bare-module invocation changes the
+  outcome; (2) `mixed_precision: bf16` does **not** reduce base weight residency as some might
+  expect -- accelerate's mixed precision keeps fp32 master weights and only autocasts
+  forward/backward, so the ~17 GB fp32-parameter floor is unavoidable at `--num_processes 1`
+  regardless of this config, exactly as reasoned in the "Step 9/10 continued" GPU-memory note
+  above. Confirms that note's finding via an independent launch path, doesn't change it.
+* `pyproject.toml` **not** changed to add `deepspeed`/`bitsandbytes` -- `bitsandbytes` is a
+  genuine, cheap optional install (`uv pip install bitsandbytes`) worth adding on a
+  memory-constrained (~40 GB) card wanting `--optim adamw8bit`; `deepspeed` is deliberately
+  **not** recommended for the single-GPU case this project's rentable hardware (A100/H100)
+  represents -- see `origami/TRAINING.md` (new, this session) for the full writeup and the
+  actual commands to run a pilot (step 11) or full (step 12) training run on real hardware.

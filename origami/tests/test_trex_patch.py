@@ -231,3 +231,32 @@ def test_get_rope_index_is_patched_by_apply():
     trex_patch.apply()
     import qwen_vla.modeling_vla as modeling_vla
     assert modeling_vla.Qwen3VLVLAModel.get_rope_index is trex_patch._patched_get_rope_index
+
+
+# ── Patch 6: from_pretrained_qwen3vl's visual-tower copy ────────────────────────────────
+
+def test_from_pretrained_qwen3vl_is_patched_by_apply():
+    trex_patch.apply()
+    import qwen_vla.modeling_vla as modeling_vla
+    # classmethod descriptors compare unequal by identity across wraps; compare the
+    # underlying function instead (mirrors how classmethod(...) is installed in apply()).
+    assert modeling_vla.Qwen3VLVLAModel.__dict__["from_pretrained_qwen3vl"].__func__ \
+        is trex_patch._patched_from_pretrained_qwen3vl
+
+
+def test_patched_from_pretrained_visual_copy_tolerates_both_transformers_eras():
+    """The one changed line, isolated: `base_model.visual` (older transformers, still a
+    delegating property) and `base_model.model.visual` (our pinned 5.16.x, no such property)
+    must both resolve to the same object without raising."""
+    from types import SimpleNamespace as _SNS
+
+    sentinel = object()
+
+    old_era_base = _SNS(visual=sentinel, model=_SNS(visual=object()))
+    new_era_base = _SNS(model=_SNS(visual=sentinel))  # no `visual` attribute on base itself
+
+    def _copy_visual(base_model):
+        return base_model.visual if hasattr(base_model, "visual") else base_model.model.visual
+
+    assert _copy_visual(old_era_base) is sentinel
+    assert _copy_visual(new_era_base) is sentinel

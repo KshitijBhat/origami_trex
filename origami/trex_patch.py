@@ -88,6 +88,28 @@ picture) and, when the bound function's own signature doesn't accept it (the ``_
 case), calls the real ``transformers`` method directly against the stub's bound `self` --
 exactly what the stub itself does one layer up, since `Qwen3VLModel.get_rope_index` only reads
 `self.config` internally, so a `_RopeStub` duck-types fine as `self` here too.
+
+Patch 6 -- ``Qwen3VLVLAModel.from_pretrained_qwen3vl``'s visual-tower copy (modeling_vla.py).
+Found running the FIRST real ``train_origami.py`` invocation against the real 101-season
+``eef62_train`` root (§12 step 11's pilot, pulled forward into step 10b's verification pass --
+patches 1-5 above only ever exercised the *inference* path via `CascadedServer`/`model_load`;
+nothing had called `from_pretrained_qwen3vl`, the training-time model constructor, for real
+before this). Upstream does ``vla.visual = base_model.visual``, with a comment claiming
+``base_model.visual`` is a ``@property`` that forwards to ``base_model.model.visual`` on
+T-Rex's own transformers pin. On our pinned transformers (5.16.x), confirmed by direct source
+inspection of ``Qwen3VLForConditionalGeneration.__init__`` (constructs only ``self.model =
+Qwen3VLModel(config)`` and ``self.lm_head``, no ``visual`` property at all) and
+``Qwen3VLModel.__init__`` (constructs ``self.visual``/``self.language_model`` directly) --
+the property upstream's comment describes no longer exists; ``base_model.visual`` raises
+``AttributeError: 'Qwen3VLForConditionalGeneration' object has no attribute 'visual'`` at
+**model-construction time**, before any data or forward pass. The rest of the method already
+handles both eras correctly (its own comments show the author was aware ``base_model.model``
+restructures between Qwen2-VL and Qwen3-VL for the state-dict-prefix logic just below) -- only
+this one line assumes the now-gone delegating property. Fix: replace the whole classmethod
+(needed since it is a classmethod body, not an isolable helper) with an identical copy except
+``vla.visual = base_model.visual if hasattr(base_model, "visual") else base_model.model.visual``
+-- covers both transformers eras without needing to know which one is installed, exactly
+patch 3's strategy for the same kind of drift.
 """
 from __future__ import annotations
 
@@ -353,8 +375,104 @@ def _patched_get_rope_index(self, input_ids, image_grid_thw=None, attention_mask
     return fn(input_ids=input_ids, image_grid_thw=image_grid_thw, attention_mask=attention_mask)
 
 
+def _patched_from_pretrained_qwen3vl(
+    cls,
+    pretrained_path: str,
+    action_dim: int = 29,
+    action_chunk: int = 8,
+    tacf6_dim: int = 6,
+    use_tactile_deform: bool = False,
+    use_robot_state: bool = False,
+    torch_dtype=torch.bfloat16,
+    tactile_intermediate_size: int = None,
+    n_flare_tokens_per_frame: int = 0,
+    n_flare_steps: int = 0,
+    flare_layer_index: int = -1,
+    use_tactile_code: bool = False,
+    vqvae_codebook_size: int = 64,
+    use_tactile_vqvae: bool = False,
+    vqvae_config: dict = None,
+):
+    """ORIGAMI-PATCH (§7.1 patch 6): identical to upstream `from_pretrained_qwen3vl` except
+    the visual-tower copy tolerates both transformers eras -- see patch 6's module-docstring
+    section. Whole classmethod copied (not isolable into a small helper)."""
+    import gc
+
+    from qwen_vla.modeling_vla import _DEFAULT_IMAGE_TOKEN_ID
+
+    try:
+        from transformers import Qwen3VLForConditionalGeneration
+        base_model = Qwen3VLForConditionalGeneration.from_pretrained(
+            pretrained_path, torch_dtype=torch_dtype, trust_remote_code=True
+        )
+    except Exception:
+        from transformers import Qwen2VLForConditionalGeneration
+        base_model = Qwen2VLForConditionalGeneration.from_pretrained(
+            pretrained_path, torch_dtype=torch_dtype, trust_remote_code=True
+        )
+
+    config = base_model.config
+    text_config = getattr(config, "text_config", config)
+    image_token_id = getattr(config, "image_token_id", _DEFAULT_IMAGE_TOKEN_ID)
+
+    vla = cls(
+        config=text_config,
+        action_dim=action_dim,
+        action_chunk=action_chunk,
+        tacf6_dim=tacf6_dim,
+        use_tactile_deform=use_tactile_deform,
+        use_robot_state=use_robot_state,
+        image_token_id=image_token_id,
+        tactile_intermediate_size=tactile_intermediate_size,
+        n_flare_tokens_per_frame=n_flare_tokens_per_frame,
+        n_flare_steps=n_flare_steps,
+        flare_layer_index=flare_layer_index,
+        use_tactile_code=use_tactile_code,
+        vqvae_codebook_size=vqvae_codebook_size,
+        use_tactile_vqvae=use_tactile_vqvae,
+        vqvae_config=vqvae_config,
+    )
+    _inner = base_model.model if hasattr(base_model, "model") else base_model
+    if hasattr(_inner, "get_rope_index"):
+        object.__setattr__(vla, "_rope_index_fn", _inner.get_rope_index)
+
+    # ORIGAMI-PATCH (§7.1 patch 6): base_model.visual no longer exists as a delegating
+    # property on our transformers pin -- reach through base_model.model.visual instead.
+    vla.visual = base_model.visual if hasattr(base_model, "visual") else base_model.model.visual
+
+    raw_sd = base_model.model.state_dict()
+    lang_prefix = "language_model."
+    has_lang_prefix = any(k.startswith(lang_prefix) for k in raw_sd)
+
+    text_sd = {}
+    if has_lang_prefix:
+        for k, v in raw_sd.items():
+            if k.startswith(lang_prefix):
+                text_sd[k[len(lang_prefix):]] = v
+    else:
+        text_sd = dict(raw_sd)
+
+    missing, unexpected = vla.model.load_state_dict(text_sd, strict=False)
+    print(f"[Qwen3VLVLAModel] Text model loaded – missing: {len(missing)}, unexpected: {len(unexpected)}")
+    if missing:
+        truly_missing = [k for k in missing if "_action" not in k and "_tactile" not in k]
+        expected_missing = len(missing) - len(truly_missing)
+        if truly_missing:
+            print(f"  WARNING – unexpected missing base keys: {truly_missing[:10]} ...")
+        print(f"  New MoT expert weights (expected missing): {expected_missing}")
+
+    if hasattr(_inner, "language_model"):
+        del _inner.language_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("[Qwen3VLVLAModel] Freed base model language_model to save memory.")
+
+    return vla
+
+
 def apply() -> None:
-    """Apply all five patches. Idempotent; safe to call multiple times."""
+    """Apply all six patches. Idempotent; safe to call multiple times."""
     import qwen_vla.modeling_qwen3vl_mot as modeling_qwen3vl_mot
     import qwen_vla.modeling_vla as modeling_vla
 
@@ -374,3 +492,5 @@ def apply() -> None:
     setattr(modeling_qwen3vl_mot.Qwen3VLRotaryEmbeddingWrapper, _PATCHED_MARKER, True)
 
     modeling_vla.Qwen3VLVLAModel.get_rope_index = _patched_get_rope_index
+
+    modeling_vla.Qwen3VLVLAModel.from_pretrained_qwen3vl = classmethod(_patched_from_pretrained_qwen3vl)
