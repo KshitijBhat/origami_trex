@@ -121,6 +121,7 @@ class TeamPolicy:
         max_joint_vel: float = 0.3,
         command_hz: int = 30,
         use_wire_prompt: bool = False,
+        compile: bool = False,
     ) -> None:
         checkpoint_path = checkpoint_path or os.environ.get("ORIGAMI_CHECKPOINT_PATH")
         if not checkpoint_path:
@@ -149,6 +150,7 @@ class TeamPolicy:
             cuda=cuda,
             disable_tactile=disable_tactile,
             locked_config_source=locked_config_source,
+            compile=compile,
         )
         self.kin = OrigamiKinematics(urdf_path, self.policy.locked_config)
         self.retarget = Retargeter(
@@ -169,9 +171,9 @@ class TeamPolicy:
         assert chunk.dtype == np.float32
         logger.info(
             "TeamPolicy warm-up OK: action_horizon=%d slow_every=%d instruction=%r "
-            "locked_digest=%s",
+            "locked_digest=%s compile=%s",
             self.action_horizon, self.slow_every, self.policy.instruction,
-            self.policy.locked_config.digest(),
+            self.policy.locked_config.digest(), self.policy.compile_enabled,
         )
 
     def reset(self) -> None:
@@ -273,6 +275,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-joint-vel", type=float, default=0.3)
     parser.add_argument("--command-hz", type=int, default=30)
     parser.add_argument("--use-wire-prompt", action="store_true")
+    parser.add_argument(
+        "--compile", type=int, default=int(os.environ.get("ORIGAMI_COMPILE", "0")),
+        help="torch.compile forward_flow_action_partial/tactile_flow_continue (§ latency)",
+    )
     return parser
 
 
@@ -295,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         max_joint_vel=args.max_joint_vel,
         command_hz=args.command_hz,
         use_wire_prompt=args.use_wire_prompt,
+        compile=bool(args.compile),
     )
     server = OrigamiZenohServer(
         policy,

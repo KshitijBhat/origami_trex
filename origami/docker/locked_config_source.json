@@ -1,0 +1,110 @@
+{
+  "seasons": [
+    "season_POC22061_2026_05_19_10_18_58_train",
+    "season_POC22061_2026_05_20_16_07_05_train",
+    "season_POC22061_2026_05_23_15_56_33_train",
+    "season_POC22061_2026_05_27_10_39_38_train",
+    "season_POC22061_2026_05_28_13_42_37_train",
+    "season_POC22061_2026_05_28_15_51_13_train",
+    "season_POC22061_2026_05_29_10_19_22_train",
+    "season_POC22061_2026_05_29_15_58_16_train",
+    "season_POC22061_2026_06_25_20_02_02_train",
+    "season_POC22061_2026_06_27_13_48_20_train",
+    "season_POC22061_2026_06_27_19_13_22_train",
+    "season_POC22061_2026_06_28_13_47_21_train",
+    "season_POC22061_2026_06_29_19_18_53_train",
+    "season_POC22061_2026_06_30_10_16_20_train",
+    "season_POC22061_2026_06_30_19_27_21_train",
+    "season_POC22061_2026_06_30_19_45_01_train",
+    "season_POC22061_2026_07_04_13_39_40_train",
+    "season_POC22061_2026_07_05_16_23_24_train",
+    "season_POC22061_2026_07_10_15_21_08_train",
+    "season_POC22061_2026_07_10_17_05_30_train",
+    "season_POC22061_2026_07_11_13_34_49_train",
+    "season_POC22061_2026_07_13_19_20_33_train",
+    "season_POC22061_2026_07_13_19_56_06_train",
+    "season_POC22061_2026_07_13_20_50_09_train",
+    "season_POC22061_2026_07_14_15_43_22_train"
+  ],
+  "truncated": [],
+  "locked_digest": "0bb3b0aa13f92a3fac91ea1c8127774e63cf881f",
+  "prep_config": {
+    "instruction": "Use both hands to fold the paper into an airplane on the table, alternating hands to crease the corners inward to the center and fold the wings down.",
+    "extra_seasons": "none",
+    "image_size": [
+      224,
+      224
+    ],
+    "deform_size": [
+      240,
+      240
+    ],
+    "deform_codec": "lossless_h264",
+    "frame_stride": 1
+  },
+  "instruction": "Use both hands to fold the paper into an airplane on the table, alternating hands to crease the corners inward to the center and fold the wings down.",
+  "urdf_sha256": "de922b701de4a91d5bdf5b57e8cfd0d54c9d470b4aad397237131c499ec7b179",
+  "locked_config": {
+    "lower_body": [
+      0.5626833438873291,
+      -1.106863021850586,
+      0.620686948299408,
+      -0.006423544604331255,
+      0.008724515326321125
+    ],
+    "neck": [
+      0.0023968450259417295,
+      -0.872547447681427
+    ],
+    "left_hand": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "right_hand": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "digest": "0bb3b0aa13f92a3fac91ea1c8127774e63cf881f"
+  },
+  "total_frames": 2120726
+}

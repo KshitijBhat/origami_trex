@@ -161,6 +161,7 @@ class Policy:
         cuda: str = "0",
         disable_tactile: int = 0,
         locked_config_source: str | Path | None = None,
+        compile: bool = False,
     ):
         from scripts.test import CascadedServer, model_load
 
@@ -189,6 +190,26 @@ class Policy:
         # ``CascadedServer.predict()`` normally does this .to(device) itself (test.py:680);
         # we call ``_run_slow``/``_run_fast`` directly and skip ``predict()``, so it's on us.
         model = model.to(f"cuda:{cuda}" if str(cuda) != "cpu" else "cpu").eval()
+
+        self.compile_enabled = bool(compile)
+        if self.compile_enabled:
+            # Monkey-patch the two instance-bound methods CascadedServer actually calls on the
+            # default (disable_tactile=0) path -- never edit T-Rex/qwen_vla/modeling_vla.py
+            # itself (project invariant, gate G0). ``forward_flow_action_full`` is only used
+            # when disable_tactile=1, which this deploy config never sets, so it's left
+            # uncompiled to keep warm-up scope matched to what's actually served. Shapes are
+            # fixed (batch=1, fixed image_size/action_chunk/vqvae_window), so ``dynamic=False``
+            # is safe and avoids paying for dynamic-shape guards this checkpoint never needs.
+            import torch
+
+            model.forward_flow_action_partial = torch.compile(
+                model.forward_flow_action_partial, mode="default", dynamic=False,
+            )
+            model.tactile_flow_continue = torch.compile(
+                model.tactile_flow_continue, mode="default", dynamic=False,
+            )
+            logger.info("torch.compile armed for forward_flow_action_partial/tactile_flow_continue")
+
         self.args = args
         self.model = model
         self.processor = processor

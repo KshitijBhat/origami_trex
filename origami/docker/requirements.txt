@@ -1,5 +1,8 @@
 # Minimal deploy-only dependency set for `python -m origami.serve_zenoh`.
-# REDESIGN_PLAN.md §9.5: no lerobot, no wandb/h5py/pandas/av (training/prep-only deps, D2).
+# REDESIGN_PLAN.md §9.5: no lerobot, no wandb/h5py/pandas (training/prep-only deps, D2).
+# `av` IS needed at deploy time (not just prep): origami/decode.py imports it unconditionally
+# at module scope and origami/serve_zenoh.py imports origami.decode -- discovered building
+# this image for real (see origami/PROGRESS.md, step 15 follow-up).
 #
 # Versions pinned to what was actually verified end-to-end against the real sept9_ckpt
 # checkpoint in this project's own dev environment (TeamPolicy construction, warm-up
@@ -13,6 +16,8 @@ pin>=3.2.0
 pin-pink>=4.3.0
 qpsolvers[daqp]>=4.13.0
 eclipse-zenoh==1.9.*
+pyzmq>=27.0.0
+av>=13.0.0
 msgpack>=1.0.0
 opencv-python-headless>=4.9.0
 numpy>=2.0.0

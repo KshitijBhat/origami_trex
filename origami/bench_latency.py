@@ -118,6 +118,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--locked-config-source", default=None)
     parser.add_argument("--cuda", default="0")
+    parser.add_argument("--compile", action="store_true", help="torch.compile the policy first")
     parser.add_argument("--n-calls", type=int, default=30)
     parser.add_argument("--command-hz", type=int, default=30)
     parser.add_argument("--root", default=None, help="dataloader mode: LeRobot dataset root")
@@ -143,6 +144,7 @@ def main() -> None:
 
         policy = Policy(
             args.checkpoint, cuda=args.cuda, locked_config_source=args.locked_config_source,
+            compile=args.compile,
         )
         result = bench_slow_and_fast(policy, args.n_calls)
         slow_p99_s = result["slow"]["p99_ms"] / 1000.0
@@ -150,6 +152,7 @@ def main() -> None:
         report = {
             "mode": args.mode,
             "checkpoint": args.checkpoint,
+            "compile": args.compile,
             **result,
             "feasible_action_horizon_sync": t_feasible,
             "slow_p99_budget_check": {
