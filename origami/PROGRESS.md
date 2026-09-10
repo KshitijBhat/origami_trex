@@ -18,13 +18,13 @@ handoff artifact if context is compacted.
 | 9 | trex_patch.py + train_origami.py + delayed_lerobot_dataset.py + .sh | **done** (see "Step 9/10 continued" notes below -- real end-to-end model construction against the real 101-season root + real midtrain checkpoint now exercised for real; 4 more real bugs found+fixed) | - |
 | 10 | Full prep run (user-executed) | **done, both splits** -- train: 101/101 seasons, `data_trex_origami/eef62_train/`, 8 379 271 frames, 0 truncated; val: 25/25 seasons, `data_trex_origami/eef62_val/`, 355 episodes, 2 120 726 frames, 0 truncated (background run, started outside this session, finished between sessions -- confirmed via its now-complete `manifest.jsonl` and the merged root's own metadata, not something this session ran). **Both roots share the identical `LockedConfig` digest** (`0bb3b0aa...`), confirming §3.2's shared-frame requirement holds across the two independent prep runs. | G18/G8/G8b/G6/G4 **PASS on both roots** (`verify.py all`, first runs at full production scale, not fixture) |
 | 10b | diagnose_shift.py + eval_offline.py --zero-shot | **done** (see notes; both run for real against the real T-Rex midtrain checkpoint + the `eef62_train_smalltest` fixture, not just fixture-scale) | G15 **FAIL**; zero-shot floor recorded, does not beat hold-position |
-| 10c | refit_vqvae_stats.py (if needed) | not started -- **G15 failed, so this is next**, but stopping here per this session's instruction | - |
-| 11 | Pilot train 2000 steps (user-executed) | not started | - |
+| 10c | refit_vqvae_stats.py | **done (code + run); fix ladder item 1 insufficient** | G15 still **FAIL** after refit -- see notes: min normalized entropy rose 0.022→0.058 (worse than the ≥0.5 threshold); item 2 (retrain the VQ-VAE) is the real fix, not attempted |
+| 11 | Pilot train 2000 steps (user-executed outside this session) | **done, real trained checkpoint exists** (`checkpoints/sept9_ckpt`) -- see notes for a critical finding: this checkpoint does not beat the hold-position baseline | not gated by this project (§11.1 decision point) -- see notes, this needs attention before further training investment |
 | 11b | Optional phase 0 / phase A ablations | not started | - |
-| 12 | Phase B: 40000 steps (user-executed) | not started | - |
-| 13 | policy.py + retarget.py + serve_zenoh.py + bench_latency.py | not started | - |
-| 14 | eval_offline.py §8.1-B..F + eval_shadow.py | not started | - |
-| 15 | docker/ submission image | not started | - |
+| 12 | Phase B: 40000 steps (user-executed) | not started (only a pilot-scale checkpoint exists so far) | - |
+| 13 | policy.py + retarget.py + serve_zenoh.py + bench_latency.py | **done**, all 4 exercised for real against the real trained checkpoint on a real GPU (RTX 4090) | G13 measured (see notes: T=4/T=8 fail the *sync*-mode budget on this hardware, T=16 passes; async is the actual deploy default) |
+| 14 | eval_offline.py §8.1-B/C (D already done in step 10b) + eval_shadow.py (G10 done for real; G11 code-complete but not run -- no local fixture season in this environment) | **mostly done** -- §8.1-E/F (rollout drift, smoothness) not implemented this session, see notes | G10 **PASS** (real subprocess + real Zenoh wire, no Docker); G11 not run (missing data); G14 verified via `TeamPolicy`'s own instruction-resolution logic + tests, not yet gated end-to-end against a running deploy path's `input_ids` |
+| 15 | docker/ submission image | **Dockerfile + requirements.txt + .dockerignore written; dependency layer built and verified for real** (pip installs cleanly, all imports work, matches this session's actual working dep versions) | full image (with the 16 GB checkpoint COPY) not built in this session -- see notes |
 
 ## Gates
 
@@ -33,7 +33,7 @@ handoff artifact if context is compacted.
 | G0 | Upstream drift: sha256 of every T-Rex file we import/vendor, both refs | **PASS** | 11/11 checks pass (submodule pinned f88e10c, zero local diff, 7 files hashed at f88e10c, scripts/midtrain.py hashed at b23eafe) |
 | G1a | URDF joint set == 65 mapped names | **PASS** | exact set match on `pin.buildModelFromUrdf` |
 | G1b | Reduced model nq==nv==14 | **PASS** | `nq==nv==14`, names == the 14 arm joints |
-| G1c | LockedConfig.digest() consistency | not started | code exists (`LockedConfig.digest`), cross-artifact check deferred to prepare.py/serve_zenoh.py (step 7/13) |
+| G1c | LockedConfig.digest() consistency | **PASS (with a recorded gap)** | `sept9_ckpt`'s own `training_args.json["locked_config"]` holds only `{"digest": ...}` (`train_origami.py`'s `save_checkpoint` never wrote the full arrays -- a real gap, not fixed this session, see notes); `policy.py::resolve_locked_config` recovers the full `LockedConfig` from a prep root's `meta/origami_prep.json` and asserts its digest equals the checkpoint's recorded one -- verified equal (`0bb3b0aa13f92a3fac91ea1c8127774e63cf881f`) against the real val root, and `TeamPolicy.kin.locked.digest()` == `policy.locked_config.digest()` in `test_serve_zenoh.py` |
 | G2 / G2b | FK/IK pose round-trip, 10 000 samples each | **PASS (redefined -- see note below)** | pos err max ~1e-5 m, rot err max ~1e-4 deg (both ≪ thresholds 1e-4m/0.01deg); max\|dq\| bounded but NOT gated at 1e-3 rad -- see note |
 | G3 | delta9→rot6d_to_matrix reconstructs target pose, 2000 samples | **PASS** | max err well under 1e-9 |
 | G3b | rot6d round-trip on 10 000 random SO(3) | **PASS** | max err < 1e-12 |
@@ -43,11 +43,11 @@ handoff artifact if context is compacted.
 | G7 / G7b | Loader parity / forward pass | not started | dataset construction against the real 101-season root succeeds (`[LeRobot] eef62_train: 8379271 frames...`), but the dataloader/collate_fn was never actually iterated -- the smoke train OOMs at `accelerator.prepare()` (model→GPU) before the first `__getitem__` call. See "Step 9/10 continued" below |
 | G8 / G8b | Reservoir stats / tactile mask | **PASS (G8b redefined -- see note)** | G8: q01/q99 rel err < 1% (reservoir exact at this scale); G8b: masking mechanism verified deterministically; on THIS fixture only 1/60 tactile dims cross the 1e-3 span threshold (not the full ring/pinky blocks the plan's original fixture showed). **Also independently re-confirmed via `verify.py all` on the real 101-season train root this session.** |
 | G9a / G9b | Smoke train / resume | **blocked (this session's GPU)** -- see notes | real model construction + real midtrain-checkpoint resume succeed end-to-end (4 real bugs found+fixed getting there); the training loop itself OOMs at `accelerator.prepare()`'s `model.to(device)` on this session's 16 GB RTX 5060 Ti -- the real model is 4255.7M params / 3844.7M trainable at fp32 master weights (~17 GB), before any optimizer state or activations, which does not fit 16 GB even at bsz=1 + gradient checkpointing. Matches REDESIGN_PLAN.md §7.3's own "40 GB budget" assumption -- not a code bug. The checkpoint-save/`--resume_full_state` mechanism itself (the part G9b actually gates: optimizer state + LR schedule continuity) was instead verified directly against real `accelerate` machinery in `test_checkpoint_resume.py` (CPU-only, model-size-independent) -- see notes |
-| G10 | serve_zenoh SDK checks | not started | - |
-| G11 | Shadow replay | not started | - |
-| G12 | Prep<->deploy parity | not started | - |
-| G13 | Latency | not started | - |
-| G14 | Instruction identity | not started | - |
+| G10 | serve_zenoh SDK checks | **PASS** | real `python -m origami.serve_zenoh` subprocess, real checkpoint, real GPU, real Zenoh wire protocol (own in-process router, no Docker) -- SDK's own `check_zenoh_policy.py::run_validation` passes: metadata/reset/5×infer all PASS, median latency 109.5 ms, max 336.2 ms (first slow-tick cold-start) |
+| G11 | Shadow replay | **not run** | `eval_shadow.py`'s replay path is code-complete (SDK's `RealObservationSource` + `TrajectoryValidator`) but this environment has no local `season_*/lerobot3.0` fixture (gitignored project data, not present in this checkout) -- needs a season present to actually run |
+| G12 | Prep<->deploy parity | not started | `serve_zenoh.py::TeamPolicy.infer` and `decode.py::squash_to_wire` share the same 224-wire + LANCZOS-to-`image_size` pipeline by construction (§4.3), but no test yet proves a *specific* dataset frame round-trips byte-identically end-to-end |
+| G13 | Latency | **measured** | real GPU (RTX 4090), real checkpoint, via `bench_latency.py --mode slow_and_fast`: slow tick p50=288ms/p99=291ms, fast tick p50=98ms/p99=100ms. **Sync-mode budget check: T=4 (133ms) FAILS, T=8 (267ms) FAILS, T=16 (533ms) PASSES** on this hardware -- `feasible_action_horizon_sync=16`. `serve_zenoh.py`'s default stays `T=4`/`slow_every=4` (matching §9.1's default and the *actual* deploy default `execution_mode=async`, where this budget doesn't block); switch to `--action-horizon 16 --slow-every 1` if the organizer's harness ever runs in `sync` mode on comparable hardware |
+| G14 | Instruction identity | **PASS (with a recorded gap)** | `sept9_ckpt`'s `training_args.json["instruction"]` is `null` (a real gap in this checkpoint -- `train_origami.py` recorded it as `None`, not the string actually used at prep time); `policy.py::resolve_instruction` falls back to `origami.constants.INSTRUCTION`, which **is** verified to equal the value the val root's `meta/origami_prep.json["instruction"]` actually recorded prep-time (checked by hand this session, not yet a standing test) -- so the fallback is correct for this checkpoint, but the mechanism should be treated as a warning-worthy patch, not a clean pass, until a checkpoint records its own instruction. `input_ids`-bitwise-equal half of G14 (dataset sample vs. deploy path) not yet tested |
 | G15 | VQ-VAE codebook health | **FAIL** | real midtrain checkpoint's `tacf6_vqvae_{min,max,mask}` applied to 200 000 real origami F6 windows: L-ring/L-pinky collapse to 1/64 codes (top-code frac ~1.0, normalized entropy ~0); L/R-middle, R-ring/R-pinky also near-collapsed (18-40/64 codes used but >97% mass on 1 code); only thumb/index (both hands) use the codebook meaningfully (43-63/64 codes, entropy 0.45-0.69). Clamp-saturation only 0.85% (not the failure mode -- collapse, not saturation, per §11.8's "either way" framing) |
 | G16 | Token budget | not started | - |
 | G17 | Delay-curriculum parity | **PARTIAL** | loader half (`tactile_f6s_delayed`/`tactile_f6_history` == the extended F6 window's slice at each configured delay) passes in `test_delayed_lerobot_dataset.py`, real fixture data; the deploy-parity half needs `serve_zenoh.py` (step 13), not implemented yet |
@@ -908,3 +908,195 @@ sibling to T-Rex's own config (T-Rex/ itself untouched).
   **not** recommended for the single-GPU case this project's rentable hardware (A100/H100)
   represents -- see `origami/TRAINING.md` (new, this session) for the full writeup and the
   actual commands to run a pilot (step 11) or full (step 12) training run on real hardware.
+
+## Steps 10c, 13, 14 (partial), 15 (partial) -- deploy stack built and run end-to-end against
+## a real trained checkpoint on a real GPU; a critical checkpoint-quality finding surfaced
+
+**Environment.** A real trained checkpoint now exists: `checkpoints/sept9_ckpt` (a pilot-scale
+train, per its `origami_prep.json`'s 17-season subset -- not the full 101-season/40k-step
+Phase B run; `sept9_ckpt/model.pt` is 16 GB). A real GPU is available this session (RTX 4090,
+24 GB) and Docker is available with network access. `checkpoints` and `data` (the val root,
+`origami_trex/eef62_val`) were symlinked into the repo root from their actual location one
+level up (`/workspace/checkpoints`, `/workspace/data`) to match every existing test's/script's
+`REPO_ROOT`-relative convention (`.gitignore` extended with bare `/checkpoints` and `/data`
+lines since gitignore's directory-only `/name/` patterns don't match a symlink).
+
+**Two real gaps found in `sept9_ckpt` itself (not fixed -- upstream `train_origami.py` bugs,
+out of scope for this session's build-the-deploy-stack task, but they shape how `policy.py`
+had to be written):**
+1. `training_args.json["locked_config"]` is `{"digest": ...}` only -- the full `LockedConfig`
+   arrays were never written by `save_checkpoint`. `policy.py::resolve_locked_config` recovers
+   them from a prep root's `meta/origami_prep.json`, asserting the digest matches (the actual
+   G1c cross-check, just sourced from wherever the values still live). Verified equal against
+   the real val root: `0bb3b0aa13f92a3fac91ea1c8127774e63cf881f` both places.
+2. `training_args.json["instruction"]` is `null`. `policy.py::resolve_instruction` falls back
+   to `origami.constants.INSTRUCTION` with a logged warning; by hand-checking the val root's
+   `origami_prep.json["instruction"]`, this fallback happens to be the exact string actually
+   used at prep time for this checkpoint, but the mechanism is a recovery, not a real fix --
+   flagging for whoever owns `train_origami.py` next.
+
+**Step 13 -- `policy.py`, `retarget.py`, `serve_zenoh.py`, `bench_latency.py`: all built and
+run for real, not just unit-tested in isolation.**
+* `policy.py::Policy` wraps `scripts.test.CascadedServer`, calling `_run_slow`/`_run_fast`
+  directly with `PIL.Image` objects (no PNG encode/decode round trip). Needed one fix beyond
+  what `model_load` does: `CascadedServer.predict()` normally moves the model to
+  `cuda:{args.cuda}` itself (`test.py:680`) -- since `Policy` never calls `predict()`, it does
+  the `.to(device).eval()` itself in `__init__`.
+* `retarget.py::Retargeter` mirrors `eval_trex_async.py`'s chunk-execution loop
+  (`set_anchor`/`step`) using `origami.kinematics`'s already-existing `solve_ik`/
+  `rot6d_to_matrix`/`fk_matrices` (no new copy of `ik_utils.py` needed -- step 3 already ported
+  it). `aggregate_chunks` is copied verbatim from `eval_trex_async.py:75` with citation (heavy
+  hardware imports at that module's top level, per §13). Added
+  `OrigamiKinematics.full_joint_limits_65()` to `kinematics.py` (reads the *unreduced* full
+  model retained in `__init__`, in `JOINT_NAMES_65` order) since `arm_limits` only covers the
+  14 arm DOFs and `_safety`'s joint-limit clip (§9.3 item 2) needs all 65. `_safety` implements
+  the exact 6-step order from §9.3 (finite check -> joint limits -> rate limit -> motor-block
+  hold -> optional collision gate -> commit), with per-episode counters
+  (`n_nan`/`n_ik_failed`/`n_limit_clipped`/`n_rate_clipped`/`n_collision_blocked`).
+  `test_retarget.py` (11 tests, CPU-only, real `OrigamiKinematics`): aggregate_chunks weighting
+  behavior, zero-action pose-hold, motor-block-held-at-current-observation, the NaN/finite path
+  (via both a degenerate-rot6d IK failure and a direct `_safety` NaN injection -- these are
+  different code paths, both tested), joint-limit clipping, rate-limiting.
+* `serve_zenoh.py::TeamPolicy` loads the SDK's `examples/policy_server_template.py` off disk
+  via `importlib` (keeping `OrigamiZenohServer` + the msgpack codec byte-identical, per §9.4 --
+  only `TeamPolicy` is ours) and implements the exact §9.1/§9.4 cadence: `slow_every *
+  action_horizon == 16` asserted at construction, a slow tick (re-encode vision, refresh KV,
+  one tactile continuation, `retarget.set_anchor`) every `slow_every` calls, fast-only
+  otherwise, `aggregate_chunks` temporal aggregation across the `chunk_buf`, motor block held
+  from the *current* call's `observation/state[58:65]`. `state62_from_state65` uses
+  `lerobot_common.pose_matrix_to_9d` (imported verbatim) on `OrigamiKinematics.fk_matrices` --
+  not a reimplementation. A warm-up `infer()` call on an all-zero-but-contract-valid
+  observation runs at construction time and asserts the output shape/dtype, so a broken
+  checkpoint/config fails fast at startup, not on the first real request.
+  **Real, not simulated: `TeamPolicy(...)` was constructed against `sept9_ckpt` on the RTX
+  4090 and ran real cascaded inference through real IK/safety filtering** (see G10 above and
+  `test_serve_zenoh.py::test_team_policy_real_checkpoint_infer_shapes_and_safety`, 5 tests, one
+  real-checkpoint-gated).
+* `bench_latency.py` measured real slow/fast latency (G13, see gate table) and real dataloader
+  throughput mode is implemented but not run this session (no local dataset root handy to
+  point it at beyond the val root, which was needed elsewhere).
+
+**Step 10c -- `refit_vqvae_stats.py`: built, run for real, G15 still fails.**
+Implements §11.8 fix-ladder item 1 only (re-fit `tacf6_vqvae_{min,max,mask}` buffers from a
+prep root's `meta/trex_norm_stats.json` `tactile_f6` q01/q99/mask; never retrains the encoder
+or codebook). Run for real against `sept9_ckpt` + the val root
+(`checkpoints/sept9_ckpt_vqvae_refit/`, gitignored, 16 GB, kept on disk as evidence): using
+`diagnose_shift.py::vqvae_code_entropy` before/after,
+**clamp_saturation_fraction: 0.0085 -> 0.0223 (both well under the 5% threshold), but
+min-slot normalized_entropy: 0.0224 -> 0.0584 (worse than required, threshold is >= 0.5)**.
+Item 1 measurably helps (2.6x the worst-case entropy) but is nowhere near sufficient --
+confirms the plan's own framing that item 1 is "the cheapest rung," not necessarily an
+adequate fix. Item 2 (retrain the VQ-VAE on origami F6, `tactile_vqvae/train.py`) is the real
+next step for G15 and was not attempted (a multi-hour training job, out of scope here).
+
+**Step 14 -- `eval_shadow.py` (G10 done for real, G11 code-complete but unrun) and
+`eval_offline.py` extended for §8.1-B/C.**
+* `eval_shadow.py` opens a lightweight **in-process Zenoh peer session as the router**
+  (`mode: peer`, loopback, multicast disabled) instead of the SDK's Docker-in-Docker hardened
+  sandbox (`participant_local_evaluator/docker_runtime.py`, which additionally needs the
+  finished submission image and a unix-socket gateway design meant for isolating an untrusted
+  policy container -- a different, heavier concern than this gate). A Zenoh `client`-mode
+  session (what both `OrigamiZenohServer` and the SDK's own validators open) only needs some
+  reachable peer, so this avoids Docker/network image pulls for the router while still using
+  the real Zenoh wire protocol. `run_protocol_conformance` (G10) delegates entirely to the
+  SDK's own `check_zenoh_policy.py::run_validation` -- **run for real this session against a
+  real `serve_zenoh` subprocess, PASS** (see G10 in the gate table).
+  `run_shadow_replay` (G11) drives the SDK's own `real_observation_source.py` +
+  `participant_local_evaluator/trajectory.py::TrajectoryValidator` (same checker the organizer
+  uses) but **could not be run this session** -- no local `season_*/lerobot3.0` fixture exists
+  in this checkout (gitignored project data; this session had no `HF_TOKEN` to fetch one from
+  the gated hub dataset). Confirmed our own URDF carries `<limit lower upper velocity>` on all
+  65 `JOINT_NAMES_65` joints (`TrajectoryValidator._load_limits` needs exactly this), so the
+  checker should work once a season is available -- someone should run
+  `python -m origami.eval_shadow --checkpoint checkpoints/sept9_ckpt --locked-config-source
+  data/meta/origami_prep.json --season-root <a season_*/ dir>` the next time one is present
+  locally.
+* `eval_offline.py` gained `eef_space_error` (§8.1-B: mm/deg via `delta9_to_matrix` +
+  `rot6d_to_matrix`, both already in `kinematics.py`) and `joint_space_error_via_retarget`
+  (§8.1-C), both behind `--extended-metrics`. **§8.1-C is an honest approximation, not the
+  plan's literal metric**: the eef62 val root stores only the FK-*projected* pose9 state, not
+  the raw absolute arm joint angles the plan's "compare to `action65`" wording assumes -- that
+  data is discarded by design during conversion (stream-and-delete). Instead, both the
+  predicted and the ground-truth chunk are run through the *same* `retarget.Retargeter` (same
+  warm start, from the stored pose9 state) and compared to *each other* -- a genuine
+  joint-space proxy, not a placeholder. §8.1-D was already implemented in step 10b.
+  §8.1-E (rollout drift) and §8.1-F (smoothness) are **not implemented this session** --
+  correctly scoping down given the time available was judged better than a rushed version of
+  either; flagging honestly rather than claiming completion.
+  **Run for real** (`--n-samples 3 --configs cascaded hold_position --extended-metrics`
+  against `sept9_ckpt` + the real val root): completed cleanly, e.g. cascaded k=0 EEF error
+  ~9.9mm/9.5mm (L/R) translation, ~4.3°/6.5° rotation, joint-space RMS 0.005-0.08 rad
+  depending on group, zero IK failures.
+
+**Critical finding, not a code bug: `sept9_ckpt` does not beat the hold-position baseline.**
+Running `eval_offline.py` (already-existing infrastructure from step 10b, not new this
+session) against `sept9_ckpt` on the real val root:
+```
+cascaded k=0 mean MAE=0.1175  DOES NOT BEAT  hold-position k=0 mean MAE=0.01678
+```
+i.e. the trained cascaded policy is roughly **7x worse** than the trivial "repeat the current
+state" baseline at the very first chunk step. This is exactly the failure mode §11.9 step 1
+warns about for the *untrained* zero-shot checkpoint ("if it is no better than hold-position,
+the pretrained init is worth less than assumed") -- except this is the **trained** pilot
+checkpoint, which makes it more concerning, not less. Plausible contributing factors, none
+confirmed: (a) `sept9_ckpt`'s `origami_prep.json` lists only 17 seasons -- a small pilot-scale
+train, not the 101-season/40k-step Phase B run steps 11/12 describe, so this may simply be
+severely undertrained; (b) the still-collapsed VQ-VAE codebook (G15, above) means the tactile
+expert may be contributing noise rather than signal; (c) `use_robot_state=0` in this
+checkpoint's config, differing from §7.3's recommended `1`. **This should be investigated
+before any further training investment (the 40k-step Phase B run) --** it was out of scope to
+diagnose further this session (whose task was building the deploy-stack code), but it is the
+single most important open question for the project right now, more so than any remaining
+`origami/` module.
+
+**Step 15 -- `docker/Dockerfile` written and its dependency layer verified for real, full
+image not built.**
+* `origami/docker/{Dockerfile,requirements.txt}` + a repo-root `.dockerignore` (must live at
+  the build *context* root, not next to the Dockerfile -- Docker resolves `.dockerignore`
+  relative to context, confirmed by testing). Copies only the T-Rex subset actually imported
+  at deploy time (`utils/`, `qwen_vla/`, `tactile_vqvae/`, `scripts/`, `__init__.py` -- NOT
+  `hardware_code/` [252 MB, never imported; its 3 functions are copied into
+  `origami/retarget.py`/`kinematics.py` specifically to avoid this] or `dataset_quickstart/`
+  [354 MB, prep-only]), the SDK's `policy_server_template.py`, the URDF+meshes, `origami/`,
+  and the checkpoint (`ARG CHECKPOINT_DIR`).
+* **Deliberately deviates from REDESIGN_PLAN.md §9.5's speculative pin** (`torch 2.6.0 cu124`,
+  `transformers 4.57.3`, written before any of this was tested) **in favor of the exact
+  versions verified end-to-end against the real checkpoint in this session's own dev venv**
+  (`torch==2.11.0+cu130`, `transformers==5.16.1`, `pin==4.1.0`/`pin-pink==4.4.0` (resolved from
+  the `>=` pins), `opencv-python-headless`, etc.) -- recorded in `requirements.txt`'s header
+  comment.
+* Base image had to change from the plan-adjacent `nvidia/cuda:12.4.1-runtime-ubuntu22.04` to
+  **`nvidia/cuda:12.6.0-runtime-ubuntu24.04`**: ubuntu22.04's default apt repos don't carry
+  `python3.12` (only 3.10), and no matching `12.4.1-*-ubuntu24.04` tag exists on Docker Hub
+  (checked directly against the registry, not assumed) -- `12.6.0-runtime-ubuntu24.04` does
+  and ships Python 3.12 natively.
+* **Verified for real, not just written:** built a throwaway image (`docker build`) covering
+  every layer through `pip install -r requirements.txt` plus an import-and-print-version
+  smoke test for every package `serve_zenoh.py` needs (torch, transformers, pinocchio, pink,
+  qpsolvers, zenoh, msgpack, cv2, einops, timm, accelerate, safetensors) -- succeeded,
+  versions match this session's working venv exactly. `docker build --check` also validated
+  the real (checkpoint-including) Dockerfile's syntax and base-image resolution.
+  **Not done this session:** an actual full build including the 16 GB checkpoint `COPY` (would
+  need ~20+ GB of build time/disk beyond what was already used for the VQ-VAE refit
+  experiment) and running the built container against `check_zenoh_policy.py` in `--no-gpu`-
+  free real conditions -- both are mechanical next steps given everything else above already
+  works, not open design questions.
+
+**Full test suite this session:** added `test_retarget.py` (11), `test_policy.py` (10, 2
+real-checkpoint-gated), `test_bench_latency.py` (4), `test_serve_zenoh.py` (5, 1
+real-checkpoint-gated), `test_eval_shadow.py` (3, 1 real-subprocess-gated),
+`test_refit_vqvae_stats.py` (2) -- 35 new tests, all passing, 5 of them exercising the real
+checkpoint/GPU/subprocess/wire-protocol stack rather than mocks. Full suite:
+`106 passed, 4 failed, 7 skipped, 25 errors` -- **all failures/errors are pre-existing and
+unrelated to this session's changes**, confirmed by inspection: 25 errors are
+`FileNotFoundError` for the fixture season directory (`season_POC22061_2026_05_23_19_21_25_train/`,
+gitignored project data, absent in this checkout -- affects `test_convert.py`,
+`test_delayed_lerobot_dataset.py`, `test_kinematics.py`, `test_merge.py`, `test_stats.py`,
+`test_verify.py`, none of which this session touched); the 4 failures are the
+already-documented `test_splits.py::test_fixture_season_absent_from_both_splits` (stale
+premise, flagged in an earlier session's notes above), `test_train_vendor.py`'s
+`ORIGAMI-DELTA`-marker check (pre-existing, `train_origami.py` untouched this session), and
+two `test_upstream_drift.py` failures showing the `T-Rex` submodule now points at commit
+`3f6cc5d2e937...` rather than the pinned `f88e10c...` (matches this repo's own git log --
+`build: point T-Rex submodule at KshitijBhat fork's fix branch` -- a deliberate prior-session
+change, not something this session did or reverted).

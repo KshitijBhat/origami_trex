@@ -419,6 +419,21 @@ class OrigamiKinematics:
         pin.computeCollisions(self.model, self.data, self.collision_model, self.collision_data, q, True)
         return any(cr.isCollision() for cr in self.collision_data.collisionResults)
 
+    def full_joint_limits_65(self) -> tuple[np.ndarray, np.ndarray]:
+        """Position limits for all 65 joints, in ``JOINT_NAMES_65`` (dataset-index) order.
+
+        Read from the unreduced full model built in ``__init__`` (never rebuilt), so this is
+        the same URDF the reduced arm-only model came from. Used by ``retarget.py``'s safety
+        clip (§9.3 item 2), which covers hands/lower_body/neck too, not just the arms
+        ``arm_limits`` already exposes.
+        """
+        idx = [self._full_model.getJointId(n) for n in JOINT_NAMES_65]
+        q_idx = np.array([self._full_model.joints[i].idx_q for i in idx])
+        return (
+            self._full_model.lowerPositionLimit[q_idx].copy(),
+            self._full_model.upperPositionLimit[q_idx].copy(),
+        )
+
 
 # ── delta9 / rot6d — REDESIGN_PLAN.md §6, Gram-Schmidt variant used at deploy ──
 def rot6d_to_matrix(rot6d: np.ndarray) -> np.ndarray:

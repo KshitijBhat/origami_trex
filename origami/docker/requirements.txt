@@ -1,0 +1,23 @@
+# Minimal deploy-only dependency set for `python -m origami.serve_zenoh`.
+# REDESIGN_PLAN.md §9.5: no lerobot, no wandb/h5py/pandas/av (training/prep-only deps, D2).
+#
+# Versions pinned to what was actually verified end-to-end against the real sept9_ckpt
+# checkpoint in this project's own dev environment (TeamPolicy construction, warm-up
+# inference, protocol conformance -- see origami/PROGRESS.md) -- not REDESIGN_PLAN.md's
+# original speculative pin (torch 2.6.0 cu124 / transformers 4.57.3), written before any of
+# this was tested against a real checkpoint. torch's own PyPI wheel bundles the CUDA runtime
+# it needs; only a compatible host NVIDIA driver (via nvidia-container-toolkit) is required.
+torch==2.11.0
+transformers==5.16.1
+pin>=3.2.0
+pin-pink>=4.3.0
+qpsolvers[daqp]>=4.13.0
+eclipse-zenoh==1.9.*
+msgpack>=1.0.0
+opencv-python-headless>=4.9.0
+numpy>=2.0.0
+pillow>=10.0.0
+einops>=0.8.0
+timm>=1.0.0
+accelerate>=1.10.0
+safetensors>=0.5.0

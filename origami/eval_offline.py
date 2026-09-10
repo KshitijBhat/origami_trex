@@ -52,8 +52,8 @@ import origami.trex_patch as _trex_patch  # noqa: E402
 _trex_patch.apply()
 
 from utils.lerobot_common import DEFORM_KEYS, KEY_ACTION, KEY_STATE  # noqa: E402
-from origami.constants import INSTRUCTION  # noqa: E402
-from origami.kinematics import matrix_to_rot6d  # noqa: E402
+from origami.constants import INSTRUCTION, URDF_PATH  # noqa: E402
+from origami.kinematics import delta9_to_matrix, matrix_to_rot6d, rot6d_to_matrix  # noqa: E402
 from origami.diagnose_shift import ACTION_BLOCKS  # noqa: E402
 
 CONFIGS = ("cascaded", "disable_tactile", "tactile_zeroed", "hold_position")
@@ -219,8 +219,106 @@ def render_markdown(report: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# §8.1-B: EEF-space error (mm / deg) and §8.1-C: joint-space error via retarget.py
+# ─────────────────────────────────────────────────────────────────────────────
 
-def run(root: str, checkpoint: str, n_samples: int, configs: list[str], seed: int) -> dict:
+def _pose9_to_matrix(pos3: np.ndarray, rot6d6: np.ndarray) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3] = rot6d_to_matrix(rot6d6)
+    T[:3, 3] = pos3
+    return T
+
+
+def _rotation_angle_deg(R1: np.ndarray, R2: np.ndarray) -> float:
+    R = R1.T @ R2
+    cos_theta = np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cos_theta)))
+
+
+def eef_space_error(pred: np.ndarray, gt: np.ndarray, state62: np.ndarray) -> dict:
+    """§8.1-B: reconstruct the absolute target SE3 from each chunk's delta9 + the SAME
+    chunk-base pose (derived from the stored eef-9d state -- Gram-Schmidt via
+    ``rot6d_to_matrix``, then ``delta9_to_matrix``, both imported/copied verbatim, never
+    reimplemented). Reports per-side translation error in mm and rotation error in degrees,
+    per chunk step k. Scale reference (§1.3): ground-truth per-frame EEF step is 0.39 mm
+    mean / 2.04 mm p99.
+
+    pred, gt : [N, K, 62] real (denormalized) delta9 chunks.
+    state62  : [N, 62] the chunk-base state each chunk was anchored at.
+    """
+    N, K, _ = gt.shape
+    out = {}
+    for k in range(K):
+        trans_mm = {"left": [], "right": []}
+        rot_deg = {"left": [], "right": []}
+        for n in range(N):
+            base_l = _pose9_to_matrix(state62[n, 0:3], state62[n, 3:9])
+            base_r = _pose9_to_matrix(state62[n, 31:34], state62[n, 34:40])
+            pred_l = delta9_to_matrix(pred[n, k, 0:9], base_l)
+            gt_l = delta9_to_matrix(gt[n, k, 0:9], base_l)
+            pred_r = delta9_to_matrix(pred[n, k, 31:40], base_r)
+            gt_r = delta9_to_matrix(gt[n, k, 31:40], base_r)
+            trans_mm["left"].append(np.linalg.norm(pred_l[:3, 3] - gt_l[:3, 3]) * 1000.0)
+            trans_mm["right"].append(np.linalg.norm(pred_r[:3, 3] - gt_r[:3, 3]) * 1000.0)
+            rot_deg["left"].append(_rotation_angle_deg(pred_l[:3, :3], gt_l[:3, :3]))
+            rot_deg["right"].append(_rotation_angle_deg(pred_r[:3, :3], gt_r[:3, :3]))
+        out[f"k={k}"] = {
+            "trans_mm": {side: float(np.mean(v)) for side, v in trans_mm.items()},
+            "rot_deg": {side: float(np.mean(v)) for side, v in rot_deg.items()},
+        }
+    return out
+
+
+def joint_space_error_via_retarget(pred: np.ndarray, gt: np.ndarray, state62: np.ndarray, kin) -> dict:
+    """§8.1-C: "the metric that matters" -- but with an honest scope note.
+
+    The eef-62 shard (§5.2) stores only the FK-*projected* pose9 state, not the raw absolute
+    arm joint angles the plan's ``action65`` ground truth would need -- that data is discarded
+    by design during conversion (stream-and-delete, D3), so it cannot be recovered from the
+    converted val root alone. This computes an honest proxy instead: run the SAME
+    ``retarget.Retargeter`` (real deploy IK + safety filter, same warm start derived from the
+    stored pose9 state) on both the predicted and the ground-truth chunk, and report the
+    joint-space RMS *between the two retargeted trajectories* -- how far the deployed output
+    for the predicted action would land from the deployed output for the true action, per
+    joint group. Exact parity with a raw-``action65`` comparison would need retaining the raw
+    season data (not this project's default) or a live fixture season with an un-fk'd action
+    column.
+    """
+    from origami.retarget import Retargeter, RetargetConfig
+
+    N, K, _ = gt.shape
+    groups = (("left_arm", slice(0, 7)), ("left_hand", slice(7, 29)),
+              ("right_arm", slice(29, 36)), ("right_hand", slice(36, 58)))
+    sq_err = {name: [] for name, _ in groups}
+    n_ik_failed = 0
+    for n in range(N):
+        base_l = _pose9_to_matrix(state62[n, 0:3], state62[n, 3:9])
+        base_r = _pose9_to_matrix(state62[n, 31:34], state62[n, 34:40])
+        warm_l, warm_r = kin._disassemble(kin.default_qpos)
+        r_pred = Retargeter(kin, RetargetConfig())
+        r_gt = Retargeter(kin, RetargetConfig())
+        for r in (r_pred, r_gt):
+            r.base_l, r.base_r = base_l, base_r
+            r.warm_l, r.warm_r = warm_l.copy(), warm_r.copy()
+            r.prev_cmd = np.zeros(65)
+        zero_motor7 = np.zeros(7)
+        for k in range(K):
+            cmd_pred = r_pred.step(pred[n, k], zero_motor7).astype(np.float64)
+            cmd_gt = r_gt.step(gt[n, k], zero_motor7).astype(np.float64)
+            for name, sl in groups:
+                sq_err[name].append((cmd_pred[sl] - cmd_gt[sl]) ** 2)
+        n_ik_failed += r_pred.n_ik_failed + r_gt.n_ik_failed
+    return {
+        "rms_rad": {name: float(np.sqrt(np.mean(np.stack(errs)))) for name, errs in sq_err.items()},
+        "n_ik_failed": n_ik_failed,
+        "n_samples": N,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run(root: str, checkpoint: str, n_samples: int, configs: list[str], seed: int,
+        extended_metrics: bool = False) -> dict:
     from scripts.test import CascadedServer
 
     args, model, processor, statistic = load_model_and_stats(checkpoint)
@@ -239,22 +337,39 @@ def run(root: str, checkpoint: str, n_samples: int, configs: list[str], seed: in
 
     preds = {c: [] for c in configs}
     gts = []
+    states = []
     for i in idx:
         item = ds[int(i)]
         gts.append(np.asarray(item[KEY_ACTION], dtype=np.float32))
+        states.append(np.asarray(item[KEY_STATE], dtype=np.float32))
         for config in configs:
             server = servers.get("disable_tactile" if config == "disable_tactile" else "cascaded")
             preds[config].append(run_config(config, server, item, bool(args.use_robot_state),
                                              int(args.action_chunk)))
 
     gt = np.stack(gts, axis=0)
+    state62 = np.stack(states, axis=0)
     report = {
         "n_samples": len(idx), "checkpoint": checkpoint, "root": root,
         "action_chunk": int(args.action_chunk), "configs": {},
     }
+    kin = None
+    if extended_metrics:
+        from origami.kinematics import LockedConfig, OrigamiKinematics
+
+        kin = OrigamiKinematics(URDF_PATH, LockedConfig.zeros())
+
     for config in configs:
         pred = np.stack(preds[config], axis=0)
-        report["configs"][config] = {"action_space_accuracy": action_space_accuracy(pred, gt)}
+        config_report = {"action_space_accuracy": action_space_accuracy(pred, gt)}
+        if extended_metrics:
+            config_report["eef_space_error"] = eef_space_error(
+                pred.astype(np.float64), gt.astype(np.float64), state62.astype(np.float64),
+            )
+            config_report["joint_space_error_via_retarget"] = joint_space_error_via_retarget(
+                pred.astype(np.float64), gt.astype(np.float64), state62.astype(np.float64), kin,
+            )
+        report["configs"][config] = config_report
     return report
 
 
@@ -273,9 +388,16 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output", default=None, help="Markdown report path (default: stdout).")
     p.add_argument("--json-output", default=None)
+    p.add_argument(
+        "--extended-metrics", action="store_true",
+        help="§8.1-B/C: also compute eef_space_error (mm/deg) and "
+             "joint_space_error_via_retarget (rad, an approximation -- see its docstring for "
+             "why the eef62 val root can't supply the plan's exact action65 comparison).",
+    )
     args = p.parse_args(argv)
 
-    report = run(args.root, args.checkpoint, args.n_samples, args.configs, args.seed)
+    report = run(args.root, args.checkpoint, args.n_samples, args.configs, args.seed,
+                 extended_metrics=args.extended_metrics)
     md = render_markdown(report)
     if args.output:
         with open(args.output, "w") as f:

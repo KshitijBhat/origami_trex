@@ -19,6 +19,8 @@ dependencies = [
     "h5py>=3.10.0",
     "accelerate>=1.0.0",
     "pyzmq>=26.0.0",
+    "eclipse-zenoh==1.9.*",
+    "msgpack>=1.0.0",
 ]
 
 [project.optional-dependencies]

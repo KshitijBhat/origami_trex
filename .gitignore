@@ -16,5 +16,9 @@ __pycache__/
 __pycache__/
 data_trex_origami/
 /checkpoints/
+/checkpoints
 /trex_dataset_sample/
 /reports/
+# `data`/`checkpoints` are sometimes symlinks (not directories) into a sibling location
+# outside the repo -- gitignore's directory-only `/name/` patterns don't match those.
+/data

@@ -1,0 +1,24 @@
+# Applies relative to the build context (repo root). Keep the image free of source data,
+# training-only artifacts and VCS history -- REDESIGN_PLAN.md §9.5: "No secrets, no dataset,
+# no .git".
+.git
+.venv
+data/
+data_trex_origami/
+season_*_train/
+*.zip
+out/
+outputs/
+wandb/
+*.log
+.pytest_cache/
+__pycache__/
+*.pyc
+T-Rex/hardware_code/
+T-Rex/dataset_quickstart/
+T-Rex/.git
+origami-inference-kit-participant/openpi-base-main/
+origami-inference-kit-participant/sharpa_north_ces_lite_sdk-main/.git
+origami-inference-kit-participant/sharpa_north_ces_lite_sdk-main/tests/
+reports/
+trex_dataset_sample/
