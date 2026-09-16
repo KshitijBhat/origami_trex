@@ -1,0 +1,24 @@
+{
+  "clip": "insert_coin_head_left",
+  "checkpoint": "/workspace/checkpoint_midtrain",
+  "video": "/workspace/trex_orig_clips/ep223_insert_coin_head_left.mp4",
+  "instruction": "Use your left hand to pick up the coin and slot it into the wooden box, leaving the red box in place.",
+  "fps": 0.333,
+  "n_frames": 9,
+  "n_layers": 28,
+  "words_matched": "22/22",
+  "content_words": {
+    "01_Use": 1,
+    "03_left": 1,
+    "04_hand": 1,
+    "06_pick": 1,
+    "09_coin": 1,
+    "11_slot": 1,
+    "15_wooden": 1,
+    "16_box,": 1,
+    "17_leaving": 2,
+    "19_red": 1,
+    "20_box": 1,
+    "22_place.": 1
+  }
+}

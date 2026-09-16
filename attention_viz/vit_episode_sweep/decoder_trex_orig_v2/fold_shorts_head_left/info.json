@@ -1,0 +1,20 @@
+{
+  "clip": "fold_shorts_head_left",
+  "checkpoint": "/workspace/checkpoint_midtrain",
+  "video": "/workspace/trex_orig_clips/ep222_fold_shorts_head_left.mp4",
+  "instruction": "Fold the shorts with both hands, leaving the power cable in place.",
+  "fps": 1.0,
+  "n_frames": 39,
+  "n_layers": 28,
+  "words_matched": "12/12",
+  "content_words": {
+    "01_Fold": 1,
+    "03_shorts": 2,
+    "05_both": 1,
+    "06_hands,": 1,
+    "07_leaving": 2,
+    "09_power": 1,
+    "10_cable": 1,
+    "12_place.": 1
+  }
+}

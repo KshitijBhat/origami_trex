@@ -32,14 +32,11 @@ What happens inside `infer`, and why
 * **Mean of K draws.** K flow integrations from independent noise share one
   vision/language prefix, and their mean is returned.  Sampling variance was
   ~40% of the checkpoint's MSE; K=8 removes most of it at almost no latency.
-* **Anchoring.** The 14 arm dims are deltas from the *previous command*.  On the
-  robot that is the measured state (`anchor_source="state"`, what the 15%
-  anchor-dropout in training taught the policy to accept), the state plus the
-  prep's mean command-minus-state tracking offset (`"state_offset"`, the
-  expected previous command -- the default, see eval_deploy), or this policy's
-  own last chunk indexed by elapsed time (`"self"`).  Everything else is
-  absolute.  Frozen dims (torso 58/59 in this checkpoint) are held at the
-  measured state.
+* **All 65 dims are absolute joint radians** -- no delta, no anchor
+  reconstruction, straight off `denormalize()`.  Frozen/near-static dims
+  (torso 58/59 on the pilot split) are held at the measured state instead of
+  the flow head's output, per `frozen_action_dims`/`clamp_frozen_absolute`
+  (`qwen_vla.origami_dataset`), driven by the norm-stats mask, not a spec.
 * **Safety projection.** A sequential clamp into the Shadow evaluator's
   feasible set (URDF position limits within tolerance, per-group step-jump and
   velocity budgets at 30 Hz).  The limits come from `joint_limits.json`, a
@@ -73,9 +70,6 @@ from qwen_vla import extend_position_ids_for_flare, split_slow_fast_embeds  # no
 from qwen_vla.origami_dataset import (N_FINGERS, F6_PER_FINGER,  # noqa: E402
                                       clamp_frozen_absolute, denormalize,
                                       frozen_action_dims, split_deform_strip)
-from .anchoring import (ANCHOR_PREV_COMMAND, build_anchor,  # noqa: E402
-                        describe as describe_anchor, masks as anchor_masks,
-                        spec_from_meta)
 from .loading import load_args_from_checkpoint, model_load  # noqa: E402
 from .seasons import ACTION_DIM, DATASET_TASK_STRING, JOINT_NAMES  # noqa: E402
 
@@ -106,8 +100,6 @@ class PolicyConfig:
     split_step: int = 6               # action-expert steps before the tactile expert
     n_draws: int = 8                  # K flow draws averaged
     max_flow_batch: int = 64
-    anchor_source: str = "state_offset"  # "state" | "state_offset" | "self"
-    stale_anchor_s: float = 2.0       # fall back to state if own chunk is older
     safety: str = "tol"               # "tol" | "urdf" | "off" | "none" (disable)
     rate_margin: float = 0.999
     limits_path: str = DEFAULT_LIMITS
@@ -118,6 +110,15 @@ class PolicyConfig:
     warmup: bool = True
     compile: bool = False             # torch.compile the flow functions (see _compile)
     compile_mode: str = "default"     # "default" only; CUDA graphs deadlock off-thread
+    tactile_refine_every: int = 1     # 1 = always full slow+fast (current/validated behavior);
+                                       # N>1 = reuse the last slow-tick's KV for (N-1) of every N
+                                       # ticks, running only the tactile expert on those -- blind
+                                       # to any new camera images in the skipped ticks' observations
+                                       # (tactile_flow_continue takes no vision input at all).
+    tactile_refine_max_stale_s: float = 0.5  # force a fresh slow tick if the cache is older than
+                                              # this, regardless of the counter -- bounds how stale
+                                              # the reused vision context can get under irregular
+                                              # call timing.
 
 
 # ── safety projection (self-contained copy of eval_smoothed.SafetyProjector) ──
@@ -174,14 +175,9 @@ class TRexOrigamiPolicy:
         st = self.statistic
         self.action_mask = np.asarray(st["action_mask"], dtype=bool)
         self.action_min, self.action_max = st["action_min"], st["action_max"]
-        self.state_mask = np.asarray(st["state_mask"], dtype=bool)
-        self.state_min, self.state_max = st["state_min"], st["state_max"]
         self.tacf6_mask = np.asarray(st["tacf6_mask"], dtype=bool)
         self.tacf6_min, self.tacf6_max = st["tacf6_min"], st["tacf6_max"]
         self.frozen_dims = frozen_action_dims(self.action_mask)
-        self.te_mean = st["tracking_error_mean"]
-        self.anchor_spec = tuple(st["action_anchor"])
-        self.needs_prev = bool(anchor_masks(self.anchor_spec)[ANCHOR_PREV_COMMAND].any())
 
         self.instruction = (config.instruction or self.train_args.get("instruction")
                             or DATASET_TASK_STRING)
@@ -193,6 +189,19 @@ class TRexOrigamiPolicy:
         self.use_f6 = bool(self.train_args.get("use_tactile_vec", 1))
         self.use_deform = bool(self.train_args.get("use_tactile_deform", 1))
 
+        # loading.model_load only writes state_mask/min/max when the checkpoint
+        # was trained with use_robot_state=1 -- this checkpoint has it at 0, so
+        # these keys are genuinely absent, not just unused. Reading them
+        # unconditionally (as this did before) is a KeyError waiting to happen
+        # on any use_robot_state=0 checkpoint; every checkpoint used so far had
+        # use_robot_state=1, so it never fired.
+        if self.use_state and "state_mask" in st:
+            self.state_mask = np.asarray(st["state_mask"], dtype=bool)
+            self.state_min, self.state_max = st["state_min"], st["state_max"]
+        else:
+            self.use_state = False
+            self.state_mask = self.state_min = self.state_max = None
+
         self.projector = None
         if config.safety not in ("none", None):
             self.projector = SafetyProjector(config.limits_path, config.safety,
@@ -203,16 +212,29 @@ class TRexOrigamiPolicy:
 
         # episode-scoped state
         self._f6_buffer: List[Tuple[float, np.ndarray]] = []
-        self._last_chunk: Optional[np.ndarray] = None
-        self._last_obs_time: Optional[float] = None
         self.last_timing: Dict[str, float] = {}
         self.n_infer = 0
 
-        print(f"[policy] {describe_anchor(self.anchor_spec)}; frozen dims "
-              f"{self.frozen_dims.tolist()}; prompt {self.instruction!r}; "
+        # cross-tick slow-pass cache (tactile_refine_every > 1 only)
+        if config.tactile_refine_every > 1 and config.n_draws > config.max_flow_batch:
+            raise ValueError(
+                "tactile_refine_every > 1 requires n_draws <= max_flow_batch "
+                f"(got n_draws={config.n_draws}, max_flow_batch={config.max_flow_batch}); "
+                "a K-batch split across sub-batches would only cache the last one")
+        self._tick = 0
+        self._cache_kv = None
+        self._cache_pos = None
+        self._cache_mask = None
+        self._cache_x_split = None
+        self._cache_n_action = None
+        self._cache_tau_split = None
+        self._cache_built_at = None
+
+        print(f"[policy] frozen dims {self.frozen_dims.tolist()}; "
+              f"prompt {self.instruction!r}; "
               f"mode={config.mode} steps={config.total_steps}/{config.split_step} "
-              f"K={config.n_draws} anchor={config.anchor_source} safety={config.safety} "
-              f"compile={config.compile}")
+              f"K={config.n_draws} safety={config.safety} compile={config.compile} "
+              f"tactile_refine_every={config.tactile_refine_every}")
         if config.compile:
             self._compile()
         if config.warmup:
@@ -258,16 +280,6 @@ class TRexOrigamiPolicy:
         load_args = load_args_from_checkpoint(self.cfg.checkpoint_path)
         model, processor, statistic = model_load(load_args)
         model = model.to(self.device).eval()
-        if not train_args.get("action_anchor"):
-            statistic["action_anchor"] = list(spec_from_meta(train_args))
-        # Mean command-minus-state offset the prep measured, per dim: the
-        # expected previous command given only the measured state.
-        with open(os.path.join(self.cfg.checkpoint_path, "stats_data.json")) as handle:
-            raw = json.load(handle)
-        block = raw[next(iter(raw))]
-        statistic["tracking_error_mean"] = np.asarray(
-            block.get("tracking_error", {}).get("mean", np.zeros(load_args.action_dim)),
-            dtype=np.float64)
         return model, processor, statistic, train_args
 
     def _warmup(self) -> None:
@@ -296,6 +308,23 @@ class TRexOrigamiPolicy:
             print(f"[policy] warm-up pattern {name}: first+second call "
                   f"{1000 * (time.time() - t0):.0f} ms, second call timing "
                   f"{self._fmt_timing()}")
+            if self.cfg.tactile_refine_every > 1:
+                # The two calls above can both land as "slow" if compiling took
+                # long enough to blow the staleness budget before the second
+                # call -- that would mean _flow_cached's call to
+                # tactile_flow_continue (a *reused*, prior-call DynamicCache,
+                # not a same-call fresh one) never gets exercised/compiled
+                # here, and the first real "fast" tick in the container would
+                # hit it live. Force it directly, bypassing the tick/staleness
+                # gate, so it is always compiled before READY.
+                t1 = time.time()
+                with self._lock, torch.inference_mode():
+                    f6 = np.asarray(obs[OBS_TACTILE], dtype=np.float32).reshape(
+                        N_FINGERS, F6_PER_FINGER)
+                    tactile = self._tactile_tensors(f6, obs.get(OBS_DEFORM), time.time())
+                    self._flow_cached(tactile, {})
+                print(f"[policy] warm-up pattern {name}: forced cached-fast call "
+                      f"{1000 * (time.time() - t1):.0f} ms")
         self.reset()
         print(f"[policy] warm-up complete in {time.time() - t_all:.1f} s")
 
@@ -310,15 +339,21 @@ class TRexOrigamiPolicy:
     def reset(self) -> None:
         with self._lock:
             self._f6_buffer.clear()
-            self._last_chunk = None
-            self._last_obs_time = None
+            self._tick = 0
+            self._cache_kv = None
+            self._cache_pos = None
+            self._cache_mask = None
+            self._cache_x_split = None
+            self._cache_n_action = None
+            self._cache_tau_split = None
+            self._cache_built_at = None
 
     def infer(self, observation: Dict[str, Any], now: Optional[float] = None) -> np.ndarray:
         """Full public observation -> float32[T, 65] absolute radians.
 
         `now` is the observation time in seconds; it defaults to wall-clock.
         An offline replay passes the frame timestamp so the tactile-history
-        resampling and the self-anchor index see replay time, not CPU time.
+        resampling sees replay time, not CPU time.
         """
         with self._lock, torch.inference_mode():
             return self._infer(observation, time.time() if now is None else float(now))
@@ -332,23 +367,40 @@ class TRexOrigamiPolicy:
             raise ValueError("observation/state is not finite")
         f6 = np.asarray(obs[OBS_TACTILE], dtype=np.float32).reshape(N_FINGERS, F6_PER_FINGER)
         self._push_f6(now, f6)
-
-        slow_imgs = [self._pil(obs[OBS_HEAD_LEFT])]
-        fast_imgs = [self._pil(obs[OBS_WRIST_RIGHT]), self._pil(obs[OBS_WRIST_LEFT])]
         tactile = self._tactile_tensors(f6, obs.get(OBS_DEFORM), now)
         timing["prep_ms"] = 1000 * (time.time() - t0)
 
-        t1 = time.time()
-        slow, pos, fast, mask, state_emb = self._embed(slow_imgs, fast_imgs, state)
-        self._sync()
-        timing["embed_ms"] = 1000 * (time.time() - t1)
+        every = max(1, int(self.cfg.tactile_refine_every))
+        stale = (self._cache_kv is None or self._cache_built_at is None
+                 or now - self._cache_built_at > self.cfg.tactile_refine_max_stale_s)
+        do_slow = every == 1 or stale or (self._tick % every == 0)
+        self._tick += 1
+        timing["slow_tick"] = 1.0 if do_slow else 0.0
 
-        t2 = time.time()
-        norm = self._flow(slow, pos, fast, mask, state_emb, tactile, timing)
-        timing["flow_ms"] = 1000 * (time.time() - t2)
+        if do_slow:
+            # This tick's camera images are used and the slow-pass KV is
+            # cached (if tactile_refine_every > 1) for later "fast" ticks to
+            # reuse -- see _flow_cached, which never looks at new images at
+            # all (tactile_flow_continue takes no vision input).
+            t1 = time.time()
+            slow_imgs = [self._pil(obs[OBS_HEAD_LEFT])]
+            fast_imgs = [self._pil(obs[OBS_WRIST_RIGHT]), self._pil(obs[OBS_WRIST_LEFT])]
+            slow, pos, fast, mask, state_emb = self._embed(slow_imgs, fast_imgs, state)
+            self._sync()
+            timing["embed_ms"] = 1000 * (time.time() - t1)
+            t2 = time.time()
+            norm = self._flow_slow(slow, pos, fast, mask, state_emb, tactile, timing,
+                                   cache=(every > 1), now=now)
+            timing["flow_ms"] = 1000 * (time.time() - t2)
+        else:
+            timing["embed_ms"] = 0.0
+            timing["cache_age_ms"] = 1000 * (now - self._cache_built_at)
+            t2 = time.time()
+            norm = self._flow_cached(tactile, timing)
+            timing["flow_ms"] = 1000 * (time.time() - t2)
 
         t3 = time.time()
-        actions = self._reconstruct(norm.mean(axis=0), state, now)
+        actions = self._reconstruct(norm.mean(axis=0), state)
         timing["post_ms"] = 1000 * (time.time() - t3)
         timing["total_ms"] = 1000 * (time.time() - t0)
         self.last_timing = timing
@@ -445,8 +497,16 @@ class TRexOrigamiPolicy:
             state_emb = model.state_embedder(vec).unsqueeze(1)
         return slow, position_ids, fast, attention_mask, state_emb
 
-    def _flow(self, slow, pos, fast, mask, state_emb, tactile, timing) -> np.ndarray:
-        """K draws from one prefix -> normalised [K, T, D] (float64 numpy)."""
+    def _flow_slow(self, slow, pos, fast, mask, state_emb, tactile, timing, cache: bool,
+                   now: float) -> np.ndarray:
+        """K draws from a fresh vision-language prefix -> normalised [K, T, D].
+
+        When `cache` is True (tactile_refine_every > 1), stashes the slow
+        pass's KV + prefix position ids/mask so later ticks can skip straight
+        to `_flow_cached` -- only valid when K fits in one `max_flow_batch`
+        (enforced in __init__), since caching mid-loop would only keep the
+        last sub-batch's state.
+        """
         K = self.cfg.n_draws
         model = self.model
         rep = lambda t, dim=0: None if t is None else t.repeat_interleave(K, dim=dim)
@@ -482,33 +542,42 @@ class TRexOrigamiPolicy:
                 **{k: (None if v is None else v[sl]) for k, v in tac_r.items()}))
             self._sync()
             timing["fast_ms"] = timing.get("fast_ms", 0.0) + 1000 * (time.time() - tf)
+            if cache:
+                self._cache_kv, self._cache_pos, self._cache_mask = kv, pos_r, mask_r
+                self._cache_x_split, self._cache_n_action = x_split, n_act
+                self._cache_tau_split, self._cache_built_at = tau, now
         return torch.cat(outs, dim=0).float().cpu().numpy().astype(np.float64)
 
-    def _prev_command(self, state: np.ndarray, now: float) -> np.ndarray:
-        """The command the robot was on one frame before this observation."""
-        if self.cfg.anchor_source == "state":
-            return state
-        fallback = state + self.te_mean          # expected previous command
-        if (self.cfg.anchor_source == "state_offset" or self._last_chunk is None
-                or self._last_obs_time is None):
-            return fallback
-        elapsed = now - self._last_obs_time
-        if elapsed < 0 or elapsed > self.cfg.stale_anchor_s:
-            return fallback
-        # The Gateway aligns chunk row 0 with the observation it came from, so
-        # row (frames since that observation) - 1 is the previous frame's command.
-        k = int(round(elapsed * CONTROL_HZ)) - 1
-        k = max(0, min(k, self._last_chunk.shape[0] - 1))
-        return self._last_chunk[k]
+    def _flow_cached(self, tactile, timing) -> np.ndarray:
+        """K draws continuing the tactile expert from a cached slow-tick KV.
 
-    def _reconstruct(self, norm_mean: np.ndarray, state: np.ndarray, now: float) -> np.ndarray:
-        rel = denormalize(norm_mean, self.action_mask, self.action_min, self.action_max)
-        anchor = build_anchor(state, self._prev_command(state, now), self.anchor_spec)
-        absolute = clamp_frozen_absolute(rel + anchor[None, :], self.action_mask, state)
+        Reuses `self._cache_*` from the last `_flow_slow(..., cache=True)`
+        call verbatim -- no vision-language forward pass, and blind to any
+        new camera images in this tick's own observation, since
+        `tactile_flow_continue` takes no vision input at all (only cached
+        KV + fresh tactile). `cached_kv` is cloned inside that call, so the
+        same stored object can be reused across many separate ticks safely.
+        """
+        K = self.cfg.n_draws
+        model = self.model
+        tac_r = {k: (None if v is None else v.repeat_interleave(K, dim=0))
+                for k, v in tactile.items()}
+        tf = time.time()
+        out = model.tactile_flow_continue(
+            cached_kv=self._cache_kv, latent_position_ids=self._cache_pos,
+            n_action_in_cache=self._cache_n_action, x_split=self._cache_x_split,
+            tau_split=self._cache_tau_split, attention_mask=self._cache_mask,
+            num_steps_total=self.cfg.total_steps, split_step=self.cfg.split_step,
+            **tac_r)
+        self._sync()
+        timing["fast_ms"] = 1000 * (time.time() - tf)
+        return out.float().cpu().numpy().astype(np.float64)
+
+    def _reconstruct(self, norm_mean: np.ndarray, state: np.ndarray) -> np.ndarray:
+        absolute = denormalize(norm_mean, self.action_mask, self.action_min, self.action_max)
+        absolute = clamp_frozen_absolute(absolute, self.action_mask, state)
         if self.projector is not None:
             absolute = self.projector.project(state, absolute)
-        self._last_chunk = absolute
-        self._last_obs_time = now
         actions = np.ascontiguousarray(absolute, dtype=np.float32)
         if actions.shape != (self.action_chunk, self.action_dim) or not np.isfinite(actions).all():
             raise RuntimeError("policy produced an invalid action chunk")
@@ -584,8 +653,6 @@ def add_policy_arguments(parser) -> None:
     parser.add_argument("--split_step", type=int, default=int(env("TREX_SPLIT_STEP", "6")))
     parser.add_argument("--n_draws", type=int, default=int(env("TREX_N_DRAWS", "8")))
     parser.add_argument("--max_flow_batch", type=int, default=64)
-    parser.add_argument("--anchor_source", choices=["state", "state_offset", "self"],
-                        default=env("TREX_ANCHOR_SOURCE", "state_offset"))
     parser.add_argument("--safety", choices=["tol", "urdf", "off", "none"],
                         default=env("TREX_SAFETY", "tol"))
     parser.add_argument("--rate_margin", type=float, default=0.999)
@@ -598,13 +665,21 @@ def add_policy_arguments(parser) -> None:
     parser.add_argument("--compile", type=int, default=int(os.environ.get("TREX_COMPILE", "0")),
                         help="1 = torch.compile the flow functions (default from $TREX_COMPILE)")
     parser.add_argument("--compile_mode", default="default")
+    parser.add_argument("--tactile_refine_every", type=int,
+                        default=int(env("TREX_TACTILE_REFINE_EVERY", "1")),
+                        help="1 = always full slow+fast (default); N>1 = reuse cached slow-tick "
+                             "KV for (N-1)/N ticks, running the tactile expert only")
+    parser.add_argument("--tactile_refine_max_stale_s", type=float,
+                        default=float(env("TREX_TACTILE_REFINE_MAX_STALE_S", "0.5")))
 
 
 def config_from_args(args) -> PolicyConfig:
     return PolicyConfig(
         checkpoint_path=args.checkpoint_path, mode=args.mode, total_steps=args.total_steps,
         split_step=args.split_step, n_draws=args.n_draws, max_flow_batch=args.max_flow_batch,
-        anchor_source=args.anchor_source, safety=args.safety, rate_margin=args.rate_margin,
+        safety=args.safety, rate_margin=args.rate_margin,
         limits_path=args.limits_path, instruction=args.instruction,
         tactile_history=args.tactile_history, device=args.device, seed=args.seed,
-        warmup=not args.no_warmup, compile=bool(args.compile), compile_mode=args.compile_mode)
+        warmup=not args.no_warmup, compile=bool(args.compile), compile_mode=args.compile_mode,
+        tactile_refine_every=args.tactile_refine_every,
+        tactile_refine_max_stale_s=args.tactile_refine_max_stale_s)

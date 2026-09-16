@@ -19,7 +19,6 @@ import torch
 from transformers import AutoProcessor
 
 from qwen_vla import Qwen3VLVLAModel
-from .anchoring import describe as describe_anchor, spec_from_meta
 
 __all__ = ["model_load", "load_args_from_checkpoint"]
 
@@ -264,21 +263,13 @@ def model_load(args):
         statistic["state_min"]  = _arr("state", "q01")
         statistic["state_max"]  = _arr("state", "q99")
 
+    # All 65 outputs are absolute joint radians -- no anchor/delta reconstruction.
+    # A handful of near-static dims are held at the measured state instead of
+    # predicted; frozen_action_dims/clamp_frozen_absolute (qwen_vla.origami_dataset)
+    # derive that list from the norm-stats mask, not from anything recorded here.
     frozen = np.where(~np.asarray(statistic["action_mask"], dtype=bool))[0]
     if frozen.size:
         print(f"[serve] frozen action dims {frozen.tolist()} -> held at state[j] "
               f"(normalisation passthrough dims; see _clamp_frozen_absolute)")
-
-    # What the 65 outputs are measured from.  Written into training_args.json by
-    # the trainer; a checkpoint that predates it was trained all-delta-from-state,
-    # which is what `spec_from_meta` returns for an empty dict.
-    statistic["action_anchor"] = spec_from_meta(ta)
-    print(f"[serve] action anchoring {describe_anchor(statistic['action_anchor'])}")
-    if not ta.get("action_anchor"):
-        print("[serve] WARNING: this checkpoint records no `action_anchor`; assuming "
-              "the legacy all-delta-from-state rule. If it was in fact trained on "
-              "hybrid-anchored data, every arm joint will be off by the "
-              "command-minus-state offset and the 51 hand/motor dims will be "
-              "catastrophically wrong.")
 
     return model, processor, statistic

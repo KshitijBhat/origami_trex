@@ -31,7 +31,6 @@ import numpy as np
 import PIL.Image
 import pyarrow.parquet as pq
 
-from .anchoring import build_anchor, spec_from_meta, to_absolute
 from .lerobot_v3 import LeRobotV3Season, wire_observations
 from .seasons import ACTION_DIM, DATASET_TASK_STRING
 
@@ -73,8 +72,7 @@ class FlatSource:
             self.meta = json.load(handle)
         self.episodes = self.meta["episodes"]
         self.stride = int(self.meta.get("config", {}).get("sample_stride", 1))
-        self.chunk = int(self.meta.get("config", {}).get("action_chunk", 25))
-        self.spec = spec_from_meta(self.meta)
+        self.chunk = int(self.meta.get("config", {}).get("action_chunk", 16))
         self.fps = 30.0
         self.name = os.path.basename(root.rstrip("/"))
 
@@ -88,13 +86,15 @@ class FlatSource:
         return pq.read_table(os.path.join(self.root, self.episodes[episode_index]["file"]))
 
     def gt_actions(self, episode_index: int) -> np.ndarray:
-        """30 Hz absolute command stream reassembled from the rows' chunks."""
+        """30 Hz absolute command stream reassembled from the rows' chunks.
+
+        `action_chunk` is already absolute joint radians (no anchor/delta) --
+        `action[min(t+k, s+N-1)]` per prepare.py's schema.
+        """
         table = self._table(episode_index)
         state = np.asarray(table["state"].to_pylist(), dtype=np.float64)
-        prev = np.asarray(table["prev_command"].to_pylist(), dtype=np.float64)
-        rel = np.asarray(table["action_chunk"].to_pylist(), dtype=np.float64).reshape(
-            len(state), self.chunk, ACTION_DIM)
-        absolute = to_absolute(rel, build_anchor(state, prev, self.spec))   # [R, T, D]
+        absolute = np.asarray(table["action_chunk"].to_pylist(), dtype=np.float64).reshape(
+            len(state), self.chunk, ACTION_DIM)                            # [R, T, D]
         if self.stride > self.chunk:
             raise ValueError("sample stride exceeds the chunk; no dense GT stream")
         return np.concatenate([absolute[r, :self.stride] for r in range(len(state))])
@@ -105,10 +105,8 @@ class FlatSource:
         table = self._table(episode_index)
         n_rows = table.num_rows
         state = np.asarray(table["state"].to_pylist(), dtype=np.float32)
-        prev = np.asarray(table["prev_command"].to_pylist(), dtype=np.float64)
-        rel = np.asarray(table["action_chunk"].to_pylist(), dtype=np.float64).reshape(
+        absolute = np.asarray(table["action_chunk"].to_pylist(), dtype=np.float64).reshape(
             n_rows, self.chunk, ACTION_DIM)
-        absolute = to_absolute(rel, build_anchor(state.astype(np.float64), prev, self.spec))
         hist = np.asarray(table["tacf6_hist"].to_pylist(), dtype=np.float32).reshape(
             n_rows, -1, 60)
         prompt = self.episodes[episode_index].get("instruction") or DATASET_TASK_STRING

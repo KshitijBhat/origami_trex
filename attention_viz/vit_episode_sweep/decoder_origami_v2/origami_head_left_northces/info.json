@@ -1,0 +1,15 @@
+{
+  "clip": "origami_head_left_northces",
+  "checkpoint": "/workspace/checkpoint/checkpoint-2-7000",
+  "video": "/workspace/episode_videos/season_POC22061_2026_07_14_10_09_42_train/lerobotv2.1/videos/chunk-000/observation.images.head_left/episode_000000.mp4",
+  "instruction": "north ces task",
+  "fps": 0.333,
+  "n_frames": 63,
+  "n_layers": 28,
+  "words_matched": "3/3",
+  "content_words": {
+    "01_north": 1,
+    "02_ces": 1,
+    "03_task": 2
+  }
+}
