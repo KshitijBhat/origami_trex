@@ -132,7 +132,7 @@ its own tokenized sequence to be forwarded separately later). Output:
 dicts with batched tensors (`input_ids`, `attention_mask`, `pixel_values`,
 `image_grid_thw`, plus `action_abs`/`tacf6_hist` for the fast tier).
 
-**B) Model-side (`modeling_qwen3vl_mot.py`, `modeling_vla.py`) -- SLOW + FAST TIERS DONE (code+CPU tests), GPU forward pass not yet run**
+**B) Model-side (`modeling_qwen3vl_mot.py`, `modeling_vla.py`) -- SLOW + FAST TIERS DONE, verified on real GPU with real weights (2026-09-18)**
 
 **Decided: raw per-token KV reuse (zero new weights), not latent-compressed
 memory.** Considered compressing each past row into a small number of
@@ -321,8 +321,8 @@ tiers are already baked in transitively once that call is fed `memory_kv`.
     target, and Part B's position shift must reflect what the content
     actually is. New test case in the local CPU-only suite confirms clamped
     rows report the correct real gap (not the nominal target).
-- **Part B, slow + fast tiers: code done, CPU-only tests pass (no GPU
-  available this session -- see below).**
+- **Part B, slow + fast tiers: code done, verified both locally (CPU-only)
+  and on a real GPU with real weights (see below).**
   - Slow: `shift_position_ids_for_memory` + `build_memory_kv_slow` +
     `_front_pad_attention_mask`, `memory_kv` wired into
     `forward_flow_action_full`/`_partial` (param renamed from
@@ -345,13 +345,61 @@ tiers are already baked in transitively once that call is fed `memory_kv`.
     monotonically decreasing oldest->newest, and `_front_pad_attention_mask`
     chains correctly across two sequential accumulation steps (simulating
     slow-then-fast growing one combined cache).
-  - **NOT yet verified**: an actual forward pass through the real 2B model
-    (needs GPU + real weights + the real vision tower loaded into
-    `self.visual`, which stays `None` until externally set -- too heavy
-    for a CPU-only test). Pure math/plumbing verification only so far.
-    `rope_stride` for both tiers (slow default 32.0, fast default 8.0 --
-    fast ticks assumed much closer in wall-clock time) are placeholders
-    needing empirical calibration once a GPU is available.
+  - **GPU verification (2026-09-18, real hardware, real weights):**
+    `T-Rex/scripts/gpu_smoke_test_memory.py` builds a real
+    `Qwen3VLVLAModel` via `from_pretrained_qwen3vl("Qwen/Qwen3-VL-2B-
+    Instruct", ...)` (real pretrained text+vision weights; the new MoT
+    expert/VLA-specific weights -- `x_embedder`, `tacf6_embedder`,
+    `tactile_code_embedder`, etc. -- are randomly initialized, so this
+    verifies wiring/shapes/numerics, not trained policy quality), a real
+    `AutoProcessor`, and a live tick + `memory_slow`/`memory_fast` rows
+    built through the same `apply_chat_template`+processor path
+    `collate_fn` uses. Ran on an A100-40GB. Results: `build_memory_kv_slow`
+    and `build_memory_kv_fast` both populate real caches without error
+    (seq_len 156 slow-only, 442 combined slow+fast); `memory_kv=None`
+    (regression) is finite and byte-reproducible across repeated calls,
+    for both `forward_flow_action_full` and the cascaded
+    `forward_flow_action_partial`+`tactile_flow_continue` path;
+    `memory_kv=<slow+fast>` is finite for both paths and MEASURABLY changes
+    the output vs. the no-memory baseline (max abs diff 0.775 for the full
+    flow, 0.498 for the cascaded/tactile path) -- confirming the memory
+    tiers are genuinely wired into attention, not a silent no-op, and that
+    `tactile_flow_continue` really does inherit both tiers transitively
+    through `cached_kv` (it never receives `memory_kv` directly, as
+    designed). All 9 checks (7 explicit + 2 no-op checks) pass.
+    - Two test-script setup bugs found and fixed along the way (both in the
+      test script, not the memory-feature code): (1) `vqvae_config={}`'s
+      default `codebook_size=1024` didn't match the model's own
+      `vqvae_codebook_size=64` `tactile_code_embedder` table, so the
+      randomly-initialized VQ-VAE could emit out-of-range codes -> CUDA
+      `indexSelectSmallIndex` assert; fixed by passing
+      `vqvae_config={"codebook_size": 64}` to match. (2)
+      `from_pretrained_qwen3vl`'s `torch_dtype` arg only covers weights
+      loaded from the pretrained base model -- the new VLA-specific
+      modules are constructed at default float32 and need an explicit
+      `model.to(torch.bfloat16)` afterward (confirmed this is exactly what
+      the real production loader, `trex_origami/loading.py`, already does)
+      -- fixed by adding that cast to the test script.
+    - Separate, pre-existing, unrelated finding while setting up the GPU
+      box: a bare `pip install transformers` pulls whatever is newest
+      (5.16.1 / 5.17.0 both tried), which breaks even plain
+      `Qwen3VLVLAModel` construction -- `Qwen3VLTextRotaryEmbedding.__init__`
+      in current transformers reads `config.rope_parameters`, which this
+      repo's `Qwen3VLRotaryEmbeddingWrapper`'s `_RopeCfg` shim
+      (`modeling_qwen3vl_mot.py`) does not set (it was written against an
+      older transformers API using `rope_scaling`/`rope_theta` directly).
+      This repo's own `pyproject.toml` already correctly pins
+      `transformers==4.57.3` -- the fix was simply installing that exact
+      pin rather than latest. Not a memory-feature bug and nothing was
+      changed in the shipped code for it, but worth remembering: any
+      fresh GPU box for this repo needs `transformers==4.57.3` specifically,
+      not "whatever's current."
+    - `rope_stride` for both tiers (slow default 32.0, fast default 8.0)
+      remain UNTUNED placeholders -- this session confirmed they produce
+      finite, sane-shaped, non-degenerate output, not that the specific
+      values are good ones. Empirical tuning (e.g. sweeping rope_stride and
+      checking downstream loss/behavior once a trained checkpoint exists)
+      is still open.
   - **Known limitation**: fast-tier tactile memory only supports the
     on-the-fly VQ-VAE path (`use_tactile_vqvae=True`) -- a row with
     `tacf6_hist` but no VQ-VAE silently skips tactile for that memory row
@@ -374,5 +422,7 @@ tiers are already baked in transitively once that call is fed `memory_kv`.
 - `T-Rex/scripts/test.py` (Part C)
 - `T-Rex/hardware_code/eval/eval_trex_async.py` (Part C)
 - `T-Rex/scripts/smoke_test_memory_windowing.py` (Part A CPU-only test)
-- `T-Rex/scripts/smoke_test_memory_position_mask.py` (Part B slow-tier
-  CPU-only test)
+- `T-Rex/scripts/smoke_test_memory_position_mask.py` (Part B CPU-only test,
+  slow + fast tier pure-logic cases)
+- `T-Rex/scripts/gpu_smoke_test_memory.py` (Part B real-GPU/real-weights
+  test -- needs a GPU box + `transformers==4.57.3` per pyproject.toml)
