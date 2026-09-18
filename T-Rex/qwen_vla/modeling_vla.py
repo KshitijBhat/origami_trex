@@ -589,8 +589,9 @@ class Qwen3VLVLAModel(nn.Module):
         """
         Populate a DynamicCache from a list of past ("memory_slow") rows,
         oldest first, for use as the seed `past_key_values` of a live
-        forward call (`forward_flow_action_full`/`_partial`'s new
-        `memory_kv_slow` argument).
+        forward call (`forward_flow_action_full`/`_partial`'s `memory_kv`
+        argument -- typically chained through `build_memory_kv_fast` first
+        so both tiers land in one combined cache, see that method).
 
         Each row is one entry of `OrigamiDataset.collate_fn`'s
         `memory_slow` output: `input_ids`/`attention_mask`/`pixel_values`/
@@ -656,6 +657,126 @@ class Qwen3VLVLAModel(nn.Module):
 
         return past_kv
 
+    @torch.no_grad()
+    def build_memory_kv_fast(
+        self,
+        memory_rows: List[Dict[str, torch.Tensor]],
+        past_kv: Optional["DynamicCache"] = None,
+        rope_stride: float = 8.0,
+    ) -> Optional["DynamicCache"]:
+        """
+        Populate/extend a DynamicCache from a list of past ("memory_fast")
+        rows, oldest first, CONTINUING whatever `past_kv` is passed in.
+
+        Typical use: feed `build_memory_kv_slow`'s output cache in as
+        `past_kv` here, so both memory tiers land in ONE combined cache --
+        layout `[slow memory | fast memory | live tokens]`, all attended
+        jointly once passed as `forward_flow_action_full`/`_partial`'s
+        `memory_kv` argument. Passing `past_kv=None` builds a fast-only
+        cache (e.g. for isolated testing).
+
+        Each row is one entry of `OrigamiDataset.collate_fn`'s
+        `memory_fast` output: `input_ids`/`attention_mask`/`pixel_values`/
+        `image_grid_thw` (wrist_right + wrist_left images, tokenized via
+        the same chat-template path the live fast segment's wrist images
+        use -- see `split_slow_fast_embeds`), plus `action_abs`
+        (`[B, action_dim]`, that row's executed action) and optionally
+        `tacf6_hist` (`[B, W, 10, 6]`, that row's raw tactile window).
+
+        Content per row is embedded as [wrist images | past action |
+        tactile observation] -- action before tactile deliberately matches
+        `Qwen3VLModelMoT._extend_position_ids`'s own `(n_action,
+        n_tactile)` ordering convention, so that existing helper (not a
+        new one) can build correct position_ids for the appended tokens.
+
+        Unlike memory_slow (exponential lookback with a real per-row
+        `dt_actual`), memory_fast is a short LINEAR window with no
+        recorded per-row timestamp in the dataset -- ticks are assumed
+        uniformly spaced (design note: fast ticks are close enough
+        together that count ~= time), so row `i` of `K` (oldest first) is
+        offset `(K - i) * rope_stride` RoPE units, not a measured elapsed
+        time. `rope_stride` is a separate, smaller-scale placeholder than
+        memory_slow's (fast ticks are much closer in wall-clock time) --
+        also pending empirical GPU calibration.
+
+        Tactile embedding currently only supports the on-the-fly VQ-VAE
+        path (`use_tactile_vqvae=True`, matching `_embed_tactile_
+        observations`'s own on-the-fly trigger condition) -- if a row
+        carries `tacf6_hist` but the model has no VQ-VAE (e.g.
+        `use_tactile_vec`-only, raw-vector configs), tactile is silently
+        skipped for memory rather than raising, since `tacf6_hist` is a
+        history window shaped for the VQ-VAE path, not the plain-vector
+        `tactile_f6` path. Known limitation, not yet needed by any tested
+        config (see MEMORY_DESIGN.md).
+
+        Returns `past_kv` unchanged (including `None`) when `memory_rows`
+        is empty -- matches `build_memory_kv_slow`'s no-op convention.
+        """
+        if not memory_rows:
+            return past_kv
+
+        K = len(memory_rows)
+        for i, row in enumerate(memory_rows):
+            input_ids      = row["input_ids"]
+            pixel_values    = row.get("pixel_values")
+            image_grid_thw  = row.get("image_grid_thw")
+            row_attn_mask   = row.get("attention_mask")
+            action_abs      = row["action_abs"]
+            tacf6_hist      = row.get("tacf6_hist")
+
+            B, L_wrist = input_ids.shape[:2]
+
+            wrist_embeds = self.prepare_inputs_embeds(
+                input_ids, pixel_values, image_grid_thw)
+            device = wrist_embeds.device
+            dtype  = wrist_embeds.dtype
+            position_ids, _ = self.get_rope_index(
+                input_ids, image_grid_thw, row_attn_mask)
+
+            action_embed = self.x_embedder(
+                action_abs.to(device=device, dtype=dtype).unsqueeze(1))  # [B, 1, H]
+            n_action = 1
+
+            if (tacf6_hist is not None and tacf6_hist.shape[1] > 0
+                    and self.use_tactile_vqvae and self.tactile_vqvae is not None):
+                tac_embeds = self._embed_tactile_observations(
+                    None, None, device, dtype,
+                    tactile_f6_history=tacf6_hist.to(device=device))
+            else:
+                tac_embeds = wrist_embeds.new_zeros(B, 0, wrist_embeds.shape[-1])
+            n_tactile = tac_embeds.shape[1]
+
+            row_embeds = torch.cat([wrist_embeds, action_embed, tac_embeds], dim=1)
+            L_total = row_embeds.shape[1]
+
+            extended_pos = self.model._extend_position_ids(
+                position_ids, n_action, n_tactile)
+            time_offset = torch.full(
+                (B,), (K - i) * rope_stride, device=device, dtype=extended_pos.dtype)
+            extended_pos = self.model.shift_position_ids_for_memory(
+                extended_pos, time_offset)
+
+            # Front-pad by whatever's already cached (e.g. slow memory);
+            # build_causal_mask's own tail-pad then correctly covers the
+            # appended action/tactile tokens (always real, never padded) --
+            # same mechanic as build_memory_kv_slow, see its docstring.
+            call_attn_mask = self._front_pad_attention_mask(
+                row_attn_mask, B, L_wrist, past_kv, device)
+
+            outputs = self.model(
+                inputs_embeds=row_embeds,
+                position_ids=extended_pos,
+                attention_mask=call_attn_mask,
+                past_key_values=past_kv,
+                use_cache=True,
+                latent_indexes=torch.arange(0, L_wrist, device=device),
+                action_indexes=torch.arange(L_wrist, L_wrist + n_action, device=device),
+                tactile_indexes=torch.arange(L_wrist + n_action, L_total, device=device),
+            )
+            past_kv = outputs.past_key_values
+
+        return past_kv
+
     # ──────────────────────────────────────────────────────────────────────
     # Cascaded flow matching
     #
@@ -678,7 +799,7 @@ class Qwen3VLVLAModel(nn.Module):
         state_embeds: Optional[torch.Tensor] = None,
         fast_embeds: Optional[torch.Tensor] = None,
         num_steps: int = 10,
-        memory_kv_slow: Optional["DynamicCache"] = None,
+        memory_kv: Optional["DynamicCache"] = None,
     ) -> torch.Tensor:
         """Action-expert-only full flow τ ∈ [0, 1].
 
@@ -709,14 +830,16 @@ class Qwen3VLVLAModel(nn.Module):
         n_state = state_embeds.shape[1]
         L_latent = inputs_embeds.shape[1]
 
-        # memory_kv_slow (if any) sits in the cache BEFORE the live latent
-        # tokens -- front-pad attention_mask once, up front, so it keeps
-        # describing the live-latent block at its new (shifted) offset for
-        # every iteration below (see _front_pad_attention_mask docstring).
+        # memory_kv (if any -- typically slow+fast tiers already combined
+        # by the caller via build_memory_kv_slow then build_memory_kv_fast)
+        # sits in the cache BEFORE the live latent tokens -- front-pad
+        # attention_mask once, up front, so it keeps describing the
+        # live-latent block at its new (shifted) offset for every
+        # iteration below (see _front_pad_attention_mask docstring).
         attention_mask = self._front_pad_attention_mask(
-            attention_mask, B, L_latent, memory_kv_slow, device)
+            attention_mask, B, L_latent, memory_kv, device)
 
-        past_kv = memory_kv_slow
+        past_kv = memory_kv
         n_act = 0
         for step_idx in range(num_steps):
             timesteps = self.t_embedder(time.expand(B)).unsqueeze(1)
@@ -775,7 +898,7 @@ class Qwen3VLVLAModel(nn.Module):
         num_steps_total: int = 10,
         split_step: int = 6,
         refresh_clean_kv: bool = True,
-        memory_kv_slow: Optional["DynamicCache"] = None,
+        memory_kv: Optional["DynamicCache"] = None,
     ) -> Tuple[torch.Tensor, "DynamicCache", int, float]:
         """Cascaded slow-tick: run the action expert for `split_step` of
         `num_steps_total` Euler steps, stopping at τ = 1 − split_step/num_steps_total.
@@ -811,13 +934,13 @@ class Qwen3VLVLAModel(nn.Module):
         n_state = state_embeds.shape[1]
         L_latent = inputs_embeds.shape[1]
 
-        # See forward_flow_action_full: memory_kv_slow sits in the cache
+        # See forward_flow_action_full: memory_kv sits in the cache
         # BEFORE the live latent tokens, so attention_mask must be
         # front-padded once, up front, to stay aligned for every iteration.
         attention_mask = self._front_pad_attention_mask(
-            attention_mask, B, L_latent, memory_kv_slow, device)
+            attention_mask, B, L_latent, memory_kv, device)
 
-        past_kv = memory_kv_slow
+        past_kv = memory_kv
         n_act = 0
         for i in range(split_step):
             timesteps = self.t_embedder(time.expand(B)).unsqueeze(1)

@@ -150,6 +150,98 @@ def test_end_to_end_total_axis_consistency_with_build_causal_mask():
           "structure intact across the whole [memory|latent|act] axis")
 
 
+# ─── Fast-tier tests (build_memory_kv_fast's internals) ─────────────────────
+# build_memory_kv_fast itself needs a real instantiated 2B model + vision
+# tower (self.visual is None until externally loaded -- too heavy for a
+# CPU-only test), so these exercise the same pure staticmethod composition
+# it performs internally: _extend_position_ids (action-then-tactile
+# ordering) + shift_position_ids_for_memory (uniform backward translation)
+# + _front_pad_attention_mask (mask alignment), and the (K-i)*rope_stride
+# offset formula in isolation.
+
+def test_extend_then_shift_ordering_matches_content_order():
+    """build_memory_kv_fast embeds content as [wrist | action | tactile] and
+    calls _extend_position_ids(position_ids, n_action, n_tactile) -- confirm
+    that ordering convention (action positions before tactile positions)
+    really matches _extend_position_ids's own layout, then confirm the
+    subsequent memory shift translates the WHOLE extended block uniformly
+    (wrist + action + tactile together), not just the original wrist part.
+    """
+    from qwen_vla.modeling_qwen3vl_mot import Qwen3VLModelMoT as MoT
+
+    B, L_wrist = 2, 3
+    # Fresh get_rope_index()-shaped output for the wrist block: 0-based.
+    position_ids = torch.arange(L_wrist).view(1, 1, L_wrist).expand(3, B, L_wrist).clone()
+    n_action, n_tactile = 1, 2
+
+    extended = MoT._extend_position_ids(position_ids, n_action, n_tactile)
+    assert extended.shape == (3, B, L_wrist + n_action + n_tactile)
+    # Wrist block unchanged.
+    assert torch.equal(extended[:, :, :L_wrist], position_ids)
+    # Action position immediately follows wrist's max (L_wrist - 1 -> L_wrist).
+    assert (extended[:, :, L_wrist] == L_wrist).all()
+    # Tactile positions follow the action position, still increasing.
+    assert (extended[:, :, L_wrist + 1] == L_wrist + 1).all()
+    assert (extended[:, :, L_wrist + 2] == L_wrist + 2).all()
+
+    # Now shift the whole extended block as build_memory_kv_fast does --
+    # every position (wrist AND appended action/tactile) must move by the
+    # SAME per-batch amount, preserving their relative order/spacing.
+    time_offset = torch.tensor([20, 20], dtype=extended.dtype)
+    shifted = MoT.shift_position_ids_for_memory(extended, time_offset)
+    assert torch.equal(shifted, extended - 20)
+    # Relative ordering (wrist < action < tactile) must survive the shift.
+    assert (shifted[:, :, L_wrist] > shifted[:, :, L_wrist - 1]).all()
+    assert (shifted[:, :, L_wrist + 1] > shifted[:, :, L_wrist]).all()
+    print("[PASS] _extend_position_ids + shift_position_ids_for_memory compose "
+          "correctly for the [wrist | action | tactile] fast-memory row layout")
+
+
+def test_fast_memory_offset_formula_oldest_first():
+    """build_memory_kv_fast uses offset (K - i) * rope_stride for row i of K
+    (oldest first, i=0..K-1) -- confirm this gives the oldest row the LARGEST
+    offset and decreases monotonically to the newest, matching the dataset's
+    own oldest->newest memory_fast ordering (origami_dataset.py)."""
+    K, rope_stride = 3, 8.0
+    offsets = [(K - i) * rope_stride for i in range(K)]
+    assert offsets == [24.0, 16.0, 8.0]
+    assert offsets == sorted(offsets, reverse=True)
+    print(f"[PASS] fast-memory offset formula: oldest->newest offsets {offsets}, "
+          f"monotonically decreasing as expected")
+
+
+def test_front_pad_attention_mask_chains_across_slow_then_fast():
+    """Simulates build_memory_kv_slow's output being fed as build_memory_kv_
+    fast's past_kv: the fast tier's own front-pad must account for
+    whatever the slow tier already accumulated, and the two front-pads
+    compose correctly (total front-pad after both tiers == slow_len +
+    fast_row's own past_len at call time)."""
+    B, L_slow_total, L_fast_wrist = 2, 12, 5  # e.g. 4 slow rows * 3 tokens each
+
+    # After build_memory_kv_slow finishes, its cache holds L_slow_total
+    # tokens. build_memory_kv_fast's first row front-pads against THAT.
+    fast_mask = torch.ones(B, L_fast_wrist, dtype=torch.long)
+    padded_first_fast_row = Qwen3VLVLAModel._front_pad_attention_mask(
+        fast_mask, batch_size=B, seq_len=L_fast_wrist,
+        past_kv=_FakePastKV(L_slow_total), device=torch.device("cpu"))
+    assert padded_first_fast_row.shape == (B, L_slow_total + L_fast_wrist)
+    assert (padded_first_fast_row[:, :L_slow_total] == 1).all()
+    assert torch.equal(padded_first_fast_row[:, L_slow_total:], fast_mask)
+
+    # A second fast row calls _front_pad_attention_mask again with the
+    # NEW past_len (slow + first fast row's full [wrist|action|tactile]
+    # length, e.g. 5+1+2=8) -- confirm it keeps accounting correctly.
+    n_action, n_tactile = 1, 2
+    past_len_after_row0 = L_slow_total + (L_fast_wrist + n_action + n_tactile)
+    padded_second_fast_row = Qwen3VLVLAModel._front_pad_attention_mask(
+        fast_mask, batch_size=B, seq_len=L_fast_wrist,
+        past_kv=_FakePastKV(past_len_after_row0), device=torch.device("cpu"))
+    assert padded_second_fast_row.shape == (B, past_len_after_row0 + L_fast_wrist)
+    assert (padded_second_fast_row[:, :past_len_after_row0] == 1).all()
+    print("[PASS] _front_pad_attention_mask chains correctly across slow-then-fast "
+          "memory tiers accumulating in one combined cache")
+
+
 if __name__ == "__main__":
     test_shift_position_ids_basic()
     test_shift_position_ids_zero_offset_is_noop()
@@ -158,4 +250,7 @@ if __name__ == "__main__":
     test_front_pad_attention_mask_real_padding()
     test_front_pad_attention_mask_none_mask_with_past_kv()
     test_end_to_end_total_axis_consistency_with_build_causal_mask()
+    test_extend_then_shift_ordering_matches_content_order()
+    test_fast_memory_offset_formula_oldest_first()
+    test_front_pad_attention_mask_chains_across_slow_then_fast()
     print("\nALL TESTS PASSED")
