@@ -203,6 +203,32 @@ class OrigamiDataset(torch.utils.data.Dataset):
         self.use_tactile_vqvae = bool(g("use_tactile_vqvae", 0))
         self.use_robot_state = bool(g("use_robot_state", 0))
         self.vqvae_window = int(g("vqvae_window", 16))
+        # Cross-timestep memory (dev/memory): past same-episode rows, split
+        # along the same slow(head+text)/fast(wrist+action+tactile) boundary
+        # `collate_fn` already uses for the live row (see split_slow_fast_embeds
+        # in modeling_vla.py). Empty list / 0 = off, byte-identical to current
+        # behavior.
+        #
+        # Slow (context) memory uses an EXPONENTIAL lookback in *seconds*, not
+        # a fixed row count: task-level context is useful much further back
+        # than it's useful densely, so a few log-spaced samples (default
+        # curr + 0.25/0.5/1/5s ago) cover a 5s reach for the same token cost
+        # as 4 consecutive rows would (which at 30Hz only reaches ~0.13s
+        # back). Converted to row offsets via self.sample_fps (already
+        # computed above). Fast (wrist+action+tactile) memory stays a short
+        # *linear* window instead -- it's meant to catch a near-immediate
+        # reflex (e.g. a slip), where reaching seconds back is dead weight.
+        self.memory_slow_seconds = list(g("memory_slow_seconds", []) or [])
+        # Fixed ABSOLUTE jitter (seconds), not a percentage of each target --
+        # at inference the memory buffer is timestamped and each target is
+        # matched to its nearest real tick (ticks aren't perfectly uniform),
+        # so the real achieved lookback error is bounded by roughly half the
+        # inter-tick interval, which doesn't scale with how far back the
+        # target is. Training samples dt_k = nominal_k +/- jitter so the
+        # model isn't trained on unrealistically exact offsets. 0 = off
+        # (exact offsets every time).
+        self.memory_slow_jitter_sec = float(g("memory_slow_jitter_sec", 0.0))
+        self.memory_fast = int(g("memory_fast", 0))
         self.action_dim = int(g("action_dim", ACTION_DIM))
         self.action_chunk = int(g("action_chunk", ACTION_CHUNK))
         self.state_noise_mode = str(g("state_noise_mode", "none"))
@@ -392,6 +418,53 @@ class OrigamiDataset(torch.utils.data.Dataset):
                 rr = r if nxt == row else self._read_row(ei, nxt)
                 flare.append(self._pil(rr["head"]))
             item["flare"] = flare
+        if self.memory_slow_seconds:
+            # Past rows' slow/latent content only (head image + task text),
+            # sampled at EXPONENTIAL lookback in seconds (not a fixed row
+            # count) -- e.g. curr + 0.25/0.5/1/5s ago, converted to row
+            # offsets via self.sample_fps. Left-padded at episode start by
+            # clamping to row 0, same convention tacf6_hist's own history
+            # window already uses. Sorted furthest-first so the result is
+            # oldest -> newest, matching item["flare"]'s ordering convention,
+            # regardless of what order the seconds were given in config.
+            mem_slow = []
+            for dt_nominal in sorted(self.memory_slow_seconds, reverse=True):
+                # Fixed absolute jitter (not scaled by dt_nominal) -- matches
+                # the nearest-timestamp snap error at inference, which is
+                # bounded by ~half the inter-tick interval regardless of how
+                # far back the target is. Clamp at 0: jitter must not push a
+                # near target negative ("seconds back" can't be negative).
+                dt = dt_nominal
+                if self.memory_slow_jitter_sec > 0:
+                    dt = max(0.0, dt_nominal + random.uniform(
+                        -self.memory_slow_jitter_sec, self.memory_slow_jitter_sec))
+                offset = max(1, round(dt * self.sample_fps))
+                prow = max(row - offset, 0)
+                rr = r if prow == row else self._read_row(ei, prow)
+                mem_slow.append({
+                    "head": self._pil(rr["head"]),
+                    "task": self._task_text(ep, float(rr["phase"].as_py())),
+                })
+            item["memory_slow"] = mem_slow
+        if self.memory_fast > 0:
+            # Past rows' fast/action-expert content (wrist cameras + action +
+            # tactile) -- these three travel together as one contiguous
+            # segment at the live row too (see split_slow_fast_embeds).
+            mem_fast = []
+            for k in range(self.memory_fast, 0, -1):
+                prow = max(row - k, 0)
+                rr = r if prow == row else self._read_row(ei, prow)
+                entry = {
+                    "wrist_left": self._pil(rr["wrist_left"]),
+                    "wrist_right": self._pil(rr["wrist_right"]),
+                    "action_abs": np.asarray(rr["action_abs"].as_py(), dtype=np.float32),
+                }
+                if self.use_tactile_vec or self.use_tactile_vqvae:
+                    entry["tacf6_hist"] = np.asarray(
+                        rr["tacf6_hist"].as_py(), dtype=np.float32
+                    ).reshape(self.vqvae_window, N_FINGERS, F6_PER_FINGER)
+                mem_fast.append(entry)
+            item["memory_fast"] = mem_fast
         return item
 
     # ── val split ──────────────────────────────────────────────────────────
@@ -502,6 +575,89 @@ class OrigamiDataset(torch.utils.data.Dataset):
                 all_pv.append(inp.pixel_values)
                 all_thw.append(inp.image_grid_thw)
 
+        # ── memory (dev/memory): K per-timestep sequences, each processed
+        # through the same apply_chat_template + processor path as the live
+        # row above, since each memory row needs its own input_ids to be
+        # forwarded separately (one KV-populating forward per past row, per
+        # the plan) rather than just embedded as raw pixels the way flare is.
+        memory_slow_out = None
+        if self.memory_slow_seconds and "memory_slow" in batch[0]:
+            memory_slow_out = []
+            for k in range(len(self.memory_slow_seconds)):
+                k_ids, k_pv, k_thw = [], [], []
+                for b in batch:
+                    m = b["memory_slow"][k]
+                    content = [{"type": "image"}, {"type": "text", "text": m.get("task", "")}]
+                    text = self.processor.apply_chat_template(
+                        [{"role": "user", "content": content}], tokenize=False,
+                        add_generation_prompt=True)
+                    inp = self.processor(text=text, images=[m["head"]],
+                                         return_tensors="pt", padding=False)
+                    k_ids.append(inp.input_ids[0])
+                    if getattr(inp, "pixel_values", None) is not None:
+                        k_pv.append(inp.pixel_values)
+                        k_thw.append(inp.image_grid_thw)
+                pad_id_k = self.processor.tokenizer.pad_token_id or 0
+                max_len_k = max(i.shape[0] for i in k_ids)
+                ids_k, ams_k = [], []
+                for i in k_ids:
+                    pad = max_len_k - i.shape[0]
+                    ids_k.append(F.pad(i, (pad, 0), value=pad_id_k))
+                    a = torch.ones(max_len_k, dtype=torch.long)
+                    if pad > 0:
+                        a[:pad] = 0
+                    ams_k.append(a)
+                memory_slow_out.append({
+                    "input_ids": torch.stack(ids_k),
+                    "attention_mask": torch.stack(ams_k),
+                    "pixel_values": torch.cat(k_pv, dim=0) if k_pv else None,
+                    "image_grid_thw": torch.cat(k_thw, dim=0) if k_thw else None,
+                })
+
+        memory_fast_out = None
+        if self.memory_fast > 0 and "memory_fast" in batch[0]:
+            memory_fast_out = []
+            for k in range(self.memory_fast):
+                k_ids, k_pv, k_thw = [], [], []
+                for b in batch:
+                    m = b["memory_fast"][k]
+                    pil_fast_k = [m["wrist_right"], m["wrist_left"]]
+                    content = [{"type": "image"} for _ in pil_fast_k]
+                    text = self.processor.apply_chat_template(
+                        [{"role": "user", "content": content}], tokenize=False,
+                        add_generation_prompt=True)
+                    inp = self.processor(text=text, images=pil_fast_k,
+                                         return_tensors="pt", padding=False)
+                    k_ids.append(inp.input_ids[0])
+                    if getattr(inp, "pixel_values", None) is not None:
+                        k_pv.append(inp.pixel_values)
+                        k_thw.append(inp.image_grid_thw)
+                pad_id_k = self.processor.tokenizer.pad_token_id or 0
+                max_len_k = max(i.shape[0] for i in k_ids)
+                ids_k, ams_k = [], []
+                for i in k_ids:
+                    pad = max_len_k - i.shape[0]
+                    ids_k.append(F.pad(i, (pad, 0), value=pad_id_k))
+                    a = torch.ones(max_len_k, dtype=torch.long)
+                    if pad > 0:
+                        a[:pad] = 0
+                    ams_k.append(a)
+                action_k = torch.tensor(
+                    np.stack([b["memory_fast"][k]["action_abs"] for b in batch], axis=0),
+                    dtype=torch.float32)
+                entry = {
+                    "input_ids": torch.stack(ids_k),
+                    "attention_mask": torch.stack(ams_k),
+                    "pixel_values": torch.cat(k_pv, dim=0) if k_pv else None,
+                    "image_grid_thw": torch.cat(k_thw, dim=0) if k_thw else None,
+                    "action_abs": action_k,
+                }
+                if "tacf6_hist" in batch[0]["memory_fast"][k]:
+                    entry["tacf6_hist"] = torch.tensor(
+                        np.stack([b["memory_fast"][k]["tacf6_hist"] for b in batch], axis=0),
+                        dtype=torch.float32)
+                memory_fast_out.append(entry)
+
         flare_pv = flare_thw = None
         if self.bake_flare and "flare" in batch[0]:
             flare_pil = [img for b in batch for img in b["flare"]]
@@ -541,6 +697,8 @@ class OrigamiDataset(torch.utils.data.Dataset):
             "state_raw": state_raw,
             "flare_pixel_values": flare_pv,
             "flare_grid_thw": flare_thw,
+            "memory_slow": memory_slow_out,
+            "memory_fast": memory_fast_out,
             # extras used only by the offline evaluator (ignored by train.py)
             "eval_state": torch.tensor(np.stack([b["state"] for b in batch]),
                                        dtype=torch.float32),
