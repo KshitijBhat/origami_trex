@@ -658,8 +658,17 @@ class OrigamiDataset(torch.utils.data.Dataset):
                     if pad > 0:
                         a[:pad] = 0
                     ams_k.append(a)
+                # Normalized the same way the live tick's flow target
+                # (norm_actions, above) is -- x_embedder only ever sees
+                # normalized action-space values (the flow variable x_t is
+                # literally t*noise + (1-t)*norm_actions), so an unnormalized
+                # past action here would be a real train/inference input-
+                # distribution mismatch, not just a style inconsistency.
+                action_raw = np.stack(
+                    [b["memory_fast"][k]["action_abs"] for b in batch], axis=0)
                 action_k = torch.tensor(
-                    np.stack([b["memory_fast"][k]["action_abs"] for b in batch], axis=0),
+                    _normalize(action_raw, self.action_mask,
+                              self.action_min, self.action_max),
                     dtype=torch.float32)
                 entry = {
                     "input_ids": torch.stack(ids_k),

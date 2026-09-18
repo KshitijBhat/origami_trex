@@ -270,19 +270,123 @@ loops the memory_fast rows oldest-first, for each:
 `cached_kv` from `forward_flow_action_partial`'s output, so both memory
 tiers are already baked in transitively once that call is fed `memory_kv`.
 
-**C) Inference-side (`test.py` `CascadedServer`, `eval_trex_async.py`) -- NOT STARTED**
+**C) Inference-side (`test.py` `CascadedServer`) -- DONE, verified via a
+CPU-only stubbed-model/processor test (real GPU/checkpoint integration test
+still open, see Progress).**
 
-1. Replace `self.cached_kv = cached_kv` (`test.py:792`, clobbers every
-   tick) with `self.memory_buf_slow: List[Tuple[float, DynamicCache]]` --
-   timestamp + cropped snapshot, evicted by **time window**
-   (`max(memory_slow_seconds) + margin`), not fixed count (ticks aren't
-   uniformly spaced). Each new slow tick: for each target offset, pick the
-   buffered entry nearest `now - target`, concatenate oldest->newest.
-2. `self.memory_buf_fast`: fixed-count is fine here (linear window, fast
-   ticks close enough together that count~=time).
-3. Reset both on `reset_episode` (`test.py:626`).
-4. Verify: is `CascadedServer` one instance per episode, or shared across
-   concurrent episodes? If shared, memory needs per-episode-id keys.
+**Design correction made while implementing (important, changes what's
+actually stored vs. the original plan above): the buffers hold RAW
+CONTENT (PIL images + text / action + timestamp), NOT pre-computed
+`DynamicCache` snapshots.** Confirmed by reading `Qwen3VLAttentionMoT.forward`
+directly: `apply_rotary_pos_emb_1d` runs on Q/K BEFORE `cache.update()` --
+RoPE rotation is baked into a cached K the moment it's stored, permanently.
+A KV snapshot built once therefore cannot be "re-shifted" later for a
+different tick's `now` without recomputing from scratch -- which is exactly
+what `build_memory_kv_slow`/`_fast` already do (fresh forward pass every
+call, using that call's own `dt_actual`). So Part C's buffers store what to
+FEED those methods, mirroring what `OrigamiDataset` keeps per episode, and
+recompute the memory KV fresh on every slow tick (not every fast tick --
+`_run_fast`'s `tactile_flow_continue` inherits it for free via `cached_kv`,
+already proven on GPU in Part B's verification, so memory-KV construction
+cost is bounded to the slow-tick cadence, not the faster fast-tick one).
+
+1. `self.memory_buf_slow: List[(timestamp, PIL.Image head, str task)]`,
+   evicted by **time window** (`max(memory_slow_seconds) +
+   memory_buffer_margin_sec`), not fixed count (ticks aren't uniformly
+   spaced). `_select_memory_slow_rows(now)`: for each configured target
+   (oldest first), the buffered entry whose timestamp is nearest
+   `now - target` (nearest-timestamp snap, not positional), tokenized
+   fresh via the same `apply_chat_template`+processor path the live row
+   uses, `dt_actual = now - that_entry's_real_timestamp` (the REAL gap,
+   matching training's `dt_actual` semantics exactly, including
+   irregular-tick drift from the nominal target).
+2. `self.memory_buf_fast: List[(timestamp, [wrist_right, wrist_left],
+   action_raw)]`, fixed-count eviction (linear window, fast ticks close
+   enough together that count~=time -- matches training). `action_raw` is
+   `self._prev_command(state)` (the server's existing best-estimate of
+   "what did we just tell the robot to do" -- already used for the old
+   anchor reconstruction, repurposed here since it's exactly the right
+   concept for "the executed action at a past tick"), normalized via the
+   SAME `_normalize`/`statistic["action_min/max"]` the live tick's
+   `state_embeds` and training's `norm_actions` use (see the collate_fn
+   normalization bugfix below -- this server-side path needed the matching
+   fix). `_select_memory_fast_rows()`: the last `memory_fast` entries,
+   oldest first, each tokenized via chat template + processor (wrist
+   images only, no text -- matches `origami_dataset.py`'s memory_fast
+   convention).
+   - **Known limitation, matching the model-side one**: `tacf6_hist` is
+     NOT captured for server-side fast memory. `_rolling_f6_window`
+     (single-frame client input) has a side effect -- it appends to
+     `self.f6_buffer` -- and `_run_fast` already calls it once per real
+     request; calling it again from `_run_slow` to snapshot a memory row
+     would double-append the same tick's frame into the rolling window,
+     corrupting it. Fixing this properly needs restructuring so the F6
+     window is computed once per request and threaded to both call sites,
+     deferred rather than risking a subtle rolling-buffer corruption bug.
+3. `_build_memory_kv(now)`: calls `build_memory_kv_slow` on the selected
+   slow rows, then feeds ITS OUTPUT as `build_memory_kv_fast`'s `past_kv`
+   -- both tiers land in one combined cache, passed as `_run_slow`'s
+   `memory_kv` argument to `forward_flow_action_full`/`_partial`. Returns
+   `None` (true no-op) when both tiers are off or nothing is buffered yet
+   (e.g. an episode's first slow tick).
+4. Ordering in `_run_slow`: `memory_kv = self._build_memory_kv(now)` is
+   computed FIRST (from prior ticks' buffered content only), and this
+   tick's own content is recorded into the buffers (`_remember_slow`/
+   `_remember_fast`) only AFTER -- so a tick can never see itself as its
+   own memory. `_run_fast` needs no changes at all (memory reaches it
+   transitively via `cached_kv`, exactly as designed in Part B).
+5. Both buffers reset in `reset_episode` alongside the existing phase
+   clock / last-command chain reset -- memory must not leak across fold
+   attempts, matching the training-side index never crossing an episode
+   boundary.
+6. `CascadedServer` confirmed to be a single shared instance (one ZMQ REP
+   socket, `self.lock` serializes all calls, single active session) -- not
+   per-episode, so no per-episode-id keying is needed; `reset_episode`
+   alone is sufficient (resolves the "unverified" item from the original
+   plan).
+7. New CLI flags (all default off/0, strict no-op): `--memory_slow_seconds`
+   (comma-separated string), `--memory_fast` (int),
+   `--memory_rope_stride_slow` / `--memory_rope_stride_fast` (must match
+   whatever the checkpoint was actually trained with once Part D exists),
+   `--memory_buffer_margin_sec`.
+
+**Separate, pre-existing bug found and fixed while wiring this in (not a
+memory bug, but it blocked even importing `test.py` to test Part C):**
+`CascadedServer` still imported `trex_origami.anchoring`, a module deleted
+in commit `227b516` ("Strip anchoring... for the all-absolute rewrite") --
+present on `dev/memory` AND its parent `dev/all_absolute` alike, so this
+wasn't introduced by this branch. That commit's own message names
+`policy.py`/`verify.py`/`preflight.py` as "still coupled to anchoring, not
+yet addressed" but missed `test.py`, which was in the identical broken
+state -- the production inference server could not be imported at all,
+independent of memory. Per explicit user direction, rewrote
+`CascadedServer`'s reconstruction to match the all-absolute target instead
+of restoring the deleted module: `_reconstruct` now just denormalizes the
+model's output directly (no per-dim anchor addition -- the model already
+predicts absolute actions), `_prev_command`/`self.last_chunk` tracking is
+kept (repurposed as the memory buffer's fast-tier `action_abs` source,
+see above) but decoupled from the deleted anchor-spec machinery,
+`--anchor_source` CLI flag removed (no longer meaningful), `--action_output
+delta` kept as a documented legacy escape hatch for pre-all-absolute
+checkpoints. Verified by actually importing the module locally
+(`from test import CascadedServer`) -- confirmed broken before the fix,
+confirmed working after.
+
+**Separate normalization bug found and fixed while designing Part C's
+fast-memory action proxy:** `origami_dataset.py`'s `collate_fn` built
+`memory_fast`'s `action_abs` from the RAW (unnormalized) dataset field,
+but `build_memory_kv_fast` feeds it straight into `x_embedder`, which
+(via the live tick's `norm_actions`/flow-target construction,
+`origami_dataset.py:526-527`) only ever sees NORMALIZED `[-1,1]`-ish
+values elsewhere -- a real train/inference input-distribution mismatch,
+not just a style inconsistency, that a random-weight GPU smoke test
+couldn't have caught (random Gaussian noise looks equally plausible
+normalized or not). Fixed by normalizing `action_abs` in `collate_fn` the
+same way `norm_actions` is, using the dataset's own `action_mask`/
+`action_min`/`action_max`. Verified with a dedicated regression test
+(`gpu_smoke_test_memory_fast_normalization.py`, real processor, raw
+values with amplitude ~3.0 deliberately far outside `[-1,1]`) confirming
+normalized output actually lands in `[-1,1]` post-fix.
 
 ## Risks
 
@@ -406,7 +510,63 @@ tiers are already baked in transitively once that call is fed `memory_kv`.
     rather than raising, since the history-window shape doesn't match the
     plain-vector `tactile_f6` path some configs use instead. Not yet
     needed by any tested config.
-- **Part C: not started.**
+  - **`memory_fast` normalization bug found and fixed** (see Design C
+    above for detail): `action_abs` was unnormalized before hitting
+    `x_embedder`. Fixed in `origami_dataset.py`'s `collate_fn`; verified
+    with a dedicated real-processor regression test.
+- **Part C: done, verified via a CPU-only stubbed test
+  (`T-Rex/scripts/smoke_test_cascaded_server_memory.py`, 8 cases, all
+  passing against the real `test.py` -- nearest-timestamp slow selection
+  over irregular ticks, time-window eviction, linear fast-window eviction,
+  slow->fast KV chaining, a tick never seeing its own content as memory,
+  `reset_episode` clearing both buffers, and true no-ops when memory is
+  off or the buffer is still empty).**
+  - Along the way, found and fixed (per explicit user direction) a
+    separate pre-existing bug that blocked even importing `test.py`: a
+    dead `trex_origami.anchoring` import left over from an incomplete
+    "strip anchoring for the all-absolute rewrite" migration, present on
+    both `dev/memory` and its parent `dev/all_absolute`. Rewrote
+    `CascadedServer`'s action reconstruction to match all-absolute
+    (denormalize only, no anchor addition) instead of restoring the
+    deleted module -- see Design C above for the full list of what
+    changed (`_reconstruct`, `_prev_command`, `--anchor_source` removed,
+    `--action_output delta` kept as a legacy escape hatch). Verified by
+    actually importing the module (confirmed broken before, working
+    after) -- this was a real blocker for the ENTIRE inference server,
+    independent of memory.
+  - **NOT yet verified**: a real end-to-end run with an actual trained
+    checkpoint (`CascadedServer.__init__` + `predict()` against real
+    `training_args.json`/`processor/`/`model.pt`/`stats_data.json`). No
+    checkpoint with memory support exists yet -- blocked on Part D
+    (training-loop wiring, see below), not on anything in Part C itself.
+
+## Part D: training-loop wiring -- NOT STARTED, discovered while doing Part C
+
+`origami_dataset.py`'s `collate_fn` produces `memory_slow`/`memory_fast`
+keys (Part A), and the model has `build_memory_kv_slow`/`build_memory_kv_fast`
+plus the `memory_kv` parameter on `forward_flow_action_full`/`_partial`
+(Part B) -- but **`T-Rex/scripts/train.py`'s actual training loop never
+calls any of this**. It doesn't build a memory KV from the batch's
+`memory_slow`/`memory_fast` entries, and doesn't pass `memory_kv` into its
+forward call. Today, turning `memory_slow_seconds`/`memory_fast` on in
+training would compute the extra dataset fields (image decode + tokenize
+for each memory row, on every batch) and then silently throw them away --
+no gradient ever flows through the memory path, so no checkpoint has
+learned to use it. `run_all_abs_ori.sh`/`run_trex_job.sh` also have no
+memory-related CLI flags, for the same reason -- there's nothing to wire
+them to yet.
+
+This is required before Part C can be verified end-to-end (needs a real
+trained checkpoint) and before memory can do anything useful at all.
+Scope: add CLI args (`--memory_slow_seconds`, `--memory_fast`,
+`--memory_rope_stride_slow/fast`) to `train.py`'s argparse and
+`run_all_abs_ori.sh`'s env-var pass-through, thread them into the
+`OrigamiDataset` construction (already supported, Part A), and in the
+training forward pass build `memory_kv` from `batch["memory_slow"]`/
+`batch["memory_fast"]` via the same `build_memory_kv_slow`/
+`build_memory_kv_fast` chaining Part C's server uses, passing it into
+whatever training calls `forward_flow_action_full`/`_partial`
+(`train.py`'s loss-computation forward, not yet located/read in detail).
 
 ## Critical files
 
@@ -419,10 +579,24 @@ tiers are already baked in transitively once that call is fed `memory_kv`.
   `forward_flow_action_full`/`_partial`)
 - `T-Rex/qwen_vla/modeling_qwen3vl_mot.py` (Part B -- done:
   `shift_position_ids_for_memory`)
-- `T-Rex/scripts/test.py` (Part C)
-- `T-Rex/hardware_code/eval/eval_trex_async.py` (Part C)
+- `T-Rex/scripts/test.py` (Part C -- done: `_build_memory_kv`,
+  `_select_memory_slow_rows`, `_select_memory_fast_rows`, `_remember_slow`,
+  `_remember_fast`, `memory_kv` wired into `_run_slow`; also carries the
+  unrelated anchoring-removal rewrite that was blocking imports entirely)
+- `T-Rex/hardware_code/eval/eval_trex_async.py` (not touched -- the ZMQ
+  client sends the same payload shape as before; memory is entirely
+  server-side state, no protocol change needed)
+- `T-Rex/scripts/train.py` (Part D -- not started, the actual gap: never
+  calls `build_memory_kv_slow`/`_fast` or passes `memory_kv`)
+- `T-Rex/scripts/run_all_abs_ori.sh`, `T-Rex/run_trex_job.sh` (Part D --
+  no memory CLI flags yet, nothing to wire them to until train.py is done)
 - `T-Rex/scripts/smoke_test_memory_windowing.py` (Part A CPU-only test)
 - `T-Rex/scripts/smoke_test_memory_position_mask.py` (Part B CPU-only test,
   slow + fast tier pure-logic cases)
 - `T-Rex/scripts/gpu_smoke_test_memory.py` (Part B real-GPU/real-weights
   test -- needs a GPU box + `transformers==4.57.3` per pyproject.toml)
+- `T-Rex/scripts/gpu_smoke_test_memory_fast_normalization.py` (Part A/B
+  regression test for the `action_abs` normalization bugfix -- needs
+  network + `AutoProcessor.from_pretrained`, no GPU compute required)
+- `T-Rex/scripts/smoke_test_cascaded_server_memory.py` (Part C CPU-only
+  test, stubbed processor/model -- no GPU or network needed)

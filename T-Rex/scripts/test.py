@@ -17,14 +17,13 @@ refinement has not finished, wait until it finishes" guarantee.
 What comes back on the wire
 ---------------------------
 `actions` is float32[T, 65] of **absolute joint angles**, which is the
-competition's contract.  The reconstruction from the model's raw output is
-per-dimension and belongs here rather than in the client: under the hybrid prep
-the 14 arm dims are deltas from the *previous command* (this server's own last
-emitted chunk, tracked below) and the other 51 are already joint angles.  The
-rule is read from the checkpoint's `training_args.json`; a checkpoint that
-records none is assumed to be the legacy all-delta-from-state kind, and
-`--action_output delta` reproduces the old "client adds observation/state"
-behaviour for exactly that case.
+competition's contract, and is also exactly what the all-absolute model
+predicts (normalized) -- reconstruction is just denormalize + hold the
+frozen dims at the measured state (`_clamp_frozen_absolute`), no per-dim
+anchor addition. `--action_output delta` remains as a legacy escape hatch
+for the pre-all-absolute all-delta-from-state checkpoints this server used
+to also serve: it subtracts the measured state back off before replying,
+reproducing the old "client adds observation/state" behaviour.
 """
 
 import os
@@ -49,9 +48,6 @@ from PIL import Image
 import zmq
 from transformers import AutoProcessor
 from qwen_vla import Qwen3VLVLAModel, extend_position_ids_for_flare, split_slow_fast_embeds
-from trex_origami.anchoring import (ANCHOR_PREV_COMMAND, build_anchor,
-                                    describe as describe_anchor, masks as anchor_masks,
-                                    mode_of, spec_from_meta)
 
 #: The evaluator streams commands at 30 Hz; used to work out which element of
 #: the last emitted chunk is "the command for the frame just before now".
@@ -85,10 +81,10 @@ def _clamp_frozen_absolute(absolute, mask, state):
     step-jump budget on essentially every chunk.
 
     Commanding `state[j]` for the whole chunk is exactly what the teleoperator
-    did there.  Expressed on the *absolute* chunk, not as "zero the delta":
-    under hybrid anchoring these dims are absolute, so zeroing them would
-    command 0 rad -- a full-travel move -- rather than holding.  Driven by the
-    mask, so a checkpoint whose stats say the torso moves clamps nothing.
+    did there. All dims are absolute under the all-absolute target, so this
+    holds the *value*, not "zero the delta" -- zeroing would command 0 rad, a
+    full-travel move, not holding. Driven by the mask, so a checkpoint whose
+    stats say the torso moves clamps nothing.
     """
     if mask is None or state is None:
         return absolute
@@ -330,18 +326,6 @@ def model_load(args):
         print(f"[serve] frozen action dims {frozen.tolist()} -> held at state[j] "
               f"(normalisation passthrough dims; see _clamp_frozen_absolute)")
 
-    # What the 65 outputs are measured from.  Written into training_args.json by
-    # the trainer; a checkpoint that predates it was trained all-delta-from-state,
-    # which is what `spec_from_meta` returns for an empty dict.
-    statistic["action_anchor"] = spec_from_meta(ta)
-    print(f"[serve] action anchoring {describe_anchor(statistic['action_anchor'])}")
-    if not ta.get("action_anchor"):
-        print("[serve] WARNING: this checkpoint records no `action_anchor`; assuming "
-              "the legacy all-delta-from-state rule. If it was in fact trained on "
-              "hybrid-anchored data, every arm joint will be off by the "
-              "command-minus-state offset and the 51 hand/motor dims will be "
-              "catastrophically wrong.")
-
     return model, processor, statistic
 
 
@@ -434,29 +418,53 @@ class CascadedServer:
         self.last_actions       = None             # cached absolute chunk for
                                                    # disable_tactile fast-tick passthrough
 
-        # ── action anchoring ──
-        # `statistic["action_anchor"]` says, per dim, what the model's output is
-        # measured from.  The arms (under the hybrid prep) are measured from the
-        # *previous command* -- which at deployment is this server's own last
-        # emitted command, so it has to be tracked here.  Nobody downstream can
-        # do this reconstruction: the rule is per-dim and lives with the weights.
-        self.anchor_spec = tuple(statistic.get("action_anchor")
-                                 or spec_from_meta(None))
-        self.needs_prev_command = bool(
-            anchor_masks(self.anchor_spec)[ANCHOR_PREV_COMMAND].any())
+        # ── cross-timestep memory (dev/memory Part C) ──
+        # Raw-content buffers, not pre-computed KV: RoPE bakes each row's
+        # position into its cached K before it's ever stored (confirmed by
+        # reading Qwen3VLAttentionMoT.forward -- apply_rotary_pos_emb_1d runs
+        # BEFORE cache.update()), so a KV snapshot computed once can't be
+        # "re-shifted" for a later, differently-timed tick without recompute.
+        # build_memory_kv_slow/_fast already recompute fresh from raw inputs
+        # every call for exactly this reason -- these buffers just hold what
+        # to feed them, mirroring what OrigamiDataset stores per episode.
+        self.memory_slow_seconds = sorted(
+            (float(s) for s in str(getattr(args, "memory_slow_seconds", "") or "").split(",") if s.strip()),
+            reverse=True)                              # oldest target first
+        self.memory_fast          = int(getattr(args, "memory_fast", 0))
+        self.memory_rope_stride_slow = float(getattr(args, "memory_rope_stride_slow", 32.0))
+        self.memory_rope_stride_fast = float(getattr(args, "memory_rope_stride_fast", 8.0))
+        self.memory_buffer_margin_sec = float(getattr(args, "memory_buffer_margin_sec", 2.0))
+        # memory_buf_slow: List[(timestamp, PIL.Image head, str task_text)]
+        self.memory_buf_slow: list = []
+        # memory_buf_fast: List[(timestamp, [wrist_right, wrist_left], action_raw_np)]
+        # tacf6_hist is intentionally NOT captured here -- see MEMORY_DESIGN.md
+        # "Part C known limitation" (avoids a rolling-F6-buffer double-mutation
+        # risk between this snapshot and _run_fast's own encode of the same tick).
+        self.memory_buf_fast: list = []
+        if self.memory_slow_seconds:
+            print(f">>> slow memory enabled: targets {self.memory_slow_seconds}s back, "
+                  f"rope_stride={self.memory_rope_stride_slow}")
+        if self.memory_fast > 0:
+            print(f">>> fast memory enabled: window={self.memory_fast} ticks, "
+                  f"rope_stride={self.memory_rope_stride_fast} (tactile not "
+                  f"included in server-side fast memory yet)")
+
+        # ── action output ──
+        # All-absolute target: the model's (denormalized) output IS the
+        # absolute chunk directly, see _reconstruct. `--action_output delta`
+        # is a legacy escape hatch for pre-all-absolute all-delta-from-state
+        # checkpoints -- it subtracts the measured state back off before
+        # replying, reproducing the old "client adds observation/state"
+        # behaviour, for whoever still serves one of those.
         self.action_output = str(getattr(args, "action_output", "absolute"))
-        self.anchor_source = str(getattr(args, "anchor_source", "auto"))
-        if self.action_output == "delta" and mode_of(self.anchor_spec) != "state":
-            raise SystemExit(
-                "--action_output delta is only meaningful for an all-delta-from-state "
-                f"checkpoint; this one is anchored '{mode_of(self.anchor_spec)}', where "
-                "51 of the 65 outputs are absolute joint angles and 'delta' has no "
-                "definition. Serve absolute radians (the wire contract).")
-        # Last emitted absolute chunk + when it was emitted, for the anchor.
+        # Last emitted absolute chunk + when it was emitted -- kept for
+        # _prev_command, the server's best estimate of "what did we just
+        # tell the robot to do", used by the cross-timestep memory buffer's
+        # fast-tier action_abs proxy (dev/memory, MEMORY_DESIGN.md). No
+        # longer feeds an anchor reconstruction (there isn't one anymore).
         self.last_chunk         = None
         self.last_chunk_time    = 0.0
         self.seed_state         = None             # state at the last slow tick
-        self.anchor             = None             # per-dim anchor for that chunk
 
         # ── phase conditioning ──
         # `--phase-mode progress` bakes "(fold k of N)" into the training prompt
@@ -624,41 +632,148 @@ class CascadedServer:
         return f"{task_description} (fold {k} of {self.n_phases})"
 
     def reset_episode(self):
-        """Start a new fold attempt: clears the phase clock and the anchor chain."""
+        """Start a new fold attempt: clears the phase clock and the last-command chain."""
         self.episode_start = None
         self.last_chunk = None
         self.last_chunk_time = 0.0
+        # Memory must not leak across attempts, exactly like the training-side
+        # index never lets a lookback window cross an episode boundary.
+        self.memory_buf_slow = []
+        self.memory_buf_fast = []
 
-    # -- internal: action anchoring --------------------------------------
+    # -- internal: cross-timestep memory (dev/memory Part C) --------------
+    def _remember_slow(self, now, head_image, task_description):
+        """Record this slow tick's own content so a LATER tick can use it as
+        memory. Must only be called with content from a tick already fully
+        processed -- never the tick currently selecting memory for itself."""
+        if not self.memory_slow_seconds:
+            return
+        self.memory_buf_slow.append((now, head_image.copy(), task_description))
+        cutoff = now - (max(self.memory_slow_seconds) + self.memory_buffer_margin_sec)
+        self.memory_buf_slow = [e for e in self.memory_buf_slow if e[0] >= cutoff]
+
+    def _remember_fast(self, now, fast_images, action_raw):
+        """Record this slow tick's fast-content snapshot (wrist images +
+        best-known executed action) for a later tick's fast memory."""
+        if self.memory_fast <= 0:
+            return
+        self.memory_buf_fast.append(
+            (now, [img.copy() for img in fast_images], np.asarray(action_raw, dtype=np.float64)))
+        if len(self.memory_buf_fast) > self.memory_fast:
+            self.memory_buf_fast = self.memory_buf_fast[-self.memory_fast:]
+
+    def _select_memory_slow_rows(self, now):
+        """For each configured lookback target, the buffered entry whose
+        timestamp is nearest `now - target` (buffered entries aren't
+        uniformly spaced -- inference ticks aren't uniform -- so this is a
+        nearest-timestamp snap, not a fixed-position lookup; see Context in
+        MEMORY_DESIGN.md). Returns [] (a true no-op) when memory is off or
+        the buffer is still empty (e.g. the first slow tick of an episode)."""
+        if not self.memory_slow_seconds or not self.memory_buf_slow:
+            return []
+        rows = []
+        for dt_nominal in self.memory_slow_seconds:            # oldest target first
+            target_ts = now - dt_nominal
+            ts, img, task = min(self.memory_buf_slow, key=lambda e: abs(e[0] - target_ts))
+            content = [{"type": "image"}, {"type": "text", "text": task}]
+            text = self.processor.apply_chat_template(
+                [{"role": "user", "content": content}], tokenize=False,
+                add_generation_prompt=True)
+            inp = self.processor(text=text, images=[img], return_tensors="pt", padding=False)
+            rows.append({
+                "input_ids": inp.input_ids.to(self.device),
+                "attention_mask": inp.attention_mask.to(self.device),
+                "pixel_values": (inp.pixel_values.to(self.device, dtype=torch.bfloat16)
+                                if getattr(inp, "pixel_values", None) is not None else None),
+                "image_grid_thw": (inp.image_grid_thw.to(self.device)
+                                   if getattr(inp, "image_grid_thw", None) is not None else None),
+                "dt_actual": torch.tensor([now - ts], dtype=torch.float32, device=self.device),
+            })
+        return rows
+
+    def _select_memory_fast_rows(self):
+        """The last `memory_fast` buffered fast-tick snapshots, oldest first
+        -- a linear window, not exponential, matching training (see Context
+        in MEMORY_DESIGN.md: fast ticks are close enough together that
+        count ~= time). Returns [] when memory is off or nothing buffered
+        yet (e.g. before the first slow tick of an episode)."""
+        if self.memory_fast <= 0 or not self.memory_buf_fast:
+            return []
+        statistic = self.statistic
+        rows = []
+        for ts, fast_images, action_raw in self.memory_buf_fast:
+            content = [{"type": "image"} for _ in fast_images]
+            text = self.processor.apply_chat_template(
+                [{"role": "user", "content": content}], tokenize=False,
+                add_generation_prompt=True)
+            inp = self.processor(text=text, images=fast_images,
+                                 return_tensors="pt", padding=False)
+            action_norm = _normalize(action_raw, statistic["action_mask"],
+                                     statistic["action_min"], statistic["action_max"])
+            rows.append({
+                "input_ids": inp.input_ids.to(self.device),
+                "attention_mask": inp.attention_mask.to(self.device),
+                "pixel_values": (inp.pixel_values.to(self.device, dtype=torch.bfloat16)
+                                if getattr(inp, "pixel_values", None) is not None else None),
+                "image_grid_thw": (inp.image_grid_thw.to(self.device)
+                                   if getattr(inp, "image_grid_thw", None) is not None else None),
+                "action_abs": torch.tensor(action_norm, dtype=torch.float32,
+                                           device=self.device).unsqueeze(0),
+            })
+        return rows
+
+    def _build_memory_kv(self, now):
+        """Combined slow+fast memory cache for this tick, or None (a true
+        no-op) when both tiers are off/empty -- forward_flow_action_full/
+        _partial's memory_kv=None path is then byte-identical to current
+        behavior."""
+        memory_kv = None
+        slow_rows = self._select_memory_slow_rows(now)
+        if slow_rows:
+            memory_kv = self.model.build_memory_kv_slow(
+                slow_rows, rope_stride=self.memory_rope_stride_slow)
+        fast_rows = self._select_memory_fast_rows()
+        if fast_rows:
+            memory_kv = self.model.build_memory_kv_fast(
+                fast_rows, past_kv=memory_kv, rope_stride=self.memory_rope_stride_fast)
+        return memory_kv
+
+    # -- internal: last-command tracking (feeds the memory buffer) --------
     def _prev_command(self, state):
-        """The command for the frame just before now, as best the server knows it.
+        """Best estimate of the executed action for the frame just before now.
 
         The robot streams our last chunk at 30 Hz, so the element it is on is
-        set by elapsed wall-clock rather than by anything in the request.  Index
-        `k-1` is the frame before the one now being replaced.  Before any chunk
-        has been emitted -- and whenever `--anchor_source state` is set -- fall
-        back to the measured state, which is the same fallback anchor dropout
-        trained the policy to accept.
+        set by elapsed wall-clock rather than by anything in the request.
+        Index `k-1` is the frame before the one now being replaced. Before
+        any chunk has been emitted, fall back to the measured state.
+
+        Used as the cross-timestep memory buffer's fast-tier action_abs
+        proxy (dev/memory, see MEMORY_DESIGN.md) -- no longer feeds an
+        anchor reconstruction (all-absolute has none).
         """
-        if self.anchor_source == "state" or self.last_chunk is None:
+        if self.last_chunk is None:
             return state
         elapsed = max(0.0, time.time() - self.last_chunk_time)
         k = int(round(elapsed * CONTROL_HZ)) - 1
         k = max(0, min(k, self.last_chunk.shape[0] - 1))
         return self.last_chunk[k]
 
-    def _reconstruct(self, normalised_chunk, anchor, state):
-        """Normalised model output -> the absolute [T, 65] the wire contract wants."""
+    def _reconstruct(self, normalised_chunk, state):
+        """Normalised model output -> the absolute [T, 65] the wire contract wants.
+
+        All-absolute target: the model's output IS the absolute chunk
+        directly once denormalized -- no per-dim anchor addition.
+        """
         statistic = self.statistic
-        chunk = _denormalize(np.asarray(normalised_chunk, dtype=np.float64),
-                             statistic["action_mask"],
-                             statistic["action_min"], statistic["action_max"])
-        absolute = chunk if anchor is None else chunk + anchor[None, :]
+        absolute = _denormalize(np.asarray(normalised_chunk, dtype=np.float64),
+                                statistic["action_mask"],
+                                statistic["action_min"], statistic["action_max"])
         absolute = _clamp_frozen_absolute(absolute, statistic["action_mask"], state)
         self.last_chunk = absolute
         self.last_chunk_time = time.time()
         if self.action_output == "delta":
-            # Legacy state-anchored checkpoints only; the client adds the state.
+            # Legacy escape hatch for pre-all-absolute checkpoints; the
+            # client adds the state back.
             return absolute - np.asarray(state, dtype=np.float64)[None, :]
         return absolute
 
@@ -670,27 +785,30 @@ class CascadedServer:
         args, model, processor, statistic = (
             self.args, self.model, self.processor, self.statistic)
         device = self.device
+        now = time.time()
+        # Built from buffered PRIOR ticks only -- this tick's own content is
+        # recorded into the buffers further down, after this call.
+        memory_kv = self._build_memory_kv(now)
 
         if args.image_size:
             _sz = tuple(args.image_size)
             slow_images = [img.resize(_sz, Image.LANCZOS) for img in slow_images]
             fast_images = [img.resize(_sz, Image.LANCZOS) for img in fast_images]
 
-        # The chunk is conditioned on this tick's observation, so the anchor is
-        # pinned here and reused by every fast tick that continues it.
+        # The chunk is conditioned on this tick's observation, so it's pinned
+        # here and reused (self.seed_state) by every fast tick that continues
+        # it -- used for the frozen-dim hold in _reconstruct
+        # (_clamp_frozen_absolute) and the memory buffer's action_abs proxy
+        # (_prev_command).
         state = (np.asarray(state_fast, dtype=np.float64)
                  if state_fast is not None else None)
         if state is None:
-            if self.needs_prev_command or self.action_output == "absolute":
-                raise ValueError(
-                    "slow request carries no `state_fast`, but reconstructing the "
-                    "absolute command needs it (frozen-dim hold, and the anchor "
-                    "fallback). Send observation/state with every slow request.")
-            self.seed_state, self.anchor = None, None
-        else:
-            self.seed_state = state
-            self.anchor = build_anchor(state, self._prev_command(state),
-                                       self.anchor_spec)
+            frozen = np.where(~np.asarray(statistic["action_mask"], dtype=bool))[0]
+            if frozen.size:
+                print(f"[serve] WARNING: slow request carries no state_fast -- "
+                      f"frozen action dims {frozen.tolist()} will NOT be held at "
+                      f"the measured state this tick (see _clamp_frozen_absolute).")
+        self.seed_state = state
 
         state_embeds = None
         if args.use_robot_state and state_fast is not None:
@@ -750,6 +868,14 @@ class CascadedServer:
         noise = torch.randn(1, args.action_chunk, args.action_dim,
                             dtype=torch.bfloat16, device=device)
 
+        # Record this tick's own content for LATER ticks' memory -- after
+        # memory_kv above was already built from prior content, so this tick
+        # never becomes its own memory.
+        if slow_images:
+            self._remember_slow(now, slow_images[0], task_description)
+        if fast_images and state is not None:
+            self._remember_fast(now, fast_images, self._prev_command(state))
+
         if self.disable_tactile:
             # Action-expert-only ablation: integrate the full τ ∈ [0, 1] flow
             # and return the resulting chunk directly.  No tactile expert is
@@ -762,6 +888,7 @@ class CascadedServer:
                 state_embeds=state_embeds,
                 fast_embeds=fast_embeds,
                 num_steps=args.cascaded_total_steps,
+                memory_kv=memory_kv,
             )
             self.x_split           = None
             self.tau_split         = None
@@ -771,7 +898,7 @@ class CascadedServer:
             self.n_action_in_cache = 0
             self.chunk_id         += 1
             a_full = self._reconstruct(full_chunk[0].float().cpu().numpy(),
-                                       self.anchor, self.seed_state)
+                                       self.seed_state)
             self.last_actions = list(a_full)
             return self.last_actions, self.chunk_id
 
@@ -786,6 +913,7 @@ class CascadedServer:
                 num_steps_total=args.cascaded_total_steps,
                 split_step=args.cascaded_split_step,
                 refresh_clean_kv=True,
+                memory_kv=memory_kv,
             ))
         self.x_split    = x_split           # action expert's intermediate at τ=τ_split
         self.tau_split  = tau_split
@@ -848,7 +976,7 @@ class CascadedServer:
             split_step         = args.cascaded_split_step,
         )
         a_refined = self._reconstruct(refined[0].float().cpu().numpy(),
-                                      self.anchor, self.seed_state)
+                                      self.seed_state)
         return list(a_refined), self.chunk_id
 
     def predict(self, mode, payload):
@@ -917,7 +1045,7 @@ def main(args):
     n_fast_cams = 2 if args.action_dim > 31 else 1
     dummy_fast  = [Image.new("RGB", (224, 224), color="black") for _ in range(n_fast_cams)]
     # Always sent, even with --use_robot_state 0: the reconstruction needs the
-    # state for the frozen-dim hold and the anchor fallback, not just the encoder.
+    # state for the frozen-dim hold (_clamp_frozen_absolute), not just the encoder.
     dummy_state = np.zeros(args.action_dim, dtype=np.float32)
     dummy_f6    = np.zeros((5, 6), dtype=np.float32) if args.use_tactile_vec else None
     dummy_deform = np.zeros((5, 240, 240), dtype=np.float32) if args.use_tactile_deform else None
@@ -1014,16 +1142,11 @@ if __name__ == "__main__":
     parser.add_argument("--action_output", choices=["absolute", "delta"],
                         default="absolute",
                         help="`absolute` is the competition wire contract: float32"
-                             "[T, 65] joint angles, reconstructed here through the "
-                             "checkpoint's per-dim anchoring rule. `delta` returns "
-                             "action - state for the client to add, and is only "
-                             "defined for a legacy all-delta-from-state checkpoint.")
-    parser.add_argument("--anchor_source", choices=["auto", "state"], default="auto",
-                        help="where the previous-command anchor comes from: `auto` "
-                             "tracks this server's own last emitted chunk (what the "
-                             "robot is executing), `state` always falls back to "
-                             "observation/state -- the same fallback anchor dropout "
-                             "trained the policy to tolerate.")
+                             "[T, 65] joint angles, the all-absolute model's "
+                             "denormalized output directly (see _reconstruct). "
+                             "`delta` returns action - state for the client to add "
+                             "-- a legacy escape hatch for pre-all-absolute "
+                             "all-delta-from-state checkpoints.")
     parser.add_argument("--cuda", type=str, default="0")
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--image_size", type=int, nargs=2, default=None, metavar=("W", "H"))
@@ -1057,6 +1180,31 @@ if __name__ == "__main__":
     parser.add_argument("--vqvae_ckpt", type=str, default="",
                         help="Path to TactileVQVAE checkpoint (latest.pt). "
                              "Required when --use_tactile_code 1.")
+
+    # Cross-timestep memory (dev/memory Part C). Default off (empty/0), byte-
+    # identical to current behavior -- see T-Rex/qwen_vla/MEMORY_DESIGN.md.
+    parser.add_argument("--memory_slow_seconds", type=str, default="",
+                        help="Comma-separated exponential lookback targets in "
+                             "seconds, e.g. '0.25,0.5,1.0,5.0'. Empty (default): "
+                             "no slow memory. Must match what the checkpoint "
+                             "was trained with.")
+    parser.add_argument("--memory_fast", type=int, default=0,
+                        help="Linear fast-memory window (past wrist+action "
+                             "ticks). 0 (default): no fast memory. Must match "
+                             "what the checkpoint was trained with.")
+    parser.add_argument("--memory_rope_stride_slow", type=float, default=32.0,
+                        help="RoPE position units per real second for slow "
+                             "memory (Qwen3VLVLAModel.build_memory_kv_slow). "
+                             "Untuned placeholder -- see MEMORY_DESIGN.md.")
+    parser.add_argument("--memory_rope_stride_fast", type=float, default=8.0,
+                        help="RoPE position units per fast-memory step "
+                             "(Qwen3VLVLAModel.build_memory_kv_fast). Untuned "
+                             "placeholder -- see MEMORY_DESIGN.md.")
+    parser.add_argument("--memory_buffer_margin_sec", type=float, default=2.0,
+                        help="Extra seconds kept beyond max(memory_slow_seconds) "
+                             "before a slow-memory buffer entry is evicted, so "
+                             "the nearest-timestamp lookup always has a real "
+                             "candidate even when ticks run slower than nominal.")
 
     args = parser.parse_args()
     if bool(args.use_tactile_code) and not args.vqvae_ckpt:
