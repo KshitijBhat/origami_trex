@@ -719,16 +719,30 @@ optimizer, `--optim adamw8bit`) and `accelerate`/`wandb`/`datasets`/`tqdm`
 (train.py's own dependencies, never previously installed on this GPU box
 since only inference-side scripts had been run on it before this session).
 
-**Not yet done**: a real multi-step/multi-epoch run long enough to see the
-loss trend (all verification here is `--max_steps 2-5`, correctness/crash-
-freedom focused, not convergence-focused) -- reasonable next step once the
-user wants to actually start a production training run with memory enabled,
-not something this session's smoke-test scope covers. `rope_stride` for
-both tiers remains an untuned placeholder throughout (same caveat as
-Parts B/C).
+**Loss-trend check (done, same session, immediately after the above).** The
+runs above were all `--max_steps 2-5`, correctness/crash-freedom focused,
+not long enough to see whether the memory-augmented forward actually
+*learns*. Ran the bare-`train.py` command (see `RUN_COMMANDS_MEMORY.md`)
+for 150 steps, memory on (`0.25,0.5,1.0,5.0`s slow + 2-step fast), same 2
+episodes, fresh-init (no resume): total loss fell 2.14 -> 1.23 (`act`
+1.09 -> 0.23, a clean, steady drop; `tac` stayed flat ~1.0 -- expected for
+a freshly-reinitialized tactile expert + fake VQ-VAE + a fast-decaying
+150-step cosine schedule, not a sign of anything broken). Confirms gradients
+genuinely flow through the memory-augmented path end to end, not just that
+it runs without crashing. Full log: `dev_memory_run_logs/train_loss_trend.log`.
+
+`rope_stride` for both tiers remains an untuned placeholder throughout
+(same caveat as Parts B/C) -- this run shows the model CAN learn with
+memory in the loop, not that these specific stride values are well-chosen.
 
 ## Critical files
 
+- `T-Rex/scripts/RUN_COMMANDS_MEMORY.md` -- short reference for every launch
+  command (phd cluster, direct launcher, bare `train.py` smoke test,
+  serving) with `--memory_*`/`MEMORY_*` flags added
+- `T-Rex/qwen_vla/dev_memory_run_logs/` -- raw logs from every GPU
+  verification run in Parts B-D (crash-freedom smoke tests + the 150-step
+  loss-trend run), pulled off the sandbox box before it was torn down
 - `T-Rex/qwen_vla/origami_dataset.py` (Part A -- done)
 - `T-Rex/qwen_vla/lerobot_dataset.py` (Part A, LeRobot path -- not touched
   yet, only the origami-flat path above is done)
