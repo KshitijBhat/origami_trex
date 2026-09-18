@@ -548,6 +548,33 @@ def _action_mask_tensor(args, dataset):
     return torch.tensor(dataset.action_mask, dtype=torch.bool)
 
 
+@torch.no_grad()
+def _build_memory_kv_for_batch(raw_model, batch, args):
+    """Combined slow+fast memory KV for one training/validation batch, or
+    None (a true no-op) when memory is off or the batch carries no memory
+    entries (e.g. --memory_slow_seconds/--memory_fast both unset, in which
+    case collate_fn never adds the memory_slow/memory_fast keys at all).
+
+    Shared by train()'s main loop and run_validation() so both see the same
+    memory-augmented forward -- see dev/memory MEMORY_DESIGN.md Part D.
+    build_memory_kv_slow/_fast are themselves @torch.no_grad() already; the
+    decorator here just matches how forward_flow_action_partial's own
+    no-grad cached_kv construction is wrapped at its call sites, for the
+    same reason (this KV is fixed context, not something to backprop into).
+    """
+    memory_kv = None
+    slow_rows = batch.get("memory_slow")
+    if slow_rows:
+        memory_kv = raw_model.build_memory_kv_slow(
+            slow_rows, rope_stride=getattr(args, "memory_rope_stride_slow", 32.0))
+    fast_rows = batch.get("memory_fast")
+    if fast_rows:
+        memory_kv = raw_model.build_memory_kv_fast(
+            fast_rows, past_kv=memory_kv,
+            rope_stride=getattr(args, "memory_rope_stride_fast", 8.0))
+    return memory_kv
+
+
 def _fmt_bytes(n):
     return f"{n / 1024**3:.1f} GiB"
 
@@ -716,6 +743,15 @@ def save_checkpoint(model, processor, accelerator, args, epoch, global_step, sta
                     "paradigm": "cascaded",
                     "cascaded_total_steps": getattr(args, "cascaded_total_steps", 10),
                     "cascaded_split_step":  getattr(args, "cascaded_split_step", 6),
+                    # Cross-timestep memory (dev/memory) -- serving (test.py)
+                    # must be started with matching --memory_* flags, or the
+                    # checkpoint's learned attention over memory is fed a
+                    # differently-shaped/offset context than it trained on.
+                    "memory_slow_seconds": getattr(args, "memory_slow_seconds", ""),
+                    "memory_fast": getattr(args, "memory_fast", 0),
+                    "memory_slow_jitter_sec": getattr(args, "memory_slow_jitter_sec", 0.0),
+                    "memory_rope_stride_slow": getattr(args, "memory_rope_stride_slow", 32.0),
+                    "memory_rope_stride_fast": getattr(args, "memory_rope_stride_fast", 8.0),
                     "flare_frame_stride": getattr(args, "flare_frame_stride", 2),
                     # Needed to rebuild the *dataloader* the same way at eval time:
                     # feeding a different resolution or F6 window than training
@@ -843,6 +879,7 @@ def run_validation(model, val_dataloader, accelerator, args,
         if i >= max_batches:
             break
         raw_model = accelerator.unwrap_model(model)
+        memory_kv = _build_memory_kv_for_batch(raw_model, batch, args)
 
         inputs_embeds = raw_model.prepare_inputs_embeds(
             input_ids=batch["input_ids"],
@@ -904,9 +941,16 @@ def run_validation(model, val_dataloader, accelerator, args,
                 slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
+            # memory_kv (if any) sits in the cache BEFORE the live latent
+            # tokens -- front-pad attention_mask to match, same as
+            # forward_flow_action_full/_partial do internally (see
+            # Qwen3VLVLAModel._front_pad_attention_mask's docstring).
+            attn_mask_padded = raw_model._front_pad_attention_mask(
+                batch["attention_mask"], B, L_latent, memory_kv, full_embeds.device)
             outputs = raw_model.model(  # DDP: no .model on wrapper
                 inputs_embeds=full_embeds, position_ids=pos_ids,
-                attention_mask=batch["attention_mask"], use_cache=False,
+                attention_mask=attn_mask_padded, past_key_values=memory_kv,
+                use_cache=False,
                 output_hidden_states=use_flare,
                 latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
@@ -926,6 +970,7 @@ def run_validation(model, val_dataloader, accelerator, args,
                     position_ids=pos_ids,
                     noise=ahat_noise,
                     attention_mask=batch["attention_mask"],
+                    memory_kv=memory_kv,
                     state_embeds=se,
                     fast_embeds=fe,
                     num_steps_total=args.cascaded_total_steps,
@@ -959,9 +1004,12 @@ def run_validation(model, val_dataloader, accelerator, args,
                 slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
+            attn_mask_padded = raw_model._front_pad_attention_mask(
+                batch["attention_mask"], B, L_latent, memory_kv, full_embeds.device)
             outputs = raw_model.model(  # DDP: no .model on wrapper
                 inputs_embeds=full_embeds, position_ids=pos_ids,
-                attention_mask=batch["attention_mask"], use_cache=False,
+                attention_mask=attn_mask_padded, past_key_values=memory_kv,
+                use_cache=False,
                 output_hidden_states=use_flare,
                 latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
@@ -1351,6 +1399,7 @@ def train(args):
 
         for batch in it:
             raw_model = accelerator.unwrap_model(model)
+            memory_kv = _build_memory_kv_for_batch(raw_model, batch, args)
 
             inputs_embeds = raw_model.prepare_inputs_embeds(
                 input_ids=batch["input_ids"],
@@ -1431,10 +1480,21 @@ def train(args):
                 fast_embeds, state_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
+            # memory_kv (if any) sits in the cache BEFORE the live latent
+            # tokens -- front-pad attention_mask to match, same as
+            # forward_flow_action_full/_partial do internally (see
+            # Qwen3VLVLAModel._front_pad_attention_mask's docstring). This
+            # call attends to memory_kv READ-ONLY under grad (see
+            # Qwen3VLAttentionMoT.forward's torch.is_grad_enabled() branch --
+            # read_cached_kv, not cache.update() -- so it's also safe to
+            # replay under --gradient_checkpointing 1's backward recompute).
+            attn_mask_padded = raw_model._front_pad_attention_mask(
+                batch["attention_mask"], B, L_latent, memory_kv, full_embeds.device)
             outputs = raw_model.model(  # DDP: no .model on wrapper
                 inputs_embeds=full_embeds,
                 position_ids=pos_ids,
-                attention_mask=batch["attention_mask"],
+                attention_mask=attn_mask_padded,
+                past_key_values=memory_kv,
                 use_cache=False,
                 output_hidden_states=train_flare,
                 latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
@@ -1463,6 +1523,7 @@ def train(args):
                             position_ids=pos_ids,
                             noise=ahat_noise,
                             attention_mask=batch["attention_mask"],
+                            memory_kv=memory_kv,
                             state_embeds=se,
                             fast_embeds=fe,
                             num_steps_total=args.cascaded_total_steps,
@@ -1715,6 +1776,34 @@ if __name__ == "__main__":
                              "behavior when tactile is missing.")
     parser.add_argument("--cascaded_loss_weight", type=float, default=1.0,
                         help="Weight on the L_flow_tactile loss term.")
+
+    # Cross-timestep memory (dev/memory Part D). Default off (empty/0),
+    # byte-identical to current behavior when unset -- see
+    # T-Rex/qwen_vla/MEMORY_DESIGN.md. Read by OrigamiDataset.__init__ via
+    # getattr(config, key, default) where config IS this args namespace, so
+    # no dataset-construction-site change is needed beyond these flags.
+    parser.add_argument("--memory_slow_seconds", type=str, default="",
+                        help="Comma-separated exponential lookback targets in "
+                             "seconds, e.g. '0.25,0.5,1.0,5.0'. Empty (default): "
+                             "no slow memory.")
+    parser.add_argument("--memory_fast", type=int, default=0,
+                        help="Linear fast-memory window (past wrist+action "
+                             "ticks). 0 (default): no fast memory.")
+    parser.add_argument("--memory_slow_jitter_sec", type=float, default=0.0,
+                        help="Fixed absolute jitter added to each slow-memory "
+                             "target before converting to a row offset, so "
+                             "training matches inference's nearest-timestamp "
+                             "snap error under irregular ticks. 0: no jitter.")
+    parser.add_argument("--memory_rope_stride_slow", type=float, default=32.0,
+                        help="RoPE position units per real second for slow "
+                             "memory. Untuned placeholder -- see "
+                             "MEMORY_DESIGN.md. Must match test.py's "
+                             "--memory_rope_stride_slow at serving time.")
+    parser.add_argument("--memory_rope_stride_fast", type=float, default=8.0,
+                        help="RoPE position units per fast-memory step. "
+                             "Untuned placeholder -- see MEMORY_DESIGN.md. "
+                             "Must match test.py's --memory_rope_stride_fast "
+                             "at serving time.")
 
     # VQ-VAE tactile code tokens (fast-path only; pre-baked into the JSON via
     # utils/encode_vqvae_codes_to_json.py).  When 0 (default), no tactile_code

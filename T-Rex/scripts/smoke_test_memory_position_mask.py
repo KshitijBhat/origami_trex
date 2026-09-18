@@ -8,6 +8,7 @@ import os
 import sys
 
 import torch
+from transformers.cache_utils import DynamicCache
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)  # T-Rex/
@@ -242,6 +243,56 @@ def test_front_pad_attention_mask_chains_across_slow_then_fast():
           "memory tiers accumulating in one combined cache")
 
 
+# ─── Regression test for the shared-memory_kv mutation bug ──────────────────
+# Found on a real A100 while wiring memory into train.py: forward_flow_action_
+# full/_partial's internal denoising loop mutates its past_kv in place via
+# DynamicCache.update() (use_cache=True inside a @torch.no_grad() method --
+# see Qwen3VLAttentionMoT.forward's torch.is_grad_enabled() branch). When the
+# SAME memory_kv object is also held by a separate gradient-tracked forward
+# (train.py's loss_act call, saved as a torch.utils.checkpoint arg for
+# backward recompute), that later mutation silently corrupts the earlier
+# call's saved state -- surfaced as a real crash under
+# --gradient_checkpointing 1 ("expanded size ... must match existing size").
+# Fixed by cloning memory_kv (_clone_dynamic_cache) before either method's
+# internal loop touches it, matching tactile_flow_continue's existing
+# precedent for the identical class of bug. This test checks the isolation
+# property the fix relies on: mutating a clone must never affect the
+# original -- it doesn't require a real model/GPU, just a real DynamicCache.
+
+def test_clone_dynamic_cache_isolates_mutations():
+    B, n_heads, seq_len, head_dim = 1, 2, 3, 4
+    cache = DynamicCache()
+    k0 = torch.randn(B, n_heads, seq_len, head_dim)
+    v0 = torch.randn(B, n_heads, seq_len, head_dim)
+    cache.update(k0, v0, layer_idx=0)
+    original_len = cache.get_seq_length()
+    assert original_len == seq_len
+
+    clone = Qwen3VLVLAModel._clone_dynamic_cache(cache)
+    assert clone.get_seq_length() == original_len
+
+    # Mutate the CLONE the way forward_flow_action_full/_partial's internal
+    # loop does (use_cache=True style append) -- the original must be
+    # completely unaffected.
+    k1 = torch.randn(B, n_heads, 5, head_dim)
+    v1 = torch.randn(B, n_heads, 5, head_dim)
+    clone.update(k1, v1, layer_idx=0)
+
+    assert clone.get_seq_length() == original_len + 5
+    assert cache.get_seq_length() == original_len, (
+        f"mutating the clone changed the original's length "
+        f"({cache.get_seq_length()} != {original_len}) -- clone is not isolated, "
+        f"the shared-memory_kv mutation bug would reproduce")
+
+    # Also confirm the clone's tensors are genuinely separate storage, not
+    # aliased views that happened to not be hit by the length check above.
+    orig_layer = cache.layers[0]
+    assert clone.layers[0].keys.data_ptr() != orig_layer.keys.data_ptr()
+    print("[PASS] _clone_dynamic_cache: mutating the clone (append) leaves the "
+          "original's length and storage completely untouched -- the isolation "
+          "property forward_flow_action_full/_partial's memory_kv fix relies on")
+
+
 if __name__ == "__main__":
     test_shift_position_ids_basic()
     test_shift_position_ids_zero_offset_is_noop()
@@ -253,4 +304,5 @@ if __name__ == "__main__":
     test_extend_then_shift_ordering_matches_content_order()
     test_fast_memory_offset_formula_oldest_first()
     test_front_pad_attention_mask_chains_across_slow_then_fast()
+    test_clone_dynamic_cache_isolates_mutations()
     print("\nALL TESTS PASSED")

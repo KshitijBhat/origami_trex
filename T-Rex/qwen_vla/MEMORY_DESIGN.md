@@ -1,5 +1,12 @@
 # Cross-timestep memory for T-Rex (branch: `dev/memory`)
 
+**Status (2026-09-18): Parts A-D all done and verified, including a real
+end-to-end training run through the unmodified production launcher
+(`run_all_abs_ori.sh`) on an A100 -- see Progress and Part D below for
+detail.** Raw per-token KV reuse only; the latent-compressed (flare-style)
+alternative is deliberately deferred until this is validated with a real
+trained checkpoint, not built yet.
+
 ## Context
 
 T-Rex (the Qwen3-VL Mixture-of-Transformers VLA policy, `T-Rex/qwen_vla/`) has
@@ -347,7 +354,8 @@ cost is bounded to the slow-tick cadence, not the faster fast-tick one).
 7. New CLI flags (all default off/0, strict no-op): `--memory_slow_seconds`
    (comma-separated string), `--memory_fast` (int),
    `--memory_rope_stride_slow` / `--memory_rope_stride_fast` (must match
-   whatever the checkpoint was actually trained with once Part D exists),
+   whatever the checkpoint was actually trained with -- see Part D, now
+   done, which records these in `training_args.json` for auto-detection),
    `--memory_buffer_margin_sec`.
 
 **Separate, pre-existing bug found and fixed while wiring this in (not a
@@ -534,39 +542,190 @@ normalized output actually lands in `[-1,1]` post-fix.
     actually importing the module (confirmed broken before, working
     after) -- this was a real blocker for the ENTIRE inference server,
     independent of memory.
-  - **NOT yet verified**: a real end-to-end run with an actual trained
-    checkpoint (`CascadedServer.__init__` + `predict()` against real
-    `training_args.json`/`processor/`/`model.pt`/`stats_data.json`). No
-    checkpoint with memory support exists yet -- blocked on Part D
-    (training-loop wiring, see below), not on anything in Part C itself.
+  - **STILL NOT verified**: a real end-to-end serving run
+    (`CascadedServer.__init__` + `predict()`) against a checkpoint that
+    ACTUALLY TRAINED with memory on (Part D, below, is now done and
+    produces such checkpoints -- e.g. the `vqvae_seed`/`launcher_smoke3`
+    runs -- but this session never pointed `test.py` itself at one). Worth
+    doing once a real trained-with-memory checkpoint exists for a genuine
+    reason to serve it, not just to smoke-test the code path.
 
-## Part D: training-loop wiring -- NOT STARTED, discovered while doing Part C
+## Part D: training-loop wiring -- DONE, verified end-to-end on a real A100
+(2026-09-17/18, `Qwen/Qwen3-VL-2B-Instruct`, real HF origami parquet data)
 
 `origami_dataset.py`'s `collate_fn` produces `memory_slow`/`memory_fast`
 keys (Part A), and the model has `build_memory_kv_slow`/`build_memory_kv_fast`
 plus the `memory_kv` parameter on `forward_flow_action_full`/`_partial`
-(Part B) -- but **`T-Rex/scripts/train.py`'s actual training loop never
-calls any of this**. It doesn't build a memory KV from the batch's
-`memory_slow`/`memory_fast` entries, and doesn't pass `memory_kv` into its
-forward call. Today, turning `memory_slow_seconds`/`memory_fast` on in
-training would compute the extra dataset fields (image decode + tokenize
-for each memory row, on every batch) and then silently throw them away --
-no gradient ever flows through the memory path, so no checkpoint has
-learned to use it. `run_all_abs_ori.sh`/`run_trex_job.sh` also have no
-memory-related CLI flags, for the same reason -- there's nothing to wire
-them to yet.
+(Part B) -- but `T-Rex/scripts/train.py`'s actual training loop never called
+any of this. Wired it in:
 
-This is required before Part C can be verified end-to-end (needs a real
-trained checkpoint) and before memory can do anything useful at all.
-Scope: add CLI args (`--memory_slow_seconds`, `--memory_fast`,
-`--memory_rope_stride_slow/fast`) to `train.py`'s argparse and
-`run_all_abs_ori.sh`'s env-var pass-through, thread them into the
-`OrigamiDataset` construction (already supported, Part A), and in the
-training forward pass build `memory_kv` from `batch["memory_slow"]`/
-`batch["memory_fast"]` via the same `build_memory_kv_slow`/
-`build_memory_kv_fast` chaining Part C's server uses, passing it into
-whatever training calls `forward_flow_action_full`/`_partial`
-(`train.py`'s loss-computation forward, not yet located/read in detail).
+**`train.py` (both `train()`'s main loop and `run_validation()`, which have
+near-identical forward-pass structure):**
+
+1. New shared helper `_build_memory_kv_for_batch(raw_model, batch, args)`
+   (module-level, `@torch.no_grad()`): `build_memory_kv_slow` on
+   `batch.get("memory_slow")`, chains its output into `build_memory_kv_fast`
+   on `batch.get("memory_fast")`, exactly like Part C's server-side
+   `_build_memory_kv`. Returns `None` (true no-op) when the batch carries
+   neither key (memory off).
+2. Called once per batch, right after `raw_model = accelerator.unwrap_model
+   (model)`, in `train()`'s loop and both places `run_validation()` calls
+   that unwrap (it has TWO forward-pass branches -- `has_any_tac` cascaded
+   vs. stage-1/tactile-free -- unlike `train()`'s single always-run-then-
+   branch structure; both branches needed the same wiring).
+3. Two injection points per call site (three total occurrences of each,
+   across `train()` and `run_validation()`'s two branches):
+   - The **direct `raw_model.model(...)` call** that computes `loss_act`
+     (this is NOT `forward_flow_action_full` -- training already has the
+     full noisy-action target, so it does one direct forward instead of
+     iterative denoising). Added `past_key_values=memory_kv` and front-
+     padded `attention_mask` via `raw_model._front_pad_attention_mask(...)`
+     (the same helper `forward_flow_action_full`/`_partial` already use
+     internally). This call runs OUTSIDE any `torch.no_grad()` block (it
+     needs gradients for `loss_act`), so `Qwen3VLAttentionMoT.forward`'s
+     `torch.is_grad_enabled()` branch takes the READ-ONLY `read_cached_kv`
+     path (confirmed by reading that method directly) -- meaning this call
+     never mutates `memory_kv`, and is also safe to replay under
+     `--gradient_checkpointing 1`'s backward recompute (the exact scenario
+     that branch's own code comment was written for).
+   - The existing `forward_flow_action_partial(...)` call (building
+     `cached_kv` for the tactile expert): added `memory_kv=memory_kv`.
+     `tactile_flow_train_step` needs no direct change -- it receives
+     `cached_kv`, which already has memory baked in transitively.
+4. `training_args.json` now records `memory_slow_seconds` (as the raw CLI
+   string, NOT re-parsed -- see the list/string fix below, this keeps the
+   round-trip to `test.py`'s own string-parsing CLI convention clean),
+   `memory_fast`, `memory_slow_jitter_sec`, `memory_rope_stride_slow/fast`
+   -- so serving (`test.py`) can auto-detect the config a checkpoint
+   actually trained with, same pattern as `cascaded_total_steps`/etc.
+5. New CLI args (`--memory_slow_seconds`, `--memory_fast`,
+   `--memory_slow_jitter_sec`, `--memory_rope_stride_slow/fast`), all
+   default off/0.
+
+**Two real bugs found and fixed while wiring this in (both far more
+consequential than Part A/B/C's earlier "found while building X" bugs --
+these only surfaced under real training conditions this session couldn't
+reach without an actual GPU + gradient-checkpointing training run):**
+
+1. **`memory_slow_seconds` list-vs-CLI-string mismatch.** `OrigamiDataset.
+   __init__` expected `list(g("memory_slow_seconds", []) or [])` -- an
+   actual Python list, as every prior test constructed it. A CLI arg is
+   always a string. Rather than mutate `args.memory_slow_seconds` in
+   `train.py` (which would then serialize a list into `training_args.json`,
+   breaking `test.py`'s own string-parsing convention on load), fixed
+   `origami_dataset.py` itself to accept either form: `isinstance(_mss,
+   str)` triggers a `.split(",")` parse, otherwise it's used as-is. Single
+   source of truth, backward compatible with every existing test. Verified
+   with a new CPU-only case confirming the string form produces identical
+   `memory_slow` output to passing the equivalent list directly.
+2. **Shared-`memory_kv`-object mutation bug (the important one) --
+   `forward_flow_action_full`/`_partial`'s internal denoising loop mutates
+   its `past_kv` IN PLACE.** Both methods start their loop with
+   `past_kv = memory_kv` (a bare reference, not a copy) and, inside a
+   `@torch.no_grad()` context with `use_cache=True`, call `self.model(...,
+   past_key_values=past_kv)` every iteration -- which, per
+   `Qwen3VLAttentionMoT.forward`'s `torch.is_grad_enabled()` branch, takes
+   the MUTATING `past_key_value.update(...)` path whenever grad is
+   disabled (this is unconditional on `use_cache`, keyed purely on grad-
+   enabled state). In `train.py`, `_build_memory_kv_for_batch` builds ONE
+   `memory_kv` object shared by BOTH the direct `raw_model.model(...)` call
+   (`loss_act`, gradient-tracked, reads `memory_kv` read-only, but SAVES a
+   reference to it as a `torch.utils.checkpoint` arg for later backward
+   recompute) AND the `forward_flow_action_partial(...)` call (`no_grad`,
+   MUTATES its `past_kv` -- i.e. the same object -- growing it by roughly
+   one denoising step's worth of tokens per iteration). By the time
+   gradient checkpointing's backward pass replays `loss_act`'s forward, the
+   shared `memory_kv` had already grown from the LATER call's mutation --
+   surfaced as `RuntimeError: The expanded size of the tensor (1250) must
+   match the existing size (968)` inside `scaled_dot_product_attention`,
+   exactly the failure mode the codebase's own `read_cached_kv` code
+   comment predicted for a different (self-)mutation scenario, just
+   triggered here by a DIFFERENT caller mutating a cache another caller
+   still held a saved reference to. Fixed by cloning at the top of both
+   methods -- `past_kv = self._clone_dynamic_cache(memory_kv) if memory_kv
+   is not None else None` -- the exact precedent `tactile_flow_continue`
+   already established for this identical class of bug (`cache =
+   self._clone_dynamic_cache(cached_kv)`, so concurrent fast ticks within
+   one chunk window each start from the same slow-tick snapshot without
+   stepping on each other). This also retroactively means the EARLIER
+   `gpu_smoke_test_memory.py` run (Part B) had this same latent bug --
+   it called `forward_flow_action_full` and `forward_flow_action_partial`
+   back-to-back with the same `memory_kv` object, so the second call
+   silently used an already-mutated cache. It never crashed there (no
+   gradient-checkpointing recompute to expose the staleness in an
+   inference-only, no_grad-throughout test), but the fix is a strict
+   correctness improvement there too, not just for training. Added a new
+   CPU-only regression test (`test_clone_dynamic_cache_isolates_mutations`)
+   confirming the isolation property directly: mutating a clone must never
+   change the original's length or storage.
+
+**`run_all_abs_ori.sh`**: new `MEMORY_SLOW_SECONDS`/`MEMORY_FAST`/
+`MEMORY_SLOW_JITTER_SEC`/`MEMORY_ROPE_STRIDE_SLOW`/`MEMORY_ROPE_STRIDE_FAST`
+env vars (all default off/0), always passed through to `train.py` as
+`--memory_*` flags (so the flags exist in the command either way, just
+inert at their defaults) -- `MEMORY_SLOW_SECONDS=0.25,0.5,1.0,5.0
+MEMORY_FAST=4 bash scripts/run_all_abs_ori.sh`.
+
+### GPU verification (A100-40GB, 2026-09-17/18)
+
+Real data: 2 train + 2 val episodes from `drakedrake/origami_preprocessed_
+stride_1` (native 30Hz, ~4400 rows/episode -- enough for the 5s/150-row slow
+lookback to hit real, distinct past content, not degenerate episode-start
+padding). Real `Qwen/Qwen3-VL-2B-Instruct` weights. A hand-written minimal
+`meta/norm_stats.json` (the repo doesn't ship one -- expected, per earlier
+session work; stats are computed on separate infra) and a minimal fake VQ-VAE
+checkpoint (random weights, real config schema) to exercise
+`--use_tactile_vqvae 1` without a real trained tactile VQ-VAE.
+
+Four full training runs, all reaching `--max_steps`/`SMOKE=1` cleanly with
+finite loss and a saved checkpoint, no shortcuts on the real launcher's own
+config once the mutation bug was fixed:
+1. **Baseline, memory off** (hand-invoked `accelerate launch ... train.py`,
+   mirroring `run_all_abs_ori.sh`'s real args minus the untouched pieces):
+   3 steps, `act`/`tac`/`loss` all finite and stable -- confirms the memory
+   changes are a true no-op on the existing path.
+2. **Memory on, same hand-invoked command** (`--memory_slow_seconds
+   0.25,0.5,1.0,5.0 --memory_fast 2`): FIRST attempt hit the mutation bug
+   above under `--gradient_checkpointing 1` (the launcher's real default);
+   after the `_clone_dynamic_cache` fix, 3 steps complete cleanly.
+3. **VQ-VAE + memory together** (`--use_tactile_vqvae 1 --vqvae_ckpt
+   <fake>`, matching the real launcher's actual default): 2 steps clean --
+   this is the first real exercise of `build_memory_kv_fast`'s tactile-
+   memory path (`_embed_tactile_observations` via the on-the-fly VQ-VAE) in
+   a gradient-bearing training context, not just the model-level GPU smoke
+   test from Part B.
+4. **The real, unmodified `scripts/run_all_abs_ori.sh` launcher itself**
+   (`SMOKE=1`, `bitsandbytes AdamW8bit`, real `--gradient_checkpointing 1`,
+   resumed from run 3's checkpoint so `use_tactile_vqvae`/`vqvae_config`
+   auto-detect correctly from `training_args.json`), run TWICE -- once with
+   `MEMORY_SLOW_SECONDS`/`MEMORY_FAST` set, once with them unset (default):
+   both reach `--max_steps 5`, finite loss throughout (`act` 0.97-1.12,
+   `tac` 1.00-1.07, `loss` 2.00-2.16 across both runs -- comparable ranges,
+   as expected), checkpoint saved, `>>> run finished.` printed. This is the
+   actual production entry point the user runs, exercised end-to-end
+   exactly as `run_trex_job.sh` would invoke it (only the `RESUME_CHECKPOINT`
+   /`ORIGIN_MODEL_PATH`/data paths were overridden via env vars to point at
+   this session's sandboxed stand-ins instead of the real asset paths).
+
+Also confirmed: `training_args.json` correctly records
+`"memory_slow_seconds": "0.25,0.5,1.0,5.0"` (string form) in the saved
+checkpoint, matching `test.py`'s own CLI-string parsing convention for a
+clean serving-time round trip.
+
+**Two unrelated missing-dependency gaps hit while provisioning (not memory
+bugs, just this sandbox not having them yet -- a real production box already
+has these via its own setup)**: `bitsandbytes` (the launcher's real default
+optimizer, `--optim adamw8bit`) and `accelerate`/`wandb`/`datasets`/`tqdm`
+(train.py's own dependencies, never previously installed on this GPU box
+since only inference-side scripts had been run on it before this session).
+
+**Not yet done**: a real multi-step/multi-epoch run long enough to see the
+loss trend (all verification here is `--max_steps 2-5`, correctness/crash-
+freedom focused, not convergence-focused) -- reasonable next step once the
+user wants to actually start a production training run with memory enabled,
+not something this session's smoke-test scope covers. `rope_stride` for
+both tiers remains an untuned placeholder throughout (same caveat as
+Parts B/C).
 
 ## Critical files
 
@@ -586,13 +745,19 @@ whatever training calls `forward_flow_action_full`/`_partial`
 - `T-Rex/hardware_code/eval/eval_trex_async.py` (not touched -- the ZMQ
   client sends the same payload shape as before; memory is entirely
   server-side state, no protocol change needed)
-- `T-Rex/scripts/train.py` (Part D -- not started, the actual gap: never
-  calls `build_memory_kv_slow`/`_fast` or passes `memory_kv`)
-- `T-Rex/scripts/run_all_abs_ori.sh`, `T-Rex/run_trex_job.sh` (Part D --
-  no memory CLI flags yet, nothing to wire them to until train.py is done)
+- `T-Rex/scripts/train.py` (Part D -- done: `_build_memory_kv_for_batch`,
+  wired into both `train()`'s main loop and `run_validation()`'s two
+  branches; new `--memory_*` CLI args; `training_args.json` records the
+  config)
+- `T-Rex/scripts/run_all_abs_ori.sh` (Part D -- done: `MEMORY_*` env vars,
+  default off, always passed through)
+- `T-Rex/run_trex_job.sh` (not touched -- just invokes `run_all_abs_ori.sh`
+  as `TRAIN_SCRIPT`, no memory-specific changes needed there)
 - `T-Rex/scripts/smoke_test_memory_windowing.py` (Part A CPU-only test)
 - `T-Rex/scripts/smoke_test_memory_position_mask.py` (Part B CPU-only test,
-  slow + fast tier pure-logic cases)
+  slow + fast tier pure-logic cases; also carries
+  `test_clone_dynamic_cache_isolates_mutations`, the Part D
+  shared-memory_kv-mutation-bug regression test)
 - `T-Rex/scripts/gpu_smoke_test_memory.py` (Part B real-GPU/real-weights
   test -- needs a GPU box + `transformers==4.57.3` per pyproject.toml)
 - `T-Rex/scripts/gpu_smoke_test_memory_fast_normalization.py` (Part A/B

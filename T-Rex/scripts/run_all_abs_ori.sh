@@ -61,7 +61,24 @@ MASK_FROZEN_LOSS="${MASK_FROZEN_LOSS:-1}"
 # ── quick-check dataset cap (new this branch; 0 = use every episode) ────────
 MAX_EPISODES="${MAX_EPISODES:-0}"
 
+# ── cross-timestep memory (dev/memory; default off, byte-identical to
+#    current behavior when unset -- see T-Rex/qwen_vla/MEMORY_DESIGN.md) ────
+#    MEMORY_SLOW_SECONDS=0.25,0.5,1.0,5.0 MEMORY_FAST=4 bash scripts/run_all_abs_ori.sh
+MEMORY_SLOW_SECONDS="${MEMORY_SLOW_SECONDS:-}"
+MEMORY_FAST="${MEMORY_FAST:-0}"
+MEMORY_SLOW_JITTER_SEC="${MEMORY_SLOW_JITTER_SEC:-0}"
+MEMORY_ROPE_STRIDE_SLOW="${MEMORY_ROPE_STRIDE_SLOW:-32.0}"
+MEMORY_ROPE_STRIDE_FAST="${MEMORY_ROPE_STRIDE_FAST:-8.0}"
+
 EXTRA_ARGS=()
+if [ -n "${MEMORY_SLOW_SECONDS}" ] || [ "${MEMORY_FAST}" != "0" ]; then
+    echo ">>> memory: slow_seconds=${MEMORY_SLOW_SECONDS:-<off>} fast=${MEMORY_FAST} " \
+         "rope_stride(slow/fast)=${MEMORY_ROPE_STRIDE_SLOW}/${MEMORY_ROPE_STRIDE_FAST}"
+fi
+EXTRA_ARGS+=(--memory_slow_seconds "${MEMORY_SLOW_SECONDS}" --memory_fast "${MEMORY_FAST}"
+             --memory_slow_jitter_sec "${MEMORY_SLOW_JITTER_SEC}"
+             --memory_rope_stride_slow "${MEMORY_ROPE_STRIDE_SLOW}"
+             --memory_rope_stride_fast "${MEMORY_ROPE_STRIDE_FAST}")
 if [ "${SMOKE:-0}" = "1" ]; then
     echo ">>> SMOKE RUN: 5 steps, no checkpoint"
     EXTRA_ARGS+=(--max_steps 5 --save_steps 0 --save_freq 100000 --val_freq 0)

@@ -76,7 +76,13 @@ def build_fake_dataset(tmpdir: str, n_rows_ep0: int, sample_fps: float,
     ds.instruction = ""
     ds.instruction_override = ""
     ds.sample_fps = sample_fps
-    ds.memory_slow_seconds = memory_slow_seconds
+    # Mirror __init__'s own list-or-CLI-string parsing (this harness bypasses
+    # __init__ via __new__, so it has to replicate that one bit by hand to
+    # actually exercise the string-parsing path Case 6 below tests).
+    _mss = memory_slow_seconds
+    if isinstance(_mss, str):
+        _mss = [float(s) for s in _mss.split(",") if s.strip()]
+    ds.memory_slow_seconds = list(_mss or [])
     ds.memory_slow_jitter_sec = 0.0
     ds.memory_fast = memory_fast
 
@@ -195,6 +201,20 @@ def main():
         item = ds_off[10]
         assert "memory_slow" not in item and "memory_fast" not in item
         print("[PASS] memory_slow_seconds=[] / memory_fast=0: no-op, backward compatible")
+
+        # --- Case 6: memory_slow_seconds as a CLI-style comma-separated
+        # string (train.py's --memory_slow_seconds, always a plain str from
+        # argparse) parses identically to passing the list directly ---
+        ds_str = build_fake_dataset(tmpdir, n_rows_ep0=60, sample_fps=FPS,
+                                    memory_slow_seconds="0.25,0.5,1.0,5.0", memory_fast=0)
+        assert ds_str.memory_slow_seconds == [0.25, 0.5, 1.0, 5.0], ds_str.memory_slow_seconds
+        item_from_str = ds_str[55]
+        item_from_list = ds[55]
+        tags_str = [tag_from_head(m["head"]) for m in item_from_str["memory_slow"]]
+        tags_list = [tag_from_head(m["head"]) for m in item_from_list["memory_slow"]]
+        assert tags_str == tags_list, (tags_str, tags_list)
+        print("[PASS] memory_slow_seconds as a CLI-style comma-separated string "
+              "parses identically to passing the list directly")
 
         print("\nALL TESTS PASSED")
 

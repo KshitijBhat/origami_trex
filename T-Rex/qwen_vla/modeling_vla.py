@@ -839,7 +839,17 @@ class Qwen3VLVLAModel(nn.Module):
         attention_mask = self._front_pad_attention_mask(
             attention_mask, B, L_latent, memory_kv, device)
 
-        past_kv = memory_kv
+        # Clone: this loop's own iterations mutate past_kv in place via
+        # DynamicCache.update() (use_cache=True inside a @torch.no_grad()
+        # method -- see Qwen3VLAttentionMoT.forward's torch.is_grad_enabled()
+        # branch). memory_kv may be the SAME object a separate caller is
+        # holding onto for its own gradient-checkpointing backward recompute
+        # (e.g. train.py's loss_act forward, which reads memory_kv READ-ONLY
+        # under grad but saves it as a checkpoint arg) -- mutating it here
+        # would silently corrupt that other call's saved state between its
+        # forward and backward passes. Same precedent as
+        # tactile_flow_continue's _clone_dynamic_cache(cached_kv) call.
+        past_kv = self._clone_dynamic_cache(memory_kv) if memory_kv is not None else None
         n_act = 0
         for step_idx in range(num_steps):
             timesteps = self.t_embedder(time.expand(B)).unsqueeze(1)
@@ -940,7 +950,13 @@ class Qwen3VLVLAModel(nn.Module):
         attention_mask = self._front_pad_attention_mask(
             attention_mask, B, L_latent, memory_kv, device)
 
-        past_kv = memory_kv
+        # Clone -- see forward_flow_action_full's identical comment. This is
+        # doubly important here: train.py's loss_act forward (a separate,
+        # gradient-tracked call) and this method's own no_grad internal loop
+        # both receive the SAME memory_kv from _build_memory_kv_for_batch,
+        # and this loop mutates its copy via DynamicCache.update() every
+        # iteration (use_cache=True under no_grad).
+        past_kv = self._clone_dynamic_cache(memory_kv) if memory_kv is not None else None
         n_act = 0
         for i in range(split_step):
             timesteps = self.t_embedder(time.expand(B)).unsqueeze(1)

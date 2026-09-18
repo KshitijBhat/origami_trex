@@ -218,7 +218,14 @@ class OrigamiDataset(torch.utils.data.Dataset):
         # computed above). Fast (wrist+action+tactile) memory stays a short
         # *linear* window instead -- it's meant to catch a near-immediate
         # reflex (e.g. a slip), where reaching seconds back is dead weight.
-        self.memory_slow_seconds = list(g("memory_slow_seconds", []) or [])
+        # Accepts either an actual list of floats (tests, and any caller that
+        # already has one) or a CLI-style comma-separated string (train.py's
+        # --memory_slow_seconds, always a plain str from argparse) -- parsed
+        # here once so every caller can pass whichever form it naturally has.
+        _mss = g("memory_slow_seconds", [])
+        if isinstance(_mss, str):
+            _mss = [float(s) for s in _mss.split(",") if s.strip()]
+        self.memory_slow_seconds = list(_mss or [])
         # Fixed ABSOLUTE jitter (seconds), not a percentage of each target --
         # at inference the memory buffer is timestamped and each target is
         # matched to its nearest real tick (ticks aren't perfectly uniform),
