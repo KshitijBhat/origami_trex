@@ -132,22 +132,104 @@ its own tokenized sequence to be forwarded separately later). Output:
 dicts with batched tensors (`input_ids`, `attention_mask`, `pixel_values`,
 `image_grid_thw`, plus `action_abs`/`tacf6_hist` for the fast tier).
 
-**B) Model-side (`modeling_qwen3vl_mot.py`, `modeling_vla.py`) -- NOT STARTED**
+**B) Model-side (`modeling_qwen3vl_mot.py`, `modeling_vla.py`) -- SLOW TIER DONE (code+CPU tests), FAST TIER NOT STARTED**
 
-1. Populate `memory_kv_slow` / `memory_kv_fast` by looping
-   `Qwen3VLModelMoT.forward` once per past row (`use_cache=True`), using
-   `split_slow_fast_embeds` on each past row the same way the live row
-   already is. No flow-matching needed for past rows.
-2. Extend `_extend_position_ids` with a `time_offset` param. Slow memory
-   offsets are proportional to actual `dt_k` (log-spaced, not uniform `k*S`);
-   fast memory stays uniform `k*S_fast`. `S` must match however
-   position_ids are produced for a single timestep today -- confirm before
-   implementing, not yet derived.
-3. Add `memory_kv_slow`/`memory_kv_fast: Optional[DynamicCache] = None` to
-   `forward_flow_action_full`/`forward_flow_action_partial`, replacing the
-   hardcoded `past_kv = None` -- default-off, strict superset of current
-   behavior. `tactile_flow_continue` extends to accept a cache already
-   containing both memory tiers concatenated with the live KV.
+**Decided: raw per-token KV reuse (zero new weights), not latent-compressed
+memory.** Considered compressing each past row into a small number of
+learned "memory slot" latents (mirroring `flare_queries`' existing
+cross-attention-compression pattern, just consuming the past instead of
+predicting the future) -- would directly fix the fast-tick token-cost risk
+below (K_slow=4 rows x ~64 head tokens = 256 raw KV tokens/layer could
+shrink 8-16x to ~16-32 compressed slots), but needs a new trainable
+component trained end-to-end through the action-prediction loss. Decided to
+ship the simpler, already-mostly-designed zero-new-weights plumbing first;
+revisit compression later if the token cost proves to matter in practice
+once real numbers are measured (see Risks).
+
+**Position-id design, refined after tracing where `position_ids` actually
+comes from (`train.py:869`, `raw_model.get_rope_index(input_ids,
+image_grid_thw, attention_mask)`).** FLARE turned out NOT to be a usable
+template for this, despite being the closest existing "extra temporal
+content" precedent: `flare_queries` are learned placeholder query tokens (no
+real image patches), so `_extend_position_ids`'s flat scalar-per-token
+extension is fine for them. Memory rows are different -- they carry real
+multi-patch image content (head image for slow, wrist images for fast) that
+needs genuine internal 2D spatial (height/width) M-RoPE structure, not a
+flat scalar per token. Correct approach: for each memory row, call
+`get_rope_index` independently on *that row's own* `input_ids`/
+`image_grid_thw` (exactly as the live row already does), preserving correct
+internal spatial structure, then shift the *entire resulting block*
+backward by an amount proportional to that row's `dt_k` (slow) or `k` (fast,
+uniform), landing it at **negative** positions relative to the current
+step's 0-baseline. Mathematically sound -- rotary embeddings work fine with
+negative angles, and it's the correct semantic for "before now" on a
+monotonic time axis. This replaces the original "flat `k*S` for the whole
+row" idea from the initial design pass.
+
+**Slow tier -- implemented:**
+
+1. `Qwen3VLModelMoT.shift_position_ids_for_memory(position_ids, time_offset)`
+   (staticmethod, `modeling_qwen3vl_mot.py`, next to `_extend_position_ids`):
+   takes one memory row's own fresh `get_rope_index()` output (`[3,B,L]`,
+   0-based -- confirmed by reading the real HF `get_rope_index` source
+   directly: every fresh call starts `current_pos` at 0 per batch item) and
+   a per-batch `time_offset: [B]` **already in RoPE position units**
+   (`dt_actual_seconds * rope_stride`), returns the block translated
+   backward by that amount. Pure uniform subtraction -- internal 2D
+   spatial structure within the row is untouched, only the whole block's
+   baseline moves. `rope_stride` is a still-unvalidated hyperparameter
+   (needs empirical tuning against how many position units a live tick
+   actually spans -- deferred to GPU time, see Progress).
+2. `Qwen3VLVLAModel.build_memory_kv_slow(memory_rows, rope_stride=32.0)`
+   (`modeling_vla.py`, next to `_clone_dynamic_cache`): loops the K
+   `memory_slow` rows oldest-first, for each: `prepare_inputs_embeds` +
+   `get_rope_index` (both existing helpers, reused as-is) + the shift
+   above, then one `self.model(...)` forward with `use_cache=True`,
+   `latent_indexes=arange(0,L)` (memory_slow rows are homogeneously
+   head+text content by construction -- no `split_slow_fast_embeds` call
+   needed, unlike the live row), threading `past_key_values` across
+   iterations so the K rows accumulate into one `DynamicCache`. Returns
+   `None` for an empty list (matches today's default-off behavior exactly).
+3. **Mask-alignment bug found and fixed before it could bite silently:**
+   `build_causal_mask` always pads a shorter `attention_mask` at the TAIL
+   of the `(past_len + seq_len)` axis. That convention is correct for this
+   codebase's *existing* past-KV use (denoising steps: cached content is
+   `[live latent (described by attention_mask) | previously-appended action
+   tokens (always real)]` -- attention_mask already sits at the front of the
+   cache). Memory KV breaks it: the cache becomes `[memory (always real) |
+   live latent (described by attention_mask) | action tokens]`, so a
+   naively-reused `attention_mask` would end up describing the *memory*
+   block instead of the live latent block. Fixed with
+   `Qwen3VLVLAModel._front_pad_attention_mask(attention_mask, batch_size,
+   seq_len, past_kv, device)`: front-pads with 1s (memory is never padding)
+   by `past_kv`'s length, called **once** before the denoising loop starts
+   in both `forward_flow_action_full`/`_partial` (not per-iteration --
+   `past_kv.crop(-n_act)` always restores `past_len` back to exactly
+   `memory_len + latent_len` between iterations, so one pre-pad is
+   sufficient and keeps every iteration's reused `attention_mask` correct).
+4. `forward_flow_action_full`/`forward_flow_action_partial` gained a
+   `memory_kv_slow: Optional[DynamicCache] = None` param. Loop init changed
+   from `past_kv = None` to `past_kv = memory_kv_slow`; the "first
+   iteration does a full latent+action forward, later ones reuse KV"
+   branch now keys off an explicit step index (`step_idx == 0` / `i == 0`)
+   instead of `past_kv is None`, since `past_kv` now legitimately starts
+   non-None when memory is supplied. `position_ids` for the live row is
+   passed through completely unchanged (RoPE handles the live-vs-memory
+   relative distance automatically via the position values themselves;
+   only memory's own position_ids needed shifting). Default (`None`) is a
+   strict no-op, verified by the mask/position CPU tests below reducing to
+   identity in that case.
+
+**Fast tier -- not started**, and flagged as needing separate treatment:
+`memory_fast` rows are NOT text+image content routed through
+`prepare_inputs_embeds` -- they're wrist images + `action_abs` +
+`tacf6_hist` that need the ACTION-expert embedding path (`x_embedder`,
+`tacf6_embedder`/`encode_tactile_f6_history`), matching how live
+`fast_embeds` get built and fed into `act_parts` inside
+`forward_flow_action_full`/`_partial`. `tactile_flow_continue` needs no
+direct change either way -- it receives `cached_kv` from
+`forward_flow_action_partial`'s output, so slow memory is already baked in
+transitively once that call is fed `memory_kv_slow`.
 
 **C) Inference-side (`test.py` `CascadedServer`, `eval_trex_async.py`) -- NOT STARTED**
 
@@ -193,14 +275,50 @@ dicts with batched tensors (`input_ids`, `attention_mask`, `pixel_values`,
     memory-off (regression, byte-identical structure to current behavior)
     and memory-on (`memory_slow_seconds=[0.25,0.5,1,5]`, `memory_fast=2`,
     `memory_slow_jitter_sec=0.1`) pass with correct tensor shapes throughout.
-- **Part B, C: not started.**
+  - Follow-up fix (post-commit, same session): added `dt_actual` (the REAL
+    elapsed time of the row actually fetched, post-jitter, post-episode-
+    clamp) to both `__getitem__` and `collate_fn` -- needed because episode-
+    start clamping can make the real gap disagree with the nominal jittered
+    target, and Part B's position shift must reflect what the content
+    actually is. New test case in the local CPU-only suite confirms clamped
+    rows report the correct real gap (not the nominal target).
+- **Part B, slow tier: code done, CPU-only tests pass (no GPU available this
+  session -- see below).**
+  - `shift_position_ids_for_memory` + `build_memory_kv_slow` +
+    `_front_pad_attention_mask` implemented as described above,
+    `memory_kv_slow` wired into `forward_flow_action_full`/`_partial`.
+  - Verified via `py_compile` (both files) and a new pure-logic CPU-only
+    test suite (no real 2B model, no GPU): uniform per-batch position
+    translation preserves each row's internal M-RoPE structure and lands
+    at <=0; zero-offset is a true no-op; the mask front-pad is a true no-op
+    when there's no memory or a zero-length cache, correctly prepends
+    all-1s for the memory block otherwise, and preserves a real per-batch
+    padding mask exactly at the tail; an end-to-end check against the real
+    `build_causal_mask` confirms the intended semantics (full memory block
+    always attendable, causal structure intact across the whole
+    `[memory|latent|act]` axis). All 7 cases pass.
+  - **NOT yet verified**: an actual forward pass through the real 2B model
+    (needs GPU + real weights) -- this is pure math/plumbing verification
+    only. `rope_stride` (RoPE position units per real second) is a
+    placeholder default (32.0) and needs empirical calibration once a GPU
+    is available, against however many position units a real live tick
+    actually spans.
+- **Part B, fast tier: not started** (needs the action-expert embedding
+  path, not `prepare_inputs_embeds` -- see Design B above).
+- **Part C: not started.**
 
 ## Critical files
 
 - `T-Rex/qwen_vla/origami_dataset.py` (Part A -- done)
 - `T-Rex/qwen_vla/lerobot_dataset.py` (Part A, LeRobot path -- not touched
   yet, only the origami-flat path above is done)
-- `T-Rex/qwen_vla/modeling_vla.py` (Part B)
-- `T-Rex/qwen_vla/modeling_qwen3vl_mot.py` (Part B)
+- `T-Rex/qwen_vla/modeling_vla.py` (Part B -- slow tier done:
+  `build_memory_kv_slow`, `_front_pad_attention_mask`, `memory_kv_slow`
+  param on `forward_flow_action_full`/`_partial`)
+- `T-Rex/qwen_vla/modeling_qwen3vl_mot.py` (Part B -- slow tier done:
+  `shift_position_ids_for_memory`)
 - `T-Rex/scripts/test.py` (Part C)
 - `T-Rex/hardware_code/eval/eval_trex_async.py` (Part C)
+- `T-Rex/scripts/smoke_test_memory_windowing.py` (Part A CPU-only test)
+- `T-Rex/scripts/smoke_test_memory_position_mask.py` (Part B slow-tier
+  CPU-only test)

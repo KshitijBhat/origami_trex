@@ -440,10 +440,19 @@ class OrigamiDataset(torch.utils.data.Dataset):
                         -self.memory_slow_jitter_sec, self.memory_slow_jitter_sec))
                 offset = max(1, round(dt * self.sample_fps))
                 prow = max(row - offset, 0)
+                # Real elapsed time of the row actually fetched, NOT the
+                # pre-clamp jittered dt -- episode-start padding can clamp
+                # prow to 0, at which point the true gap (row - prow) may be
+                # much smaller than dt (e.g. requesting 5s back only 1s into
+                # an episode). The model-side position shift must reflect
+                # what the content actually is, not the unclamped target, or
+                # position label and content would disagree.
+                dt_actual = (row - prow) / self.sample_fps
                 rr = r if prow == row else self._read_row(ei, prow)
                 mem_slow.append({
                     "head": self._pil(rr["head"]),
                     "task": self._task_text(ep, float(rr["phase"].as_py())),
+                    "dt_actual": dt_actual,
                 })
             item["memory_slow"] = mem_slow
         if self.memory_fast > 0:
@@ -584,9 +593,10 @@ class OrigamiDataset(torch.utils.data.Dataset):
         if self.memory_slow_seconds and "memory_slow" in batch[0]:
             memory_slow_out = []
             for k in range(len(self.memory_slow_seconds)):
-                k_ids, k_pv, k_thw = [], [], []
+                k_ids, k_pv, k_thw, k_dt = [], [], [], []
                 for b in batch:
                     m = b["memory_slow"][k]
+                    k_dt.append(m["dt_actual"])
                     content = [{"type": "image"}, {"type": "text", "text": m.get("task", "")}]
                     text = self.processor.apply_chat_template(
                         [{"role": "user", "content": content}], tokenize=False,
@@ -612,6 +622,12 @@ class OrigamiDataset(torch.utils.data.Dataset):
                     "attention_mask": torch.stack(ams_k),
                     "pixel_values": torch.cat(k_pv, dim=0) if k_pv else None,
                     "image_grid_thw": torch.cat(k_thw, dim=0) if k_thw else None,
+                    # Real elapsed seconds for the row actually fetched
+                    # (post-jitter, post-episode-clamp) -- the model-side
+                    # position-id shift must use this, not the nominal
+                    # memory_slow_seconds target, since clamping at episode
+                    # start can make them disagree.
+                    "dt_actual": torch.tensor(k_dt, dtype=torch.float32),
                 })
 
         memory_fast_out = None

@@ -32,7 +32,7 @@ Methods:
 
 import copy
 import os
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -541,6 +541,121 @@ class Qwen3VLVLAModel(nn.Module):
                     "tactile_flow_continue.")
         return new_cache
 
+    @staticmethod
+    def _front_pad_attention_mask(
+        attention_mask: Optional[torch.Tensor],
+        batch_size: int,
+        seq_len:    int,
+        past_kv:    Optional["DynamicCache"],
+        device:     torch.device,
+    ) -> Optional[torch.Tensor]:
+        """Align a caller-supplied attention_mask with `build_causal_mask`'s
+        tail-pad convention when `past_kv` already holds tokens that come
+        chronologically BEFORE this call's own tokens (memory KV).
+
+        `build_causal_mask` (modeling_qwen3vl_mot.py) always pads a mask
+        shorter than `past_len + seq_len` at the TAIL. That's correct for
+        this codebase's other past_kv use (denoising: cached content is
+        [live latent (described by attention_mask) | previously-appended
+        action tokens (always real, never padded)] -- attention_mask
+        already sits at the front of the cache, real content trails it).
+        Memory KV breaks that assumption: the cache becomes
+        [memory (always real, never padded) | live latent (described by
+        attention_mask) | action tokens], so attention_mask must be
+        front-padded by `past_kv`'s length once, BEFORE the denoising loop
+        starts, so it keeps describing the live-latent block at whatever
+        offset it now sits at. Once padded, later iterations that reuse
+        this same mask unchanged (the existing pattern) stay correct too,
+        since `past_kv.crop(-n_act)` always restores past_len back to
+        exactly `memory_len + latent_len` between iterations.
+        """
+        if past_kv is None:
+            return attention_mask
+        past_len = past_kv.get_seq_length()
+        if past_len == 0:
+            return attention_mask
+        if attention_mask is None:
+            attention_mask = torch.ones(batch_size, seq_len, device=device, dtype=torch.long)
+        pad = torch.ones(attention_mask.shape[0], past_len,
+                          device=device, dtype=attention_mask.dtype)
+        return torch.cat([pad, attention_mask], dim=1)
+
+    @torch.no_grad()
+    def build_memory_kv_slow(
+        self,
+        memory_rows: List[Dict[str, torch.Tensor]],
+        rope_stride: float = 32.0,
+    ) -> Optional["DynamicCache"]:
+        """
+        Populate a DynamicCache from a list of past ("memory_slow") rows,
+        oldest first, for use as the seed `past_key_values` of a live
+        forward call (`forward_flow_action_full`/`_partial`'s new
+        `memory_kv_slow` argument).
+
+        Each row is one entry of `OrigamiDataset.collate_fn`'s
+        `memory_slow` output: `input_ids`/`attention_mask`/`pixel_values`/
+        `image_grid_thw` from the SAME tokenize-and-process path the live
+        row uses (not the lighter raw-pixel `flare` path -- each memory
+        row needs its own independently-correct 2D M-RoPE structure), plus
+        `dt_actual`: `[B]` real elapsed seconds between that row and the
+        current tick (already accounts for episode-start clamping --
+        see origami_dataset.py's memory_slow_seconds/dt_actual).
+
+        `rope_stride` converts dt_actual (seconds) to RoPE position units.
+        Exposed as a parameter rather than hardcoded: it needs empirical
+        tuning against how many position units a live tick actually spans
+        (head image + text token count, which get_rope_index advances by
+        the image's spatial "diameter" for vision tokens, not 1-per-row) --
+        deferred to when a GPU is available again, per standing guidance
+        to get code structurally correct locally first.
+
+        memory_slow rows are homogeneously slow/latent-only content (head
+        image + task text, no wrist images) by construction in the
+        dataset, so each row is forwarded as pure `latent_indexes` -- no
+        `split_slow_fast_embeds` call is needed here, unlike a live tick.
+
+        Returns None for an empty list (caller treats that identically to
+        "no memory", matching today's default-off behavior).
+        """
+        if not memory_rows:
+            return None
+
+        past_kv = None
+        for row in memory_rows:
+            input_ids     = row["input_ids"]
+            pixel_values   = row.get("pixel_values")
+            image_grid_thw = row.get("image_grid_thw")
+            row_attn_mask  = row.get("attention_mask")
+            dt_actual      = row["dt_actual"]
+
+            device = input_ids.device
+            B, L   = input_ids.shape[:2]
+
+            inputs_embeds = self.prepare_inputs_embeds(
+                input_ids, pixel_values, image_grid_thw)
+            position_ids, _ = self.get_rope_index(
+                input_ids, image_grid_thw, row_attn_mask)
+            time_offset  = dt_actual.to(device=device) * rope_stride
+            position_ids = self.model.shift_position_ids_for_memory(
+                position_ids, time_offset)
+
+            call_attn_mask = self._front_pad_attention_mask(
+                row_attn_mask, B, L, past_kv, device)
+
+            outputs = self.model(
+                inputs_embeds=inputs_embeds,
+                position_ids=position_ids,
+                attention_mask=call_attn_mask,
+                past_key_values=past_kv,
+                use_cache=True,
+                latent_indexes=torch.arange(0, L, device=device),
+                action_indexes=torch.arange(0, 0, device=device),
+                tactile_indexes=torch.arange(0, 0, device=device),
+            )
+            past_kv = outputs.past_key_values
+
+        return past_kv
+
     # ──────────────────────────────────────────────────────────────────────
     # Cascaded flow matching
     #
@@ -563,6 +678,7 @@ class Qwen3VLVLAModel(nn.Module):
         state_embeds: Optional[torch.Tensor] = None,
         fast_embeds: Optional[torch.Tensor] = None,
         num_steps: int = 10,
+        memory_kv_slow: Optional["DynamicCache"] = None,
     ) -> torch.Tensor:
         """Action-expert-only full flow τ ∈ [0, 1].
 
@@ -593,9 +709,16 @@ class Qwen3VLVLAModel(nn.Module):
         n_state = state_embeds.shape[1]
         L_latent = inputs_embeds.shape[1]
 
-        past_kv = None
+        # memory_kv_slow (if any) sits in the cache BEFORE the live latent
+        # tokens -- front-pad attention_mask once, up front, so it keeps
+        # describing the live-latent block at its new (shifted) offset for
+        # every iteration below (see _front_pad_attention_mask docstring).
+        attention_mask = self._front_pad_attention_mask(
+            attention_mask, B, L_latent, memory_kv_slow, device)
+
+        past_kv = memory_kv_slow
         n_act = 0
-        for _ in range(num_steps):
+        for step_idx in range(num_steps):
             timesteps = self.t_embedder(time.expand(B)).unsqueeze(1)
             noisy_act = self.x_embedder(x_t)
             act_parts = [fast_embeds]
@@ -605,7 +728,7 @@ class Qwen3VLVLAModel(nn.Module):
             act_seq = torch.cat(act_parts, dim=1)
             n_act = act_seq.shape[1]
 
-            if past_kv is None:
+            if step_idx == 0:
                 full_embeds = torch.cat([inputs_embeds, act_seq], dim=1)
                 outputs = self.model(
                     inputs_embeds=full_embeds,
@@ -652,6 +775,7 @@ class Qwen3VLVLAModel(nn.Module):
         num_steps_total: int = 10,
         split_step: int = 6,
         refresh_clean_kv: bool = True,
+        memory_kv_slow: Optional["DynamicCache"] = None,
     ) -> Tuple[torch.Tensor, "DynamicCache", int, float]:
         """Cascaded slow-tick: run the action expert for `split_step` of
         `num_steps_total` Euler steps, stopping at τ = 1 − split_step/num_steps_total.
@@ -687,7 +811,13 @@ class Qwen3VLVLAModel(nn.Module):
         n_state = state_embeds.shape[1]
         L_latent = inputs_embeds.shape[1]
 
-        past_kv = None
+        # See forward_flow_action_full: memory_kv_slow sits in the cache
+        # BEFORE the live latent tokens, so attention_mask must be
+        # front-padded once, up front, to stay aligned for every iteration.
+        attention_mask = self._front_pad_attention_mask(
+            attention_mask, B, L_latent, memory_kv_slow, device)
+
+        past_kv = memory_kv_slow
         n_act = 0
         for i in range(split_step):
             timesteps = self.t_embedder(time.expand(B)).unsqueeze(1)
@@ -699,7 +829,7 @@ class Qwen3VLVLAModel(nn.Module):
             act_seq = torch.cat(act_parts, dim=1)
             n_act = act_seq.shape[1]
 
-            if past_kv is None:
+            if i == 0:
                 full_embeds = torch.cat([inputs_embeds, act_seq], dim=1)
                 outputs = self.model(
                     inputs_embeds=full_embeds,

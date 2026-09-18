@@ -618,6 +618,36 @@ class Qwen3VLModelMoT(nn.Module):
                 parts.append(max_pos + off_t)
             return torch.cat(parts, dim=-1)
 
+    @staticmethod
+    def shift_position_ids_for_memory(
+        position_ids: torch.Tensor,   # [3, B, L] -- fresh get_rope_index() output for ONE memory row
+        time_offset:  torch.Tensor,   # [B] -- RoPE position units this row sits behind "now"
+    ) -> torch.Tensor:
+        """
+        Translate an independently-computed (0-based) M-RoPE position_ids
+        block for a past ("memory") row backward so it lands at negative
+        positions relative to the current timestep's own 0-based
+        position_ids.
+
+        `get_rope_index` always starts a fresh call at position 0 per batch
+        item (real vision/text tokens get correct *relative* 2D spatial
+        structure within that call) -- so a memory row's own position_ids
+        already have the right internal shape, they just need the whole
+        block shifted by that row's real time-distance from "now" rather
+        than recomputed incrementally (incremental extension only works for
+        adjacent tokens, not exponential/non-adjacent lookback). RoPE is
+        well-defined for negative angles, so downstream attention needs no
+        change to consume the result.
+
+        `time_offset` must already be in RoPE position units (i.e.
+        real_seconds * rope_stride), not raw seconds -- the caller picks
+        rope_stride to match however position_ids advance per unit time in
+        this codebase's convention (see Qwen3VLVLAModel.build_memory_kv_slow).
+        """
+        off = time_offset.to(dtype=position_ids.dtype, device=position_ids.device)
+        off = off.view(1, -1, 1)  # [B] -> [1, B, 1], broadcasts over the 3 M-RoPE dims and L
+        return position_ids - off
+
     def forward(
         self,
         inputs_embeds:   Optional[torch.FloatTensor]  = None,
