@@ -87,14 +87,18 @@ class NormStatsAccumulator:
         self._states: List[np.ndarray] = []       # each [65]
         self._tactile: List[np.ndarray] = []      # each [60]
         self._tracking: List[np.ndarray] = []     # each [65]
+        self._torque: List[np.ndarray] = []       # each [65], only if present
         self.num_trajectories = 0
 
     def add_episode(self, chunks: np.ndarray, states: np.ndarray,
-                    tactile: np.ndarray, abs_actions: np.ndarray) -> None:
+                    tactile: np.ndarray, abs_actions: np.ndarray,
+                    torque: Optional[np.ndarray] = None) -> None:
         self.num_trajectories += 1
         self._actions.append(chunks)
         self._states.append(states)
         self._tactile.append(tactile)
+        if torque is not None:
+            self._torque.append(torque)
         # "Tracking error" here is the joint-space analogue of T-Rex's eef
         # version: how far the commanded target sits from the measured state.
         # Only used to parameterise optional state-noise augmentation.
@@ -112,7 +116,7 @@ class NormStatsAccumulator:
             raise ValueError(f"action stats source is {actions.shape}, expected "
                              f"[M, {self.action_chunk}, {self.action_dim}]")
 
-        return {STATS_KEY: {
+        result = {STATS_KEY: {
             "action": calculate_stats(actions),
             "state": calculate_stats(states),
             "tactile_f6": calculate_stats(tactile, min_range=MIN_NORM_RANGE_TACTILE),
@@ -127,6 +131,10 @@ class NormStatsAccumulator:
             "action_chunk": int(self.action_chunk),
             "action_dim": int(self.action_dim),
         }}
+        if self._torque:
+            torque = np.concatenate(self._torque, axis=0)     # [M, 65]
+            result[STATS_KEY]["torque"] = calculate_stats(torque)
+        return result
 
 
 def compute_stats(root: str, subsample: int = 4) -> dict:
@@ -145,10 +153,13 @@ def compute_stats(root: str, subsample: int = 4) -> dict:
 
     acc = NormStatsAccumulator(action_chunk, action_dim)
     episodes = meta["episodes"]
+    has_torque = bool(episodes) and "torque" in pq.ParquetFile(
+        os.path.join(root, episodes[0]["file"])).schema.names
+    columns = ["state", "action_chunk", "action_abs", "tacf6_hist"]
+    if has_torque:
+        columns.append("torque")
     for i, entry in enumerate(episodes, 1):
-        table = pq.read_table(
-            os.path.join(root, entry["file"]),
-            columns=["state", "action_chunk", "action_abs", "tacf6_hist"])
+        table = pq.read_table(os.path.join(root, entry["file"]), columns=columns)
         step = max(1, subsample)
         states = np.asarray(table["state"].to_pylist(), dtype=np.float32)[::step]
         chunks = np.asarray(table["action_chunk"].to_pylist(),
@@ -157,7 +168,9 @@ def compute_stats(root: str, subsample: int = 4) -> dict:
         # The current tactile frame is the last entry of the history window.
         hist = np.asarray(table["tacf6_hist"].to_pylist(),
                           dtype=np.float32)[::step].reshape(-1, window, F6_DIM)
-        acc.add_episode(chunks, states, hist[:, -1, :], abs_actions)
+        torque = (np.asarray(table["torque"].to_pylist(), dtype=np.float32)[::step]
+                  if has_torque else None)
+        acc.add_episode(chunks, states, hist[:, -1, :], abs_actions, torque=torque)
         if i % 25 == 0 or i == len(episodes):
             logger.info("[stats] %d/%d episodes", i, len(episodes))
     return acc.assemble()

@@ -61,6 +61,7 @@ class Qwen3VLVLAModel(nn.Module):
         tacf6_dim:           int   = 6,
         use_tactile_deform:  bool  = False,
         use_robot_state:     bool  = False,
+        use_torque:          bool  = False,
         image_token_id:      int   = _DEFAULT_IMAGE_TOKEN_ID,
         tactile_intermediate_size: int = None,
         n_flare_tokens_per_frame: int = 0,
@@ -78,6 +79,7 @@ class Qwen3VLVLAModel(nn.Module):
         self.tacf6_dim          = tacf6_dim
         self.use_tactile_deform = use_tactile_deform
         self.use_robot_state    = use_robot_state
+        self.use_torque         = use_torque
         self.image_token_id     = image_token_id
         self.tactile_intermediate_size = tactile_intermediate_size
         self.n_flare_tokens_per_frame = n_flare_tokens_per_frame
@@ -146,6 +148,9 @@ class Qwen3VLVLAModel(nn.Module):
         if use_robot_state:
             self.state_embedder = ActionEmbedder(action_dim, H)
 
+        if use_torque:
+            self.torque_embedder = ActionEmbedder(action_dim, H)
+
         # Flare visual prediction tokens for the latent expert
         if self.n_flare_tokens > 0:
             self.flare_queries = nn.Parameter(
@@ -167,6 +172,7 @@ class Qwen3VLVLAModel(nn.Module):
         tacf6_dim:          int  = 6,
         use_tactile_deform: bool = False,
         use_robot_state:    bool = False,
+        use_torque:         bool = False,
         torch_dtype              = torch.bfloat16,
         tactile_intermediate_size: int = None,
         n_flare_tokens_per_frame: int = 0,
@@ -212,6 +218,7 @@ class Qwen3VLVLAModel(nn.Module):
             tacf6_dim = tacf6_dim,
             use_tactile_deform = use_tactile_deform,
             use_robot_state = use_robot_state,
+            use_torque = use_torque,
             image_token_id = image_token_id,
             tactile_intermediate_size = tactile_intermediate_size,
             n_flare_tokens_per_frame = n_flare_tokens_per_frame,
@@ -389,6 +396,12 @@ class Qwen3VLVLAModel(nn.Module):
                         nn.init.zeros_(mm.bias)
         if self.use_robot_state:
             for mm in self.state_embedder.modules():
+                if isinstance(mm, nn.Linear):
+                    nn.init.xavier_uniform_(mm.weight)
+                    if mm.bias is not None:
+                        nn.init.zeros_(mm.bias)
+        if self.use_torque:
+            for mm in self.torque_embedder.modules():
                 if isinstance(mm, nn.Linear):
                     nn.init.xavier_uniform_(mm.weight)
                     if mm.bias is not None:
@@ -807,6 +820,7 @@ class Qwen3VLVLAModel(nn.Module):
         noise: torch.Tensor,                    # [B, n_chunk, action_dim]
         attention_mask: Optional[torch.Tensor] = None,
         state_embeds: Optional[torch.Tensor] = None,
+        torque_embeds: Optional[torch.Tensor] = None,
         fast_embeds: Optional[torch.Tensor] = None,
         num_steps: int = 10,
         memory_kv: Optional["DynamicCache"] = None,
@@ -837,7 +851,10 @@ class Qwen3VLVLAModel(nn.Module):
             fast_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
         if state_embeds is None:
             state_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
+        if torque_embeds is None:
+            torque_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
         n_state = state_embeds.shape[1]
+        n_torque = torque_embeds.shape[1]
         L_latent = inputs_embeds.shape[1]
 
         # memory_kv (if any -- typically slow+fast tiers already combined
@@ -867,6 +884,8 @@ class Qwen3VLVLAModel(nn.Module):
             act_parts = [fast_embeds]
             if n_state > 0:
                 act_parts.append(state_embeds)
+            if n_torque > 0:
+                act_parts.append(torque_embeds)
             act_parts += [timesteps, noisy_act]
             act_seq = torch.cat(act_parts, dim=1)
             n_act = act_seq.shape[1]
@@ -914,6 +933,7 @@ class Qwen3VLVLAModel(nn.Module):
         noise: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         state_embeds: Optional[torch.Tensor] = None,
+        torque_embeds: Optional[torch.Tensor] = None,
         fast_embeds: Optional[torch.Tensor] = None,
         num_steps_total: int = 10,
         split_step: int = 6,
@@ -951,7 +971,10 @@ class Qwen3VLVLAModel(nn.Module):
             fast_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
         if state_embeds is None:
             state_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
+        if torque_embeds is None:
+            torque_embeds = torch.empty((B, 0, H), device=device, dtype=dtype)
         n_state = state_embeds.shape[1]
+        n_torque = torque_embeds.shape[1]
         L_latent = inputs_embeds.shape[1]
 
         # See forward_flow_action_full: memory_kv sits in the cache
@@ -974,6 +997,8 @@ class Qwen3VLVLAModel(nn.Module):
             act_parts = [fast_embeds]
             if n_state > 0:
                 act_parts.append(state_embeds)
+            if n_torque > 0:
+                act_parts.append(torque_embeds)
             act_parts += [timesteps, noisy_act]
             act_seq = torch.cat(act_parts, dim=1)
             n_act = act_seq.shape[1]
@@ -1022,6 +1047,8 @@ class Qwen3VLVLAModel(nn.Module):
             clean_parts = [fast_embeds]
             if n_state > 0:
                 clean_parts.append(state_embeds)
+            if n_torque > 0:
+                clean_parts.append(torque_embeds)
             clean_parts += [split_timesteps, split_actions]
             clean_seq = torch.cat(clean_parts, dim=1)
             n_act_final = clean_seq.shape[1]

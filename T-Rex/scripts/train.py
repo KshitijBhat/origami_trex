@@ -728,6 +728,7 @@ def save_checkpoint(model, processor, accelerator, args, epoch, global_step, sta
                     "action_dim": args.action_dim,
                     "action_chunk": args.action_chunk,
                     "use_robot_state": args.use_robot_state,
+                    "use_torque": args.use_torque,
                     "use_tactile_deform": args.use_tactile_deform,
                     "use_tactile_vec": getattr(args, "use_tactile_vec", 0),
                     "tactile_intermediate_size": getattr(args, "tactile_intermediate_size", 0),
@@ -927,6 +928,14 @@ def run_validation(model, val_dataloader, accelerator, args,
                                        device=slow_embeds.device, dtype=slow_embeds.dtype)
         n_state = state_embeds.shape[1]
 
+        if args.use_torque and batch.get("torque_raw") is not None:
+            torque_vec = batch["torque_raw"].to(slow_embeds.device, dtype=slow_embeds.dtype)
+            torque_embeds = raw_model.torque_embedder(torque_vec).unsqueeze(1)
+        else:
+            torque_embeds = torch.empty((B, 0, slow_embeds.shape[2]),
+                                        device=slow_embeds.device, dtype=slow_embeds.dtype)
+        n_torque = torque_embeds.shape[1]
+
         noisy_actions = raw_model.x_embedder(batch["noisy_actions"].to(slow_embeds.dtype))
         timesteps = raw_model.t_embedder(batch["timesteps"].to(slow_embeds.dtype)).unsqueeze(1)
         chunk = args.action_chunk
@@ -938,7 +947,7 @@ def run_validation(model, val_dataloader, accelerator, args,
             # Cascaded validation — full L_flow on action expert (τ ∈ [0, 1])
             # + L_flow_tactile on tactile expert at τ ∈ [0, τ_split].
             full_embeds = torch.cat([
-                slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
+                slow_embeds_ext, fast_embeds, state_embeds, torque_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
             # memory_kv (if any) sits in the cache BEFORE the live latent
@@ -956,12 +965,13 @@ def run_validation(model, val_dataloader, accelerator, args,
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
                 tactile_indexes=torch.arange(0, 0, device=full_embeds.device))
             hidden = outputs.last_hidden_state
-            act_start = L_latent + n_fast + n_state + 1
+            act_start = L_latent + n_fast + n_state + n_torque + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
             loss_act = _masked_mse(v_act, target, action_mask_t)
 
             fe = fast_embeds if n_fast > 0 else None
             se = state_embeds if n_state > 0 else None
+            te = torque_embeds if n_torque > 0 else None
             ahat_noise = torch.randn_like(batch["noisy_actions"])
             # cached_kv at τ=tau_split (matches inference).
             _, cached_kv, n_action_in_cache, _ = (
@@ -972,6 +982,7 @@ def run_validation(model, val_dataloader, accelerator, args,
                     attention_mask=batch["attention_mask"],
                     memory_kv=memory_kv,
                     state_embeds=se,
+                    torque_embeds=te,
                     fast_embeds=fe,
                     num_steps_total=args.cascaded_total_steps,
                     split_step=args.cascaded_split_step,
@@ -1001,7 +1012,7 @@ def run_validation(model, val_dataloader, accelerator, args,
         else:
             # Stage-1 / tactile-free validation: action expert only.
             full_embeds = torch.cat([
-                slow_embeds_ext, fast_embeds, state_embeds, timesteps, noisy_actions,
+                slow_embeds_ext, fast_embeds, state_embeds, torque_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
             attn_mask_padded = raw_model._front_pad_attention_mask(
@@ -1015,7 +1026,7 @@ def run_validation(model, val_dataloader, accelerator, args,
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
                 tactile_indexes=torch.arange(0, 0, device=full_embeds.device))
             hidden = outputs.last_hidden_state
-            act_start = L_latent + n_fast + n_state + 1
+            act_start = L_latent + n_fast + n_state + n_torque + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
             loss_act = _masked_mse(v_act, target, action_mask_t)
             loss_tac = 0.0
@@ -1101,6 +1112,7 @@ def train(args):
         action_chunk=args.action_chunk,
         use_tactile_deform=bool(args.use_tactile_deform),
         use_robot_state=bool(args.use_robot_state),
+        use_torque=bool(args.use_torque),
         torch_dtype=torch.bfloat16,
         tactile_intermediate_size=tac_isize,
         n_flare_tokens_per_frame=args.n_flare_tokens_per_frame if args.use_flare else 0,
@@ -1215,6 +1227,7 @@ def train(args):
                 continue                       # action / tactile experts stay live
             if name.startswith(("x_embedder", "t_embedder", "final_layer",
                                 "tacf6_embedder", "deform_proj", "state_embedder",
+                                "torque_embedder",
                                 "tactile_code_embedder", "flare_proj", "flare_queries")):
                 continue                       # heads stay live
             m = re.match(r"model\.layers\.(\d+)\.", name)
@@ -1459,6 +1472,14 @@ def train(args):
                 state_embeds = torch.empty((B, 0, slow_embeds.shape[2]), device=slow_embeds.device, dtype=slow_embeds.dtype)
             n_state = state_embeds.shape[1]
 
+            if args.use_torque and batch.get("torque_raw") is not None:
+                torque_vec = batch["torque_raw"].to(slow_embeds.device,
+                                                     dtype=slow_embeds.dtype)
+                torque_embeds = raw_model.torque_embedder(torque_vec).unsqueeze(1)
+            else:
+                torque_embeds = torch.empty((B, 0, slow_embeds.shape[2]), device=slow_embeds.device, dtype=slow_embeds.dtype)
+            n_torque = torque_embeds.shape[1]
+
             noisy_actions = raw_model.x_embedder(
                 batch["noisy_actions"].to(slow_embeds.dtype))
             timesteps = raw_model.t_embedder(
@@ -1477,7 +1498,7 @@ def train(args):
             #    graceful degradation when tactile is missing.
             full_embeds = torch.cat([
                 slow_embeds_ext,
-                fast_embeds, state_embeds, timesteps, noisy_actions,
+                fast_embeds, state_embeds, torque_embeds, timesteps, noisy_actions,
             ], dim=1)
             L_total = full_embeds.shape[1]
             # memory_kv (if any) sits in the cache BEFORE the live latent
@@ -1502,7 +1523,7 @@ def train(args):
                 tactile_indexes=torch.arange(0, 0, device=full_embeds.device),
             )
             hidden = outputs.last_hidden_state
-            act_pred_start = L_latent + n_fast + n_state + 1
+            act_pred_start = L_latent + n_fast + n_state + n_torque + 1
             v_act = raw_model.final_layer(
                 hidden[:, act_pred_start: act_pred_start + chunk, :])
             loss_act = _masked_mse(v_act, target, action_mask_t)
@@ -1510,6 +1531,7 @@ def train(args):
             if has_any_tac and not is_stage1:
                 fe = fast_embeds if n_fast > 0 else None
                 se = state_embeds if n_state > 0 else None
+                te = torque_embeds if n_torque > 0 else None
                 # cached_kv must summarize the action expert's state at
                 # τ=τ_split — exactly what the tactile expert attends to at
                 # inference.  forward_flow_action_partial caches τ=τ_split
@@ -1525,6 +1547,7 @@ def train(args):
                             attention_mask=batch["attention_mask"],
                             memory_kv=memory_kv,
                             state_embeds=se,
+                            torque_embeds=te,
                             fast_embeds=fe,
                             num_steps_total=args.cascaded_total_steps,
                             split_step=args.cascaded_split_step,
@@ -1746,6 +1769,7 @@ if __name__ == "__main__":
     parser.add_argument("--action_dim", type=int, default=31)
     parser.add_argument("--action_chunk", type=int, default=8)
     parser.add_argument("--use_robot_state", type=int, default=0)
+    parser.add_argument("--use_torque", type=int, default=0)
     parser.add_argument("--use_tactile_vec", type=int, default=0)
     parser.add_argument("--use_tactile_deform", type=int, default=1)
     parser.add_argument("--deform_encoder_ckpt", type=str, default="")

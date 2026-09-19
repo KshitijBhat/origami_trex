@@ -129,6 +129,7 @@ def _build_qwen3vl_from_config(config_path, args):
         action_chunk       = args.action_chunk,
         use_tactile_deform = bool(args.use_tactile_deform),
         use_robot_state    = bool(args.use_robot_state),
+        use_torque         = bool(args.use_torque),
         image_token_id     = image_token_id,
         tactile_intermediate_size = tac_isize,
         n_flare_tokens_per_frame = n_flare_tpf,
@@ -238,6 +239,7 @@ def model_load(args):
             action_dim=args.action_dim, action_chunk=args.action_chunk,
             use_tactile_deform=bool(args.use_tactile_deform),
             use_robot_state=bool(args.use_robot_state),
+            use_torque=bool(args.use_torque),
             torch_dtype=torch.bfloat16,
             tactile_intermediate_size=tac_isize,
             n_flare_tokens_per_frame=n_flare_tpf,
@@ -262,6 +264,7 @@ def model_load(args):
             action_dim=args.action_dim, action_chunk=args.action_chunk,
             use_tactile_deform=bool(args.use_tactile_deform),
             use_robot_state=bool(args.use_robot_state),
+            use_torque=bool(args.use_torque),
             torch_dtype=torch.bfloat16,
             tactile_intermediate_size=tac_isize,
             n_flare_tokens_per_frame=n_flare_tpf,
@@ -320,6 +323,10 @@ def model_load(args):
         statistic["state_mask"] = _arr("state", "mask")
         statistic["state_min"]  = _arr("state", "q01")
         statistic["state_max"]  = _arr("state", "q99")
+    if args.use_torque:
+        statistic["torque_mask"] = _arr("torque", "mask")
+        statistic["torque_min"]  = _arr("torque", "q01")
+        statistic["torque_max"]  = _arr("torque", "q99")
 
     frozen = np.where(~np.asarray(statistic["action_mask"], dtype=bool))[0]
     if frozen.size:
@@ -793,6 +800,7 @@ class CascadedServer:
     def _run_slow(
         self, task_description, slow_images, fast_images,
         tactile_f6_input=None, tactile_deform_input=None, state_fast=None,
+        torque_fast=None,
     ):
         args, model, processor, statistic = (
             self.args, self.model, self.processor, self.statistic)
@@ -829,6 +837,14 @@ class CascadedServer:
                 statistic["state_mask"], statistic["state_min"], statistic["state_max"])
             state_vec = torch.tensor(norm_state, dtype=torch.bfloat16).unsqueeze(0).to(device)
             state_embeds = model.state_embedder(state_vec).unsqueeze(1)
+
+        torque_embeds = None
+        if args.use_torque and torque_fast is not None:
+            norm_torque = _normalize(
+                np.array(torque_fast, dtype=np.float32),
+                statistic["torque_mask"], statistic["torque_min"], statistic["torque_max"])
+            torque_vec = torch.tensor(norm_torque, dtype=torch.bfloat16).unsqueeze(0).to(device)
+            torque_embeds = model.torque_embedder(torque_vec).unsqueeze(1)
 
         n_slow = len(slow_images)
         all_pil = slow_images + fast_images
@@ -899,6 +915,7 @@ class CascadedServer:
                 attention_mask=attention_mask,
                 noise=noise,
                 state_embeds=state_embeds,
+                torque_embeds=torque_embeds,
                 fast_embeds=fast_embeds,
                 num_steps=args.cascaded_total_steps,
                 memory_kv=memory_kv,
@@ -922,6 +939,7 @@ class CascadedServer:
                 attention_mask=attention_mask,
                 noise=noise,
                 state_embeds=state_embeds,
+                torque_embeds=torque_embeds,
                 fast_embeds=fast_embeds,
                 num_steps_total=args.cascaded_total_steps,
                 split_step=args.cascaded_split_step,
@@ -1021,6 +1039,7 @@ class CascadedServer:
         tac_f6     = payload.get("tactile_f6")
         tac_deform = payload.get("tactile_deform", payload.get("tactile_image_deform"))
         state_fast = payload.get("state_fast")
+        torque_fast = payload.get("torque_fast")
         # A client that folds several planes in one session must say so, or the
         # phase clock and the previous-command chain carry over from the last
         # attempt.  Absent the flag the first slow request starts the clock.
@@ -1036,7 +1055,7 @@ class CascadedServer:
                     raise ValueError("slow request requires image_head")
                 actions, cid = self._run_slow(
                     task_desc, [slow_img], fast_list,
-                    tac_f6, tac_deform, state_fast)
+                    tac_f6, tac_deform, state_fast, torque_fast)
                 latency_ms = (time.time() - t0) * 1000.0
                 return {"status": "success", "mode": "slow",
                         "actions": actions, "chunk_id": cid,
@@ -1051,7 +1070,7 @@ class CascadedServer:
                 if slow_img is None:
                     raise ValueError("slow_and_fast request requires image_head")
                 self._run_slow(task_desc, [slow_img], fast_list,
-                               tac_f6, tac_deform, state_fast)
+                               tac_f6, tac_deform, state_fast, torque_fast)
                 actions, cid = self._run_fast(tac_f6, tac_deform)
                 latency_ms = (time.time() - t0) * 1000.0
                 return {"status": "success", "mode": "slow_and_fast",
@@ -1074,6 +1093,7 @@ def main(args):
     # Always sent, even with --use_robot_state 0: the reconstruction needs the
     # state for the frozen-dim hold (_clamp_frozen_absolute), not just the encoder.
     dummy_state = np.zeros(args.action_dim, dtype=np.float32)
+    dummy_torque = np.zeros(args.action_dim, dtype=np.float32) if args.use_torque else None
     dummy_f6    = np.zeros((5, 6), dtype=np.float32) if args.use_tactile_vec else None
     dummy_deform = np.zeros((5, 240, 240), dtype=np.float32) if args.use_tactile_deform else None
 
@@ -1086,6 +1106,7 @@ def main(args):
         "tactile_f6":         dummy_f6,
         "tactile_deform":     dummy_deform,
         "state_fast":         dummy_state,
+        "torque_fast":        dummy_torque,
     }
     if len(dummy_fast) > 1:
         dummy_payload["image_wrist_left"] = _pil_to_bytes(dummy_fast[1])
@@ -1144,6 +1165,7 @@ if __name__ == "__main__":
     parser.add_argument("--action_dim", type=int, default=31)
     parser.add_argument("--action_chunk", type=int, default=8)
     parser.add_argument("--use_robot_state", type=int, default=0)
+    parser.add_argument("--use_torque", type=int, default=0)
     parser.add_argument("--use_tactile_deform", type=int, default=1)
     parser.add_argument("--use_tactile_vec", type=int, default=0)
     parser.add_argument("--tactile_intermediate_size", type=int, default=0)

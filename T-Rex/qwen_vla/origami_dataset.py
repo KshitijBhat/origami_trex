@@ -28,7 +28,7 @@ Batch contract (identical to TRexLeRobotDataset.collate_fn):
     input_ids, attention_mask, pixel_values, image_grid_thw, n_slow_images,
     noisy_actions, target, timesteps, norm_actions, tactile_f6s,
     tactile_deforms, tactile_f6s_delayed, tactile_deforms_delayed,
-    tactile_codes, tactile_f6_history, time_r, eps_r, state_raw,
+    tactile_codes, tactile_f6_history, time_r, eps_r, state_raw, torque_raw,
     flare_pixel_values, flare_grid_thw
 """
 from __future__ import annotations
@@ -202,6 +202,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
         self.use_tactile_deform = bool(g("use_tactile_deform", 0))
         self.use_tactile_vqvae = bool(g("use_tactile_vqvae", 0))
         self.use_robot_state = bool(g("use_robot_state", 0))
+        self.use_torque = bool(g("use_torque", 0))
         self.vqvae_window = int(g("vqvae_window", 16))
         # Cross-timestep memory (dev/memory): past same-episode rows, split
         # along the same slow(head+text)/fast(wrist+action+tactile) boundary
@@ -271,6 +272,15 @@ class OrigamiDataset(torch.utils.data.Dataset):
         self.frozen_dims = frozen_action_dims(self.action_mask)
         self.state_mask = np.array(block["state"]["mask"])
         self.state_min, self.state_max = arr("state", "q01"), arr("state", "q99")
+        self.has_torque = "torque" in block
+        if self.use_torque:
+            if not self.has_torque:
+                raise ValueError(
+                    f"{self.root} norm_stats.json has no 'torque' block but "
+                    f"--use_torque was set. Recompute stats with a torque "
+                    f"entry (trex_origami/stats.py).")
+            self.torque_mask = np.array(block["torque"]["mask"])
+            self.torque_min, self.torque_max = arr("torque", "q01"), arr("torque", "q99")
         self.has_tactile = "tactile_f6" in block
         if self.has_tactile:
             self.tacf6_mask = np.array(block["tactile_f6"]["mask"])
@@ -409,6 +419,8 @@ class OrigamiDataset(torch.utils.data.Dataset):
             "wrist_left": self._pil(r["wrist_left"]),
             "wrist_right": self._pil(r["wrist_right"]),
         }
+        if self.use_torque:
+            item["torque"] = np.asarray(r["torque"].as_py(), dtype=np.float32)
         if self.use_tactile_vec or self.use_tactile_vqvae:
             item["tacf6_hist"] = np.asarray(
                 r["tacf6_hist"].as_py(), dtype=np.float32
@@ -572,6 +584,14 @@ class OrigamiDataset(torch.utils.data.Dataset):
                     dtype=torch.bfloat16))
             state_raw = torch.stack(sl)
 
+        torque_raw = None
+        if self.use_torque:
+            tl = [torch.tensor(
+                    _normalize(b["torque"], self.torque_mask, self.torque_min, self.torque_max),
+                    dtype=torch.bfloat16)
+                  for b in batch]
+            torque_raw = torch.stack(tl)
+
         # ── images -> Qwen processor: slow = head, fast = [wrist_r, wrist_l] ──
         all_ids, all_pv, all_thw = [], [], []
         n_slow_images = 1
@@ -727,6 +747,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
             "time_r": time_r,
             "eps_r": eps_r,
             "state_raw": state_raw,
+            "torque_raw": torque_raw,
             "flare_pixel_values": flare_pv,
             "flare_grid_thw": flare_thw,
             "memory_slow": memory_slow_out,
