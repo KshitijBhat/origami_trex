@@ -792,8 +792,17 @@ class Qwen3VLVLAModel(nn.Module):
                 attention_mask=call_attn_mask,
                 past_key_values=past_kv,
                 use_cache=True,
-                latent_indexes=torch.arange(0, L_wrist, device=device),
-                action_indexes=torch.arange(L_wrist, L_wrist + n_action, device=device),
+                # Wrist images are FAST/action-stream content (matches every
+                # live tick: forward_flow_action_full/_partial put fast_embeds
+                # inside act_parts, under action_indexes) -- routing them
+                # through latent_indexes here would encode them with the
+                # LATENT expert's Q/K/V/O/MLP weights instead, a different
+                # representational subspace than what a live action-expert
+                # query would produce for the same content. Found auditing
+                # the architecture; memory_fast has never been enabled in a
+                # real training run so this was never exercised before.
+                latent_indexes=torch.arange(0, 0, device=device),
+                action_indexes=torch.arange(0, L_wrist + n_action, device=device),
                 tactile_indexes=torch.arange(L_wrist + n_action, L_total, device=device),
             )
             past_kv = outputs.past_key_values
@@ -1182,6 +1191,16 @@ class Qwen3VLVLAModel(nn.Module):
         extended_pos = self.model._extend_position_ids(
             latent_position_ids, n_action_in_cache, n_tac_seq)
         tac_pos = extended_pos[..., -n_tac_seq:]
+
+        # Clone -- called under run_validation's @torch.no_grad(), which
+        # takes DynamicCache.update()'s mutating path (see
+        # Qwen3VLAttentionMoT.forward's torch.is_grad_enabled() branch).
+        # Neither current caller reads cached_kv again afterward, so this
+        # isn't an active bug today, but every other cache-consuming method
+        # in this file already clones defensively for exactly this reason
+        # (tactile_flow_continue, forward_flow_action_full/_partial,
+        # build_memory_kv_fast) -- this one was the one gap.
+        cached_kv = self._clone_dynamic_cache(cached_kv)
 
         outputs = self.model(
             inputs_embeds=full_embeds,

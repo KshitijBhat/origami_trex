@@ -693,9 +693,15 @@ class OrigamiDataset(torch.utils.data.Dataset):
                 # distribution mismatch, not just a style inconsistency.
                 action_raw = np.stack(
                     [b["memory_fast"][k]["action_abs"] for b in batch], axis=0)
+                # action_abs is a single instantaneous absolute action, not a
+                # chunk -- self.action_min/max are kept per-CHUNK-step [16,65]
+                # (see stats.py's docstring), so normalizing a [B,65] tensor
+                # against them broadcasts wrong (only "works" by coincidence
+                # when B==16). Use step 0's calibration (nearest-in-time to
+                # "now", the same step a chunk's own first prediction uses).
                 action_k = torch.tensor(
                     _normalize(action_raw, self.action_mask,
-                              self.action_min, self.action_max),
+                              self.action_min[0], self.action_max[0]),
                     dtype=torch.float32)
                 entry = {
                     "input_ids": torch.stack(ids_k),

@@ -727,8 +727,15 @@ class CascadedServer:
                 add_generation_prompt=True)
             inp = self.processor(text=text, images=fast_images,
                                  return_tensors="pt", padding=False)
+            # action_raw is a single instantaneous absolute action, not a
+            # chunk -- statistic["action_min"/"max"] are kept per-CHUNK-step
+            # [16,65] (see trex_origami/stats.py's docstring), so normalizing
+            # this [65] vector against them without a step index broadcasts
+            # wrong (silently produces a [16,65] result instead of [65]).
+            # Use step 0's calibration, matching origami_dataset.py's
+            # collate_fn fix for the identical training-side bug.
             action_norm = _normalize(action_raw, statistic["action_mask"],
-                                     statistic["action_min"], statistic["action_max"])
+                                     statistic["action_min"][0], statistic["action_max"][0])
             rows.append({
                 "input_ids": inp.input_ids.to(self.device),
                 "attention_mask": inp.attention_mask.to(self.device),
