@@ -272,6 +272,18 @@ loops the memory_fast rows oldest-first, for each:
    `forward_flow_action_full`/`_partial`'s `memory_kv` argument (renamed
    from `memory_kv_slow` now that it holds both tiers -- no other caller
    existed yet to break).
+   - **Real (latent) bug found and fixed (2026-09-19)**: the method
+     mutated its incoming `past_kv` in place (same `.update()`-under-
+     `no_grad` mechanism as the `forward_flow_action_full`/`_partial`
+     mutation bug below) instead of cloning it first. Not currently
+     triggered -- both real callers (`test.py`, `train.py`) immediately
+     discard their own `build_memory_kv_slow` reference after handing it
+     here, so nothing else observes the mutation -- but that's caller
+     discipline, not a guarantee the method provides; a future caller
+     that keeps its own reference to the slow-only cache would hit
+     exactly the bug gradient checkpointing exposed elsewhere. Fixed with
+     the same one-line `_clone_dynamic_cache` pattern used everywhere
+     else in this file.
 
 `tactile_flow_continue` needs no direct change either way -- it receives
 `cached_kv` from `forward_flow_action_partial`'s output, so both memory
@@ -330,6 +342,30 @@ cost is bounded to the slow-tick cadence, not the faster fast-tick one).
      corrupting it. Fixing this properly needs restructuring so the F6
      window is computed once per request and threaded to both call sites,
      deferred rather than risking a subtle rolling-buffer corruption bug.
+   - **Real bug found and fixed (2026-09-19), found by auditing the
+     architecture, not at build time**: `_remember_fast` was only ever
+     called from `_run_slow`, so the fast-memory buffer updated at
+     ~5Hz (slow-tick rate) instead of the ~30Hz per-parquet-row rate
+     `origami_dataset.py`'s `memory_fast` actually represents in
+     training -- a ~6x coarser density than what the model was trained
+     on for that tier, silently undermining the whole point of splitting
+     fast memory from slow (catching a near-immediate reflex). The naive
+     fix (call `_remember_fast` from `_run_fast` too) doesn't work as
+     stated: confirmed via `eval_trex_async.py`'s real `fast_payload` that
+     the wire protocol *never* sends fresh wrist images on a fast-mode
+     request (only `tactile_f6`/`tactile_deform`) -- there is nothing
+     fresher to capture at that cadence for the image component. Actual
+     fix: `_run_slow` now also stashes `self._last_fast_images`; `_run_fast`
+     calls `_remember_fast` too, reusing those (nothing fresher exists
+     over the wire) paired with THAT fast tick's own just-reconstructed
+     action (`self._prev_command(self.seed_state)`, called right after
+     `_reconstruct` writes `self.last_chunk` for this tick) -- action
+     density now genuinely matches fast-tick cadence even though image
+     density stays capped at slow-tick cadence by the protocol itself.
+     Verified with a new CPU-only regression test simulating one
+     slow-tick-style capture + two fast-tick-style captures, confirming
+     3 distinct buffer entries (not 1) with fresh actions and correctly
+     reused (not stale-in-a-bad-way) images.
 3. `_build_memory_kv(now)`: calls `build_memory_kv_slow` on the selected
    slow rows, then feeds ITS OUTPUT as `build_memory_kv_fast`'s `past_kv`
    -- both tiers land in one combined cache, passed as `_run_slow`'s

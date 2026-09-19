@@ -70,6 +70,13 @@ def make_server(memory_slow_seconds, memory_fast, margin=2.0):
     srv.memory_buffer_margin_sec = margin
     srv.memory_buf_slow = []
     srv.memory_buf_fast = []
+    # _prev_command's state -- unused by these tests directly, but needed
+    # by the fast-tick-rate capture test below, which calls _prev_command
+    # the same way _run_slow/_run_fast really do.
+    srv.last_chunk = None
+    srv.last_chunk_time = 0.0
+    srv.seed_state = None
+    srv._last_fast_images = None
     return srv
 
 
@@ -178,6 +185,63 @@ def test_current_tick_never_sees_its_own_memory():
           "is built, so it never becomes memory for itself")
 
 
+def test_fast_memory_captures_at_fast_tick_rate_not_slow_tick_rate():
+    """Regression test for a real bug found auditing the architecture: the
+    real wire protocol (eval_trex_async.py) never sends fresh wrist images
+    on a fast-mode request -- only tactile -- so _remember_fast used to
+    only ever get called from _run_slow, meaning the fast-memory buffer
+    updated at ~5Hz (slow-tick rate) despite representing what training
+    builds from consecutive parquet rows at ~30Hz. The fix: _run_fast now
+    also calls _remember_fast, reusing the last slow tick's wrist images
+    (nothing fresher exists over the wire) paired with THAT fast tick's own
+    just-reconstructed action (which genuinely does update every tick).
+    This simulates that exact call pattern -- one _run_slow-style capture,
+    then several _run_fast-style captures -- without needing a real model.
+    """
+    import time as _time
+    srv = make_server([], 3)  # fast-only, window=3
+
+    # -- _run_slow's part: stash the wrist images fast ticks will reuse,
+    # and its own capture (mirrors _run_slow's existing self._remember_fast
+    # call using self._prev_command(state) with a real state). --
+    wrist_imgs = [img(10), img(11)]
+    srv._last_fast_images = wrist_imgs
+    t0 = _time.time()
+    srv.last_chunk = np.array([[1.0, 1.0, 1.0, 1.0]])  # this tick's action
+    srv.last_chunk_time = t0
+    srv._remember_fast(t0, wrist_imgs, srv._prev_command(srv.seed_state))
+    assert len(srv.memory_buf_fast) == 1
+
+    # -- _run_fast's part, called several times in quick succession (as the
+    # real ~20Hz loop would): each call reconstructs a NEW action (mirrors
+    # _reconstruct writing a fresh self.last_chunk) then captures memory
+    # using the reused wrist images + that fresh action. --
+    for i in range(2):
+        srv.last_chunk = np.array([[2.0 + i, 2.0 + i, 2.0 + i, 2.0 + i]])
+        srv.last_chunk_time = _time.time()
+        if srv._last_fast_images:
+            srv._remember_fast(_time.time(), srv._last_fast_images,
+                               srv._prev_command(srv.seed_state))
+
+    # Three fast-tick-rate captures total (one slow-tick-triggered + two
+    # fast-tick-triggered) -- NOT stuck at one entry per slow tick.
+    assert len(srv.memory_buf_fast) == 3, (
+        f"expected 3 fast-tick-rate captures, got {len(srv.memory_buf_fast)} -- "
+        f"fast memory is still only updating at slow-tick rate")
+
+    # Wrist images are identical across all three (correctly reused, since
+    # nothing fresher exists) -- but the action differs each time (correctly
+    # fresh per fast tick, not stale).
+    actions = [np.asarray(e[2]).tolist() for e in srv.memory_buf_fast]
+    assert actions == [[1.0] * 4, [2.0] * 4, [3.0] * 4], actions
+    images_are_same_object = all(e[1] is not wrist_imgs for e in srv.memory_buf_fast)
+    assert images_are_same_object, "each snapshot should copy, not alias, the image list"
+    print("[PASS] fast memory now captures at fast-tick rate: 3 entries from "
+          "1 slow tick + 2 fast ticks, wrist images correctly reused "
+          "(nothing fresher over the wire) while action is fresh each time "
+          f"({actions})")
+
+
 if __name__ == "__main__":
     test_slow_no_op_when_disabled()
     test_slow_no_op_when_buffer_empty()
@@ -187,4 +251,5 @@ if __name__ == "__main__":
     test_reset_episode_clears_both_buffers()
     test_build_memory_kv_chains_slow_into_fast()
     test_current_tick_never_sees_its_own_memory()
+    test_fast_memory_captures_at_fast_tick_rate_not_slow_tick_rate()
     print("\nALL TESTS PASSED")

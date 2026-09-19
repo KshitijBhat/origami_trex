@@ -441,6 +441,18 @@ class CascadedServer:
         # "Part C known limitation" (avoids a rolling-F6-buffer double-mutation
         # risk between this snapshot and _run_fast's own encode of the same tick).
         self.memory_buf_fast: list = []
+        # Wrist images from the most recent slow tick -- the real wire
+        # protocol never sends fresh wrist images on a fast-mode request
+        # (confirmed: eval_trex_async.py's fast_payload carries only
+        # tactile_f6/tactile_deform), so a fast tick has no new image to
+        # remember. Reusing the last-seen images (paired with THAT tick's
+        # freshly refined action) still captures real fast-tick-rate
+        # temporal density for the part that actually changes that fast --
+        # the action -- instead of only updating this buffer at slow-tick
+        # rate, which was silently ~6x coarser than what training's
+        # per-parquet-row memory_fast represents (dev/memory, found while
+        # auditing the architecture, not caught at build time).
+        self._last_fast_images = None
         if self.memory_slow_seconds:
             print(f">>> slow memory enabled: targets {self.memory_slow_seconds}s back, "
                   f"rope_stride={self.memory_rope_stride_slow}")
@@ -875,6 +887,7 @@ class CascadedServer:
             self._remember_slow(now, slow_images[0], task_description)
         if fast_images and state is not None:
             self._remember_fast(now, fast_images, self._prev_command(state))
+            self._last_fast_images = fast_images
 
         if self.disable_tactile:
             # Action-expert-only ablation: integrate the full τ ∈ [0, 1] flow
@@ -977,6 +990,20 @@ class CascadedServer:
         )
         a_refined = self._reconstruct(refined[0].float().cpu().numpy(),
                                       self.seed_state)
+
+        # Fast-tick-rate fast-memory capture. Wrist images are reused from
+        # the last slow tick (nothing fresher exists over the wire -- see
+        # __init__'s note on self._last_fast_images), but the action
+        # component genuinely is fresh: _reconstruct just wrote this tick's
+        # own refined chunk into self.last_chunk, so _prev_command called
+        # right now (elapsed~=0) returns THIS tick's command, not the
+        # previous one. This is what actually fixes the rate mismatch --
+        # action density now matches fast-tick cadence even though image
+        # density is capped at slow-tick cadence by the wire protocol.
+        if self._last_fast_images:
+            self._remember_fast(time.time(), self._last_fast_images,
+                                self._prev_command(self.seed_state))
+
         return list(a_refined), self.chunk_id
 
     def predict(self, mode, payload):

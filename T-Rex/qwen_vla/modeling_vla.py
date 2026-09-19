@@ -666,7 +666,8 @@ class Qwen3VLVLAModel(nn.Module):
     ) -> Optional["DynamicCache"]:
         """
         Populate/extend a DynamicCache from a list of past ("memory_fast")
-        rows, oldest first, CONTINUING whatever `past_kv` is passed in.
+        rows, oldest first, continuing from a CLONE of whatever `past_kv`
+        is passed in -- the caller's own reference is never mutated.
 
         Typical use: feed `build_memory_kv_slow`'s output cache in as
         `past_kv` here, so both memory tiers land in ONE combined cache --
@@ -714,6 +715,15 @@ class Qwen3VLVLAModel(nn.Module):
         """
         if not memory_rows:
             return past_kv
+
+        # Clone before this loop's own use_cache=True/no_grad calls mutate
+        # it in place (DynamicCache.update()). past_kv is typically the
+        # caller's build_memory_kv_slow result -- if anything else still
+        # holds that reference (nothing currently does, but nothing
+        # guarantees a future caller won't), mutating it here would
+        # silently corrupt it out from under them. Same class of bug as
+        # forward_flow_action_full/_partial's memory_kv, same fix.
+        past_kv = self._clone_dynamic_cache(past_kv) if past_kv is not None else None
 
         K = len(memory_rows)
         for i, row in enumerate(memory_rows):
