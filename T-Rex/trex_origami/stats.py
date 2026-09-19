@@ -153,8 +153,12 @@ def compute_stats(root: str, subsample: int = 4) -> dict:
 
     acc = NormStatsAccumulator(action_chunk, action_dim)
     episodes = meta["episodes"]
+    # schema.names is the physical (leaf-flattened) Parquet schema -- for a
+    # list<float> column like "torque" it gives internal names like
+    # "element", not the logical field name. schema_arrow.names is the
+    # actual top-level Arrow field names `columns=[...]` expects.
     has_torque = bool(episodes) and "torque" in pq.ParquetFile(
-        os.path.join(root, episodes[0]["file"])).schema.names
+        os.path.join(root, episodes[0]["file"])).schema_arrow.names
     columns = ["state", "action_chunk", "action_abs", "tacf6_hist"]
     if has_torque:
         columns.append("torque")
