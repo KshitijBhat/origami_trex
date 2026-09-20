@@ -192,6 +192,12 @@ class OrigamiDataset(torch.utils.data.Dataset):
 
         # ── flags (mirror SftDataset / TRexLeRobotDataset) ──
         g = lambda k, d=0: getattr(config, k, d)
+        # Training-time-only row cap, e.g. --max_episode_seconds 90 to train on
+        # only each episode's first 1.5 min. The full episode stays on disk --
+        # this just shrinks which rows _build_index() enumerates, so no
+        # re-prep is needed to change or remove the cap. 0/unset = no cap
+        # (every row of every episode, today's behavior).
+        self.max_episode_seconds = float(g("max_episode_seconds", 0))
         self.image_size = tuple(config.image_size) if g("image_size", None) else None
         self.use_flare = bool(g("use_flare", 0))
         self.flare_weight = float(g("flare_loss_weight", 0.5))
@@ -300,13 +306,15 @@ class OrigamiDataset(torch.utils.data.Dataset):
         self._build_index()
 
         if not _quiet:
+            cap_msg = (f"first {self.max_episode_seconds:.0f}s/episode"
+                      if self.max_episode_seconds > 0 else "full episodes")
             accelerator.print(
                 f"[origami] {self.root}: {len(self.index)} samples / "
                 f"{len(self.episodes)} episodes / "
                 f"{len({e['season'] for e in self.episodes})} seasons | "
                 f"sample {self.sample_fps:.1f} Hz, chunk horizon "
                 f"{self.action_chunk * self.chunk_stride / self.src_fps:.2f} s | "
-                f"flare={'on' if self.bake_flare else 'off'}")
+                f"{cap_msg} | flare={'on' if self.bake_flare else 'off'}")
             accelerator.print(
                 f"[origami] action target: all-absolute, {self.action_dim} dims | "
                 f"frozen dims (held at measured state): {self.frozen_dims.tolist()}")
@@ -317,18 +325,28 @@ class OrigamiDataset(torch.utils.data.Dataset):
             return json.load(f)
 
     def _build_index(self):
+        # Rows are written in episode-time order (build_episode_rows/prepare.py
+        # emits offsets ascending), so the first `cap` rows of a parquet file
+        # are exactly that episode's first `max_episode_seconds` of real time --
+        # capping here is a row-count truncation, not a random subsample.
+        cap = (int(self.max_episode_seconds * self.sample_fps)
+               if self.max_episode_seconds > 0 else None)
         for ei, ep in enumerate(self.episodes):
             path = os.path.join(self.root, ep["file"])
             pf = self.pq.ParquetFile(path)
             n_rows = pf.metadata.num_rows
+            n_rows_used = min(n_rows, cap) if cap is not None else n_rows
             base = len(self.index)
-            self.ep_rows.append(n_rows)
+            self.ep_rows.append(n_rows_used)
             off = 0
             for rg in range(pf.metadata.num_row_groups):
+                if off >= n_rows_used:
+                    break
                 k = pf.metadata.row_group(rg).num_rows
-                self.row_groups.append((ei, rg, list(range(base + off, base + off + k))))
+                k_used = min(k, n_rows_used - off)
+                self.row_groups.append((ei, rg, list(range(base + off, base + off + k_used))))
                 off += k
-            self.index += [(ei, r) for r in range(n_rows)]
+            self.index += [(ei, r) for r in range(n_rows_used)]
             pf.close() if hasattr(pf, "close") else None
 
     def make_sampler(self, seed: int = 0):
@@ -378,7 +396,7 @@ class OrigamiDataset(torch.utils.data.Dataset):
         import io
         img = PIL.Image.open(io.BytesIO(blob.as_py())).convert("RGB")
         if self.image_size is not None and img.size != self.image_size:
-            img = img.resize(self.image_size, PIL.Image.LANCZOS)
+            img = img.resize(self.image_size, PIL.Image.BICUBIC)
         return img
 
     def _deform(self, blob) -> np.ndarray:

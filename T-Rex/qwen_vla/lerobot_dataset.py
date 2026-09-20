@@ -177,7 +177,7 @@ class TRexLeRobotDataset(torch.utils.data.Dataset):
         arr = arr.permute(1, 2, 0).cpu().numpy()           # HWC
         img = PIL.Image.fromarray(arr, mode="RGB")
         if self.image_size is not None:
-            img = img.resize(self.image_size, PIL.Image.LANCZOS)
+            img = img.resize(self.image_size, PIL.Image.BICUBIC)
         return img
 
     def collate_fn(self, batch: List[Dict]) -> Dict:

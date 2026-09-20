@@ -304,7 +304,7 @@ class SftDataset(Dataset):
     def _open(self, rel_path):
         img = PIL.Image.open(os.path.join(self.img_dir, rel_path)).convert("RGB")
         if self.image_size is not None:
-            img = img.resize(self.image_size, PIL.Image.LANCZOS)
+            img = img.resize(self.image_size, PIL.Image.BICUBIC)
         return img
 
     def _open_gray(self, path):
@@ -1164,7 +1164,7 @@ def train(args):
             else:
                 filtered_sd[k] = v
         if skipped:
-            accelerator.print(f"Skipped {len(skipped)} keys with shape mismatch (e.g. {skipped[0]})")
+            accelerator.print(f"Skipped {len(skipped)} keys with shape mismatch ( {skipped})")
         missing, unexpected = model.load_state_dict(filtered_sd, strict=False)
         accelerator.print(f"Resumed: missing={len(missing)}, unexpected={len(unexpected)}")
 
@@ -1885,6 +1885,12 @@ if __name__ == "__main__":
                              "no text, so changing it needs no re-prep.")
     parser.add_argument("--origami_cache_groups", type=int, default=8,
                         help="row groups held per dataloader worker")
+    parser.add_argument("--max_episode_seconds", type=float, default=0,
+                        help="train on only each episode's first N seconds "
+                             "(e.g. 90 for 1.5 min), discarding the rest of "
+                             "every episode's rows -- the full episode stays "
+                             "on disk unmodified, this only shrinks which rows "
+                             "the dataset indexes. 0 = no cap, use every row.")
     parser.add_argument("--state_noise_mode", type=str, default="none",
                         choices=["none", "joint"],
                         help="state augmentation for --use_robot_state 1; the "

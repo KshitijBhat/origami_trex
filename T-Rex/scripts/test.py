@@ -819,8 +819,8 @@ class CascadedServer:
 
         if args.image_size:
             _sz = tuple(args.image_size)
-            slow_images = [img.resize(_sz, Image.LANCZOS) for img in slow_images]
-            fast_images = [img.resize(_sz, Image.LANCZOS) for img in fast_images]
+            slow_images = [img.resize(_sz, Image.BICUBIC) for img in slow_images]
+            fast_images = [img.resize(_sz, Image.BICUBIC) for img in fast_images]
 
         # The chunk is conditioned on this tick's observation, so it's pinned
         # here and reused (self.seed_state) by every fast tick that continues

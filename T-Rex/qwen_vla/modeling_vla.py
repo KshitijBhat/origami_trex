@@ -196,12 +196,14 @@ class Qwen3VLVLAModel(nn.Module):
         try:
             from transformers import Qwen3VLForConditionalGeneration
             base_model = Qwen3VLForConditionalGeneration.from_pretrained(
-                pretrained_path, torch_dtype=torch_dtype, trust_remote_code=True
+                pretrained_path, torch_dtype=torch_dtype, trust_remote_code=True,
+                attn_implementation="sdpa"
             )
         except Exception:
             from transformers import Qwen2VLForConditionalGeneration
             base_model = Qwen2VLForConditionalGeneration.from_pretrained(
-                pretrained_path, torch_dtype=torch_dtype, trust_remote_code=True
+                pretrained_path, torch_dtype=torch_dtype, trust_remote_code=True,
+                attn_implementation="sdpa"
             )
 
         config = base_model.config
