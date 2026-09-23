@@ -247,9 +247,8 @@ class OrigamiZenohServer:
         response["actions"] = np.ascontiguousarray(actions)
         infer_ms = (time.monotonic() - started) * 1000.0
         response["server_timing"] = {"infer_ms": infer_ms}
-        if self.policy.n_infer % 10 == 1:
-            logging.info("infer #%d %.0f ms (%s)", self.policy.n_infer, infer_ms,
-                         " ".join(f"{k}={v:.0f}" for k, v in self.policy.last_timing.items()))
+        logging.info("infer #%d %.0f ms (%s)", self.policy.n_infer, infer_ms,
+                     " ".join(f"{k}={v:.0f}" for k, v in self.policy.last_timing.items()))
         return response
 
     def _envelope(self, operation: str, request: Mapping[str, Any]) -> dict[str, Any]:

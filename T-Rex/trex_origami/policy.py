@@ -119,6 +119,19 @@ class PolicyConfig:
                                               # this, regardless of the counter -- bounds how stale
                                               # the reused vision context can get under irregular
                                               # call timing.
+    # cross-timestep memory (see qwen_vla/MEMORY_DESIGN.md). "" / 0 / None
+    # auto-detects from training_args.json, matching every other
+    # architecture flag above -- a memory-trained checkpoint must be served
+    # with the exact tiers/strides it trained with, these are not free
+    # serving knobs.
+    memory_slow_seconds: str = ""             # comma-separated seconds-back targets, e.g. "0.25,0.5,1,5"
+    memory_fast: int = 0                      # linear fast-memory window, in ticks
+    memory_rope_stride_slow: Optional[float] = None
+    memory_rope_stride_fast: Optional[float] = None
+    memory_buffer_margin_sec: float = 2.0     # extra slow-buffer retention past the oldest target
+    disable_memory: bool = False              # force memory off, overriding training_args.json
+                                               # auto-detect -- for A/B diagnosis only, not a
+                                               # normal serving knob
 
 
 # ── safety projection (self-contained copy of eval_smoothed.SafetyProjector) ──
@@ -188,6 +201,52 @@ class TRexOrigamiPolicy:
         self.use_state = bool(self.train_args.get("use_robot_state", 1))
         self.use_f6 = bool(self.train_args.get("use_tactile_vec", 1))
         self.use_deform = bool(self.train_args.get("use_tactile_deform", 1))
+
+        # cross-timestep memory: two raw-content buffers (not pre-computed
+        # KV -- RoPE bakes each row's position into its cached K before
+        # storage, so a snapshot can't be re-shifted for a later, differently
+        # -timed tick without recompute; build_memory_kv_slow/_fast recompute
+        # fresh from these every slow tick). See qwen_vla/MEMORY_DESIGN.md.
+        if config.disable_memory:
+            raw_slow = ""
+            memory_fast_raw = 0
+        else:
+            raw_slow = (config.memory_slow_seconds
+                        or self.train_args.get("memory_slow_seconds", "") or "")
+            memory_fast_raw = (config.memory_fast
+                               or self.train_args.get("memory_fast", 0) or 0)
+        self.memory_slow_seconds = sorted(
+            (float(s) for s in str(raw_slow).split(",") if s.strip()), reverse=True)
+        self.memory_fast = int(memory_fast_raw)
+        self.memory_rope_stride_slow = float(
+            config.memory_rope_stride_slow if config.memory_rope_stride_slow is not None
+            else self.train_args.get("memory_rope_stride_slow", 32.0))
+        self.memory_rope_stride_fast = float(
+            config.memory_rope_stride_fast if config.memory_rope_stride_fast is not None
+            else self.train_args.get("memory_rope_stride_fast", 8.0))
+        self.memory_buffer_margin_sec = float(config.memory_buffer_margin_sec)
+        # memory_buf_slow: List[(timestamp, PIL.Image head, str task_text)]
+        # memory_buf_fast: List[(timestamp, [wrist_right, wrist_left], action_raw_np)]
+        self.memory_buf_slow: List[Tuple[float, PIL.Image.Image, str]] = []
+        self.memory_buf_fast: List[Tuple[float, List[PIL.Image.Image], np.ndarray]] = []
+        # Wrist images from the most recent slow tick -- the wire protocol
+        # never sends fresh wrist images on every tick under
+        # tactile_refine_every>1 (fast ticks only carry tactile), so a fast
+        # tick has no new image to remember; reusing the last-seen images
+        # paired with THAT tick's own freshly-refined action still captures
+        # real fast-tick-rate temporal density for the part that actually
+        # changes that fast -- the action.
+        self._last_fast_images: Optional[List[PIL.Image.Image]] = None
+        # Best-known executed action, for the fast-memory buffer's
+        # action_abs proxy (_prev_command) -- not read anywhere else.
+        self.last_chunk: Optional[np.ndarray] = None
+        self.last_chunk_time: float = 0.0
+        if self.memory_slow_seconds:
+            print(f"[policy] slow memory enabled: targets {self.memory_slow_seconds}s back, "
+                  f"rope_stride={self.memory_rope_stride_slow}")
+        if self.memory_fast > 0:
+            print(f"[policy] fast memory enabled: window={self.memory_fast} ticks, "
+                  f"rope_stride={self.memory_rope_stride_fast}")
 
         # loading.model_load only writes state_mask/min/max when the checkpoint
         # was trained with use_robot_state=1 -- this checkpoint has it at 0, so
@@ -347,6 +406,14 @@ class TRexOrigamiPolicy:
             self._cache_n_action = None
             self._cache_tau_split = None
             self._cache_built_at = None
+            # Memory must not leak across episodes, exactly like the
+            # training-side index never lets a lookback window cross an
+            # episode boundary.
+            self.memory_buf_slow = []
+            self.memory_buf_fast = []
+            self._last_fast_images = None
+            self.last_chunk = None
+            self.last_chunk_time = 0.0
 
     def infer(self, observation: Dict[str, Any], now: Optional[float] = None) -> np.ndarray:
         """Full public observation -> float32[T, 65] absolute radians.
@@ -383,14 +450,21 @@ class TRexOrigamiPolicy:
             # reuse -- see _flow_cached, which never looks at new images at
             # all (tactile_flow_continue takes no vision input).
             t1 = time.time()
+            # Built from buffered PRIOR ticks only -- this tick's own content
+            # is recorded into the buffers further down, after this read, so
+            # a tick never becomes its own memory.
+            memory_kv = self._build_memory_kv(now)
             slow_imgs = [self._pil(obs[OBS_HEAD_LEFT])]
             fast_imgs = [self._pil(obs[OBS_WRIST_RIGHT]), self._pil(obs[OBS_WRIST_LEFT])]
             slow, pos, fast, mask, state_emb = self._embed(slow_imgs, fast_imgs, state)
             self._sync()
             timing["embed_ms"] = 1000 * (time.time() - t1)
+            self._remember_slow(now, slow_imgs[0], self.instruction)
+            self._remember_fast(now, fast_imgs, self._prev_command(state))
+            self._last_fast_images = fast_imgs
             t2 = time.time()
             norm = self._flow_slow(slow, pos, fast, mask, state_emb, tactile, timing,
-                                   cache=(every > 1), now=now)
+                                   cache=(every > 1), now=now, memory_kv=memory_kv)
             timing["flow_ms"] = 1000 * (time.time() - t2)
         else:
             timing["embed_ms"] = 0.0
@@ -402,6 +476,15 @@ class TRexOrigamiPolicy:
         t3 = time.time()
         actions = self._reconstruct(norm.mean(axis=0), state)
         timing["post_ms"] = 1000 * (time.time() - t3)
+        if not do_slow and self._last_fast_images is not None:
+            # Fast-tick-rate fast-memory capture: wrist images are reused
+            # from the last slow tick (nothing fresher over the wire), but
+            # the action genuinely is fresh -- _reconstruct just wrote this
+            # tick's own output into self.last_chunk, so _prev_command here
+            # (elapsed~=0) returns THIS tick's command, matching training's
+            # fast-tick-rate memory density instead of only updating at
+            # slow-tick rate.
+            self._remember_fast(now, self._last_fast_images, self._prev_command(state))
         timing["total_ms"] = 1000 * (time.time() - t0)
         self.last_timing = timing
         self.n_infer += 1
@@ -460,6 +543,163 @@ class TRexOrigamiPolicy:
                 self.device, dtype=torch.bfloat16)                    # [1, 10, 1, 240, 240]
         return out
 
+    # ── cross-timestep memory (see qwen_vla/MEMORY_DESIGN.md) ─────────────────
+    def _prev_command(self, state: np.ndarray) -> np.ndarray:
+        """Best estimate of the executed action for the frame just before
+        now -- the cross-timestep memory buffer's fast-tier action_abs
+        proxy. Before any chunk has been emitted, falls back to the
+        measured state."""
+        if self.last_chunk is None:
+            return state
+        elapsed = max(0.0, time.time() - self.last_chunk_time)
+        k = int(round(elapsed * CONTROL_HZ)) - 1
+        k = max(0, min(k, self.last_chunk.shape[0] - 1))
+        return self.last_chunk[k]
+
+    def _remember_slow(self, now: float, head_image: PIL.Image.Image, task_text: str) -> None:
+        """Record this slow tick's own content so a LATER tick can use it as
+        memory. Must only be called with content from a tick already fully
+        processed -- never the tick currently selecting memory for itself."""
+        if not self.memory_slow_seconds:
+            return
+        self.memory_buf_slow.append((now, head_image.copy(), task_text))
+        cutoff = now - (max(self.memory_slow_seconds) + self.memory_buffer_margin_sec)
+        self.memory_buf_slow = [e for e in self.memory_buf_slow if e[0] >= cutoff]
+
+    def _remember_fast(self, now: float, fast_images: List[PIL.Image.Image],
+                       action_raw: np.ndarray) -> None:
+        """Record this tick's fast-content snapshot (wrist images + best-
+        known executed action) for a later tick's fast memory."""
+        if self.memory_fast <= 0:
+            return
+        self.memory_buf_fast.append(
+            (now, [img.copy() for img in fast_images], np.asarray(action_raw, dtype=np.float64)))
+        if len(self.memory_buf_fast) > self.memory_fast:
+            self.memory_buf_fast = self.memory_buf_fast[-self.memory_fast:]
+
+    def _select_memory_slow_rows(self, now: float) -> List[Dict[str, Any]]:
+        """For each configured lookback target, the buffered entry whose
+        timestamp is nearest `now - target` (buffered entries aren't
+        uniformly spaced -- inference ticks aren't uniform -- so this is a
+        nearest-timestamp snap, not a fixed-position lookup). Returns [] (a
+        true no-op) when memory is off or the buffer is still empty (e.g.
+        the first slow tick of an episode)."""
+        if not self.memory_slow_seconds or not self.memory_buf_slow:
+            return []
+        rows = []
+        for dt_nominal in self.memory_slow_seconds:            # oldest target first
+            target_ts = now - dt_nominal
+            ts, img, task = min(self.memory_buf_slow, key=lambda e: abs(e[0] - target_ts))
+            content = [{"type": "image"}, {"type": "text", "text": task}]
+            text = self.processor.apply_chat_template(
+                [{"role": "user", "content": content}], tokenize=False,
+                add_generation_prompt=True)
+            inp = self.processor(text=text, images=[img], return_tensors="pt", padding=False)
+            rows.append({
+                "input_ids": inp.input_ids.to(self.device),
+                "attention_mask": inp.attention_mask.to(self.device),
+                "pixel_values": (inp.pixel_values.to(self.device, dtype=torch.bfloat16)
+                                if getattr(inp, "pixel_values", None) is not None else None),
+                "image_grid_thw": (inp.image_grid_thw.to(self.device)
+                                   if getattr(inp, "image_grid_thw", None) is not None else None),
+                "dt_actual": torch.tensor([now - ts], dtype=torch.float32, device=self.device),
+            })
+        return rows
+
+    def _select_memory_fast_rows(self) -> List[Dict[str, Any]]:
+        """The last `memory_fast` buffered fast-tick snapshots, oldest first
+        -- a linear window, not exponential, matching training (fast ticks
+        are close enough together that count ~= time). Returns [] when
+        memory is off or nothing buffered yet."""
+        if self.memory_fast <= 0 or not self.memory_buf_fast:
+            return []
+        rows = []
+        for ts, fast_images, action_raw in self.memory_buf_fast:
+            content = [{"type": "image"} for _ in fast_images]
+            text = self.processor.apply_chat_template(
+                [{"role": "user", "content": content}], tokenize=False,
+                add_generation_prompt=True)
+            inp = self.processor(text=text, images=fast_images,
+                                 return_tensors="pt", padding=False)
+            # action_raw is a single instantaneous absolute action, not a
+            # chunk -- action_min/max are kept per-CHUNK-step [T,65], so
+            # normalizing this [65] vector against them needs a step index;
+            # use step 0's calibration, matching origami_dataset.py's
+            # collate_fn convention for the identical fast-memory input.
+            action_norm = _normalize(action_raw, self.action_mask,
+                                     self.action_min[0], self.action_max[0])
+            rows.append({
+                "input_ids": inp.input_ids.to(self.device),
+                "attention_mask": inp.attention_mask.to(self.device),
+                "pixel_values": (inp.pixel_values.to(self.device, dtype=torch.bfloat16)
+                                if getattr(inp, "pixel_values", None) is not None else None),
+                "image_grid_thw": (inp.image_grid_thw.to(self.device)
+                                   if getattr(inp, "image_grid_thw", None) is not None else None),
+                "action_abs": torch.tensor(action_norm, dtype=torch.float32,
+                                           device=self.device).unsqueeze(0),
+            })
+        return rows
+
+    def _build_memory_kv(self, now: float):
+        """Combined slow+fast memory cache for this tick, or None (a true
+        no-op) when both tiers are off/empty -- forward_flow_action_full/
+        _partial's memory_kv=None path is then identical to current
+        behavior. Batch size 1 (one set of memory rows regardless of
+        n_draws) -- see _expand_memory_kv_batch."""
+        memory_kv = None
+        slow_rows = self._select_memory_slow_rows(now)
+        if slow_rows:
+            memory_kv = self.model.build_memory_kv_slow(
+                slow_rows, rope_stride=self.memory_rope_stride_slow)
+        fast_rows = self._select_memory_fast_rows()
+        if fast_rows:
+            memory_kv = self.model.build_memory_kv_fast(
+                fast_rows, past_kv=memory_kv, rope_stride=self.memory_rope_stride_fast)
+        return memory_kv
+
+    @staticmethod
+    def _expand_memory_kv_batch(memory_kv, batch_size: int):
+        """Broadcast a batch=1 memory cache (build_memory_kv_slow/_fast
+        always process one set of memory rows, independent of how many
+        parallel noise draws the live tick uses) to match a K-draws batch.
+
+        Not exercised anywhere else in this codebase: the reference server
+        (scripts/test.py's CascadedServer) never batches multiple draws, so
+        this batch-1-vs-batch-K interaction between memory and
+        PolicyConfig.n_draws has no existing implementation to port from --
+        written fresh here, mirroring modeling_vla.Qwen3VLVLAModel's own
+        `_clone_dynamic_cache` layer-walking so it stays correct across
+        both the current (`.layers`/`DynamicLayer`) and pre-4.55
+        (`key_cache`/`value_cache`) transformers cache APIs. `.clone()`
+        materializes the `.expand()` view into a real batch_size-sized
+        tensor (expand alone is a stride-0 view, unsafe to mutate)."""
+        if memory_kv is None or batch_size == 1:
+            return memory_kv
+        from transformers.cache_utils import DynamicLayer
+        expanded = type(memory_kv)()
+        if hasattr(memory_kv, "layers") and isinstance(memory_kv.layers, list):
+            for layer in memory_kv.layers:
+                new_layer = DynamicLayer()
+                if getattr(layer, "is_initialized", False):
+                    new_layer.dtype = layer.dtype
+                    new_layer.device = layer.device
+                    new_layer.keys = layer.keys.expand(
+                        batch_size, *layer.keys.shape[1:]).clone()
+                    new_layer.values = layer.values.expand(
+                        batch_size, *layer.values.shape[1:]).clone()
+                    new_layer.is_initialized = True
+                expanded.layers.append(new_layer)
+        elif hasattr(memory_kv, "key_cache"):
+            expanded.key_cache = [k.expand(batch_size, *k.shape[1:]).clone()
+                                  for k in memory_kv.key_cache]
+            expanded.value_cache = [v.expand(batch_size, *v.shape[1:]).clone()
+                                    for v in memory_kv.value_cache]
+            expanded._seen_tokens = getattr(memory_kv, "_seen_tokens", 0)
+        else:
+            raise NotImplementedError(
+                "Unrecognized DynamicCache layout; cannot expand memory_kv batch.")
+        return expanded
+
     def _embed(self, slow_imgs, fast_imgs, state):
         """Slow/fast embedding split, M-RoPE ids, state token (train.py layout)."""
         model, processor = self.model, self.processor
@@ -498,7 +738,7 @@ class TRexOrigamiPolicy:
         return slow, position_ids, fast, attention_mask, state_emb
 
     def _flow_slow(self, slow, pos, fast, mask, state_emb, tactile, timing, cache: bool,
-                   now: float) -> np.ndarray:
+                   now: float, memory_kv=None) -> np.ndarray:
         """K draws from a fresh vision-language prefix -> normalised [K, T, D].
 
         When `cache` is True (tactile_refine_every > 1), stashes the slow
@@ -506,6 +746,13 @@ class TRexOrigamiPolicy:
         to `_flow_cached` -- only valid when K fits in one `max_flow_batch`
         (enforced in __init__), since caching mid-loop would only keep the
         last sub-batch's state.
+
+        `memory_kv` (from `_build_memory_kv`) is batch=1; each sub-batch
+        below expands it to that sub-batch's own width via
+        `_expand_memory_kv_batch` before use -- forward_flow_action_full/
+        _partial clone it again internally (their own defensive copy against
+        cross-call mutation), so handing them a fresh per-sub-batch expansion
+        each iteration is safe and never mutates the shared `memory_kv`.
         """
         K = self.cfg.n_draws
         model = self.model
@@ -518,12 +765,14 @@ class TRexOrigamiPolicy:
         outs = []
         for s in range(0, K, self.cfg.max_flow_batch):
             sl = slice(s, min(s + self.cfg.max_flow_batch, K))
+            mem_sl = self._expand_memory_kv_batch(memory_kv, sl.stop - sl.start)
             if self.cfg.mode == "blind":
                 outs.append(model.forward_flow_action_full(
                     inputs_embeds=slow_r[sl], position_ids=pos_r[:, sl],
                     attention_mask=mask_r[sl], noise=noise[sl],
                     state_embeds=None if state_r is None else state_r[sl],
-                    fast_embeds=fast_r[sl], num_steps=self.cfg.total_steps))
+                    fast_embeds=fast_r[sl], num_steps=self.cfg.total_steps,
+                    memory_kv=mem_sl))
                 continue
             ts = time.time()
             x_split, kv, n_act, tau = model.forward_flow_action_partial(
@@ -531,7 +780,8 @@ class TRexOrigamiPolicy:
                 attention_mask=mask_r[sl], noise=noise[sl],
                 state_embeds=None if state_r is None else state_r[sl],
                 fast_embeds=fast_r[sl], num_steps_total=self.cfg.total_steps,
-                split_step=self.cfg.split_step, refresh_clean_kv=True)
+                split_step=self.cfg.split_step, refresh_clean_kv=True,
+                memory_kv=mem_sl)
             self._sync()
             timing["slow_ms"] = timing.get("slow_ms", 0.0) + 1000 * (time.time() - ts)
             tf = time.time()
@@ -581,6 +831,11 @@ class TRexOrigamiPolicy:
         actions = np.ascontiguousarray(absolute, dtype=np.float32)
         if actions.shape != (self.action_chunk, self.action_dim) or not np.isfinite(actions).all():
             raise RuntimeError("policy produced an invalid action chunk")
+        # Best-known executed chunk, for the fast-memory buffer's
+        # action_abs proxy (_prev_command) -- the actual, safety-projected
+        # values, since that's what's really sent to the robot.
+        self.last_chunk = actions.astype(np.float64)
+        self.last_chunk_time = time.time()
         return actions
 
     def _sync(self) -> None:
@@ -671,6 +926,24 @@ def add_policy_arguments(parser) -> None:
                              "KV for (N-1)/N ticks, running the tactile expert only")
     parser.add_argument("--tactile_refine_max_stale_s", type=float,
                         default=float(env("TREX_TACTILE_REFINE_MAX_STALE_S", "0.5")))
+    parser.add_argument("--memory_slow_seconds", default=env("TREX_MEMORY_SLOW_SECONDS", ""),
+                        help="comma-separated seconds-back targets, e.g. '0.25,0.5,1,5'; "
+                             "'' auto-detects from training_args.json (default)")
+    parser.add_argument("--memory_fast", type=int, default=int(env("TREX_MEMORY_FAST", "0")),
+                        help="linear fast-memory window in ticks; 0 auto-detects from "
+                             "training_args.json (default)")
+    parser.add_argument("--memory_rope_stride_slow", type=float,
+                        default=(float(env("TREX_MEMORY_ROPE_STRIDE_SLOW"))
+                                if env("TREX_MEMORY_ROPE_STRIDE_SLOW") else None))
+    parser.add_argument("--memory_rope_stride_fast", type=float,
+                        default=(float(env("TREX_MEMORY_ROPE_STRIDE_FAST"))
+                                if env("TREX_MEMORY_ROPE_STRIDE_FAST") else None))
+    parser.add_argument("--memory_buffer_margin_sec", type=float,
+                        default=float(env("TREX_MEMORY_BUFFER_MARGIN_SEC", "2.0")))
+    parser.add_argument("--disable_memory", action="store_true",
+                        default=bool(int(env("TREX_DISABLE_MEMORY", "0"))),
+                        help="force memory off regardless of training_args.json/checkpoint "
+                             "auto-detect -- for A/B diagnosis only, not a normal serving knob")
 
 
 def config_from_args(args) -> PolicyConfig:
@@ -682,4 +955,9 @@ def config_from_args(args) -> PolicyConfig:
         tactile_history=args.tactile_history, device=args.device, seed=args.seed,
         warmup=not args.no_warmup, compile=bool(args.compile), compile_mode=args.compile_mode,
         tactile_refine_every=args.tactile_refine_every,
-        tactile_refine_max_stale_s=args.tactile_refine_max_stale_s)
+        tactile_refine_max_stale_s=args.tactile_refine_max_stale_s,
+        memory_slow_seconds=args.memory_slow_seconds, memory_fast=args.memory_fast,
+        memory_rope_stride_slow=args.memory_rope_stride_slow,
+        memory_rope_stride_fast=args.memory_rope_stride_fast,
+        memory_buffer_margin_sec=args.memory_buffer_margin_sec,
+        disable_memory=args.disable_memory)
