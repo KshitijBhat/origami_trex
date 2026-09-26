@@ -561,6 +561,16 @@ def _build_memory_kv_for_batch(raw_model, batch, args):
     decorator here just matches how forward_flow_action_partial's own
     no-grad cached_kv construction is wrapped at its call sites, for the
     same reason (this KV is fixed context, not something to backprop into).
+
+    Per-example memory dropout (--memory_slow_dropout/--memory_fast_dropout)
+    is applied upstream, in OrigamiDataset.collate_fn, not here -- pixel
+    values are still per-example Python lists at that point (before the
+    torch.cat that flattens them across the batch), so zeroing one
+    example's row there is a plain list-index operation. Doing it here
+    instead, after collation, would require reverse-engineering each
+    example's patch-offset range from image_grid_thw. Train/val separation
+    is achieved by OrigamiDataset._as_val() forcing dropout to 0 on the
+    validation dataset instance, not a runtime check in this function.
     """
     memory_kv = None
     slow_rows = batch.get("memory_slow")
@@ -1828,6 +1838,22 @@ if __name__ == "__main__":
                              "Untuned placeholder -- see MEMORY_DESIGN.md. "
                              "Must match test.py's --memory_rope_stride_fast "
                              "at serving time.")
+    parser.add_argument("--memory_slow_dropout", type=float, default=0.0,
+                        help="Per-example, per-row probability (independent "
+                             "draw per training example, per slow memory row) "
+                             "of zeroing that example's row image content in "
+                             "OrigamiDataset.collate_fn. Train-only -- "
+                             "OrigamiDataset._as_val() forces this to 0 on the "
+                             "validation dataset instance. Regularizes against "
+                             "the model shortcutting to always-present rows "
+                             "instead of learning each row's own signal. "
+                             "0 (default): no dropout, byte-identical to "
+                             "current behavior.")
+    parser.add_argument("--memory_fast_dropout", type=float, default=0.0,
+                        help="Same as --memory_slow_dropout, for fast memory "
+                             "rows (zeros that example's image + action_abs + "
+                             "tacf6_hist together, keeping the row coherent). "
+                             "0 (default): no dropout.")
 
     # VQ-VAE tactile code tokens (fast-path only; pre-baked into the JSON via
     # utils/encode_vqvae_codes_to_json.py).  When 0 (default), no tactile_code

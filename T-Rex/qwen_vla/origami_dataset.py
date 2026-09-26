@@ -243,6 +243,14 @@ class OrigamiDataset(torch.utils.data.Dataset):
         # (exact offsets every time).
         self.memory_slow_jitter_sec = float(g("memory_slow_jitter_sec", 0.0))
         self.memory_fast = int(g("memory_fast", 0))
+        # Per-example, per-row probability of zeroing a memory row's content
+        # in collate_fn (train-only -- _as_val() forces both to 0 on the
+        # validation dataset instance). Regularizes against the model
+        # shortcutting to rows always being present together, and gives a
+        # loss-vs-dropped-row diagnostic. 0 (default): no dropout,
+        # byte-identical to current behavior.
+        self.memory_slow_dropout = float(g("memory_slow_dropout", 0.0))
+        self.memory_fast_dropout = float(g("memory_fast_dropout", 0.0))
         self.action_dim = int(g("action_dim", ACTION_DIM))
         self.action_chunk = int(g("action_chunk", ACTION_CHUNK))
         self.state_noise_mode = str(g("state_noise_mode", "none"))
@@ -517,9 +525,13 @@ class OrigamiDataset(torch.utils.data.Dataset):
     def _as_val(self, val):
         """Turn a dataset into a validation view.
 
-        No-op under all-absolute (no target augmentation exists to disable) --
-        kept as the hook point should a val-specific override ever be needed.
+        Forces memory dropout off -- validation must see a clean,
+        deterministic signal, not stochastic row-zeroing. This is the only
+        override needed under all-absolute (no target augmentation exists
+        to disable otherwise).
         """
+        val.memory_slow_dropout = 0.0
+        val.memory_fast_dropout = 0.0
         return val
 
     def create_val_split(self, val_ratio=0.05, seed=42):
@@ -650,7 +662,16 @@ class OrigamiDataset(torch.utils.data.Dataset):
                                          return_tensors="pt", padding=False)
                     k_ids.append(inp.input_ids[0])
                     if getattr(inp, "pixel_values", None) is not None:
-                        k_pv.append(inp.pixel_values)
+                        pv = inp.pixel_values
+                        # Per-example, per-row dropout: null this example's
+                        # image content while keeping input_ids/image_grid_thw
+                        # (and dt_actual) real, so token layout/RoPE position
+                        # are untouched -- only the informational content is
+                        # zeroed. Independent draw per example per row.
+                        if (self.memory_slow_dropout > 0
+                                and torch.rand(()).item() < self.memory_slow_dropout):
+                            pv = torch.zeros_like(pv)
+                        k_pv.append(pv)
                         k_thw.append(inp.image_grid_thw)
                 pad_id_k = self.processor.tokenizer.pad_token_id or 0
                 max_len_k = max(i.shape[0] for i in k_ids)
@@ -679,8 +700,17 @@ class OrigamiDataset(torch.utils.data.Dataset):
         if self.memory_fast > 0 and "memory_fast" in batch[0]:
             memory_fast_out = []
             for k in range(self.memory_fast):
+                # One dropout decision per example, reused below for
+                # action_abs/tacf6_hist so a "dropped" example has ALL of
+                # this row's content nulled together -- never image-real +
+                # action-null (an incoherent state the model would never
+                # see during non-dropout training).
+                drop_mask = None
+                if self.memory_fast_dropout > 0:
+                    drop_mask = [torch.rand(()).item() < self.memory_fast_dropout
+                                 for _ in batch]
                 k_ids, k_pv, k_thw = [], [], []
-                for b in batch:
+                for idx, b in enumerate(batch):
                     m = b["memory_fast"][k]
                     pil_fast_k = [m["wrist_right"], m["wrist_left"]]
                     content = [{"type": "image"} for _ in pil_fast_k]
@@ -691,7 +721,10 @@ class OrigamiDataset(torch.utils.data.Dataset):
                                          return_tensors="pt", padding=False)
                     k_ids.append(inp.input_ids[0])
                     if getattr(inp, "pixel_values", None) is not None:
-                        k_pv.append(inp.pixel_values)
+                        pv = inp.pixel_values
+                        if drop_mask is not None and drop_mask[idx]:
+                            pv = torch.zeros_like(pv)
+                        k_pv.append(pv)
                         k_thw.append(inp.image_grid_thw)
                 pad_id_k = self.processor.tokenizer.pad_token_id or 0
                 max_len_k = max(i.shape[0] for i in k_ids)
@@ -721,6 +754,10 @@ class OrigamiDataset(torch.utils.data.Dataset):
                     _normalize(action_raw, self.action_mask,
                               self.action_min[0], self.action_max[0]),
                     dtype=torch.float32)
+                if drop_mask is not None:
+                    for idx, dropped in enumerate(drop_mask):
+                        if dropped:
+                            action_k[idx] = 0.0
                 entry = {
                     "input_ids": torch.stack(ids_k),
                     "attention_mask": torch.stack(ams_k),
@@ -729,9 +766,14 @@ class OrigamiDataset(torch.utils.data.Dataset):
                     "action_abs": action_k,
                 }
                 if "tacf6_hist" in batch[0]["memory_fast"][k]:
-                    entry["tacf6_hist"] = torch.tensor(
+                    tacf6 = torch.tensor(
                         np.stack([b["memory_fast"][k]["tacf6_hist"] for b in batch], axis=0),
                         dtype=torch.float32)
+                    if drop_mask is not None:
+                        for idx, dropped in enumerate(drop_mask):
+                            if dropped:
+                                tacf6[idx] = 0.0
+                    entry["tacf6_hist"] = tacf6
                 memory_fast_out.append(entry)
 
         flare_pv = flare_thw = None

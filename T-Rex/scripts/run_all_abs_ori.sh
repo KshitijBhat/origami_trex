@@ -69,16 +69,23 @@ MEMORY_FAST="${MEMORY_FAST:-0}"
 MEMORY_SLOW_JITTER_SEC="${MEMORY_SLOW_JITTER_SEC:-0}"
 MEMORY_ROPE_STRIDE_SLOW="${MEMORY_ROPE_STRIDE_SLOW:-32.0}"
 MEMORY_ROPE_STRIDE_FAST="${MEMORY_ROPE_STRIDE_FAST:-8.0}"
+# Per-example memory dropout (new this branch; 0 = off, byte-identical to
+# current behavior when unset -- see OrigamiDataset.collate_fn).
+MEMORY_SLOW_DROPOUT="${MEMORY_SLOW_DROPOUT:-0}"
+MEMORY_FAST_DROPOUT="${MEMORY_FAST_DROPOUT:-0}"
 
 EXTRA_ARGS=()
 if [ -n "${MEMORY_SLOW_SECONDS}" ] || [ "${MEMORY_FAST}" != "0" ]; then
     echo ">>> memory: slow_seconds=${MEMORY_SLOW_SECONDS:-<off>} fast=${MEMORY_FAST} " \
-         "rope_stride(slow/fast)=${MEMORY_ROPE_STRIDE_SLOW}/${MEMORY_ROPE_STRIDE_FAST}"
+         "rope_stride(slow/fast)=${MEMORY_ROPE_STRIDE_SLOW}/${MEMORY_ROPE_STRIDE_FAST} " \
+         "dropout(slow/fast)=${MEMORY_SLOW_DROPOUT}/${MEMORY_FAST_DROPOUT}"
 fi
 EXTRA_ARGS+=(--memory_slow_seconds "${MEMORY_SLOW_SECONDS}" --memory_fast "${MEMORY_FAST}"
              --memory_slow_jitter_sec "${MEMORY_SLOW_JITTER_SEC}"
              --memory_rope_stride_slow "${MEMORY_ROPE_STRIDE_SLOW}"
-             --memory_rope_stride_fast "${MEMORY_ROPE_STRIDE_FAST}")
+             --memory_rope_stride_fast "${MEMORY_ROPE_STRIDE_FAST}"
+             --memory_slow_dropout "${MEMORY_SLOW_DROPOUT}"
+             --memory_fast_dropout "${MEMORY_FAST_DROPOUT}")
 if [ "${SMOKE:-0}" = "1" ]; then
     echo ">>> SMOKE RUN: 5 steps, no checkpoint"
     EXTRA_ARGS+=(--max_steps 5 --save_steps 0 --save_freq 100000 --val_freq 0)
