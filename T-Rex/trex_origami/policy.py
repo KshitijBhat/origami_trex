@@ -282,6 +282,7 @@ class TRexOrigamiPolicy:
                 "a K-batch split across sub-batches would only cache the last one")
         self._tick = 0
         self._cache_kv = None
+        self._cache_kv_exclude_mask = None
         self._cache_pos = None
         self._cache_mask = None
         self._cache_x_split = None
@@ -400,6 +401,7 @@ class TRexOrigamiPolicy:
             self._f6_buffer.clear()
             self._tick = 0
             self._cache_kv = None
+            self._cache_kv_exclude_mask = None
             self._cache_pos = None
             self._cache_mask = None
             self._cache_x_split = None
@@ -453,7 +455,7 @@ class TRexOrigamiPolicy:
             # Built from buffered PRIOR ticks only -- this tick's own content
             # is recorded into the buffers further down, after this read, so
             # a tick never becomes its own memory.
-            memory_kv = self._build_memory_kv(now)
+            memory_kv, kv_exclude_mask = self._build_memory_kv(now)
             slow_imgs = [self._pil(obs[OBS_HEAD_LEFT])]
             fast_imgs = [self._pil(obs[OBS_WRIST_RIGHT]), self._pil(obs[OBS_WRIST_LEFT])]
             slow, pos, fast, mask, state_emb = self._embed(slow_imgs, fast_imgs, state)
@@ -464,7 +466,8 @@ class TRexOrigamiPolicy:
             self._last_fast_images = fast_imgs
             t2 = time.time()
             norm = self._flow_slow(slow, pos, fast, mask, state_emb, tactile, timing,
-                                   cache=(every > 1), now=now, memory_kv=memory_kv)
+                                   cache=(every > 1), now=now, memory_kv=memory_kv,
+                                   kv_exclude_mask=kv_exclude_mask)
             timing["flow_ms"] = 1000 * (time.time() - t2)
         else:
             timing["embed_ms"] = 0.0
@@ -641,21 +644,24 @@ class TRexOrigamiPolicy:
         return rows
 
     def _build_memory_kv(self, now: float):
-        """Combined slow+fast memory cache for this tick, or None (a true
-        no-op) when both tiers are off/empty -- forward_flow_action_full/
+        """Combined slow+fast memory cache for this tick, or (None, None) (a
+        true no-op) when both tiers are off/empty -- forward_flow_action_full/
         _partial's memory_kv=None path is then identical to current
         behavior. Batch size 1 (one set of memory rows regardless of
-        n_draws) -- see _expand_memory_kv_batch."""
-        memory_kv = None
+        n_draws) -- see _expand_memory_kv_batch/_expand_kv_exclude_mask_batch.
+        Second return value, kv_exclude_mask, hides redundant memory-row task
+        text from attention -- see Qwen3VLVLAModel.build_memory_kv_slow."""
+        memory_kv, kv_exclude_mask = None, None
         slow_rows = self._select_memory_slow_rows(now)
         if slow_rows:
-            memory_kv = self.model.build_memory_kv_slow(
+            memory_kv, kv_exclude_mask = self.model.build_memory_kv_slow(
                 slow_rows, rope_stride=self.memory_rope_stride_slow)
         fast_rows = self._select_memory_fast_rows()
         if fast_rows:
-            memory_kv = self.model.build_memory_kv_fast(
-                fast_rows, past_kv=memory_kv, rope_stride=self.memory_rope_stride_fast)
-        return memory_kv
+            memory_kv, kv_exclude_mask = self.model.build_memory_kv_fast(
+                fast_rows, past_kv=memory_kv, kv_exclude_mask=kv_exclude_mask,
+                rope_stride=self.memory_rope_stride_fast)
+        return memory_kv, kv_exclude_mask
 
     @staticmethod
     def _expand_memory_kv_batch(memory_kv, batch_size: int):
@@ -700,6 +706,17 @@ class TRexOrigamiPolicy:
                 "Unrecognized DynamicCache layout; cannot expand memory_kv batch.")
         return expanded
 
+    @staticmethod
+    def _expand_kv_exclude_mask_batch(kv_exclude_mask, batch_size: int):
+        """Sibling of `_expand_memory_kv_batch`: broadcast a batch=1
+        `kv_exclude_mask` ([1, past_len] bool) to match a K-draws sub-batch,
+        the same way `memory_kv` itself gets expanded -- must stay in lockstep
+        with it or `build_causal_mask`'s batch dim (kv_exclude_mask) and the
+        cache's own batch dim (memory_kv) would disagree."""
+        if kv_exclude_mask is None or batch_size == 1:
+            return kv_exclude_mask
+        return kv_exclude_mask.expand(batch_size, -1).clone()
+
     def _embed(self, slow_imgs, fast_imgs, state):
         """Slow/fast embedding split, M-RoPE ids, state token (train.py layout)."""
         model, processor = self.model, self.processor
@@ -738,7 +755,7 @@ class TRexOrigamiPolicy:
         return slow, position_ids, fast, attention_mask, state_emb
 
     def _flow_slow(self, slow, pos, fast, mask, state_emb, tactile, timing, cache: bool,
-                   now: float, memory_kv=None) -> np.ndarray:
+                   now: float, memory_kv=None, kv_exclude_mask=None) -> np.ndarray:
         """K draws from a fresh vision-language prefix -> normalised [K, T, D].
 
         When `cache` is True (tactile_refine_every > 1), stashes the slow
@@ -766,13 +783,14 @@ class TRexOrigamiPolicy:
         for s in range(0, K, self.cfg.max_flow_batch):
             sl = slice(s, min(s + self.cfg.max_flow_batch, K))
             mem_sl = self._expand_memory_kv_batch(memory_kv, sl.stop - sl.start)
+            excl_sl = self._expand_kv_exclude_mask_batch(kv_exclude_mask, sl.stop - sl.start)
             if self.cfg.mode == "blind":
                 outs.append(model.forward_flow_action_full(
                     inputs_embeds=slow_r[sl], position_ids=pos_r[:, sl],
                     attention_mask=mask_r[sl], noise=noise[sl],
                     state_embeds=None if state_r is None else state_r[sl],
                     fast_embeds=fast_r[sl], num_steps=self.cfg.total_steps,
-                    memory_kv=mem_sl))
+                    memory_kv=mem_sl, kv_exclude_mask=excl_sl))
                 continue
             ts = time.time()
             x_split, kv, n_act, tau = model.forward_flow_action_partial(
@@ -781,7 +799,7 @@ class TRexOrigamiPolicy:
                 state_embeds=None if state_r is None else state_r[sl],
                 fast_embeds=fast_r[sl], num_steps_total=self.cfg.total_steps,
                 split_step=self.cfg.split_step, refresh_clean_kv=True,
-                memory_kv=mem_sl)
+                memory_kv=mem_sl, kv_exclude_mask=excl_sl)
             self._sync()
             timing["slow_ms"] = timing.get("slow_ms", 0.0) + 1000 * (time.time() - ts)
             tf = time.time()
@@ -789,11 +807,13 @@ class TRexOrigamiPolicy:
                 cached_kv=kv, latent_position_ids=pos_r[:, sl], n_action_in_cache=n_act,
                 x_split=x_split, tau_split=tau, attention_mask=mask_r[sl],
                 num_steps_total=self.cfg.total_steps, split_step=self.cfg.split_step,
+                kv_exclude_mask=excl_sl,
                 **{k: (None if v is None else v[sl]) for k, v in tac_r.items()}))
             self._sync()
             timing["fast_ms"] = timing.get("fast_ms", 0.0) + 1000 * (time.time() - tf)
             if cache:
                 self._cache_kv, self._cache_pos, self._cache_mask = kv, pos_r, mask_r
+                self._cache_kv_exclude_mask = excl_sl
                 self._cache_x_split, self._cache_n_action = x_split, n_act
                 self._cache_tau_split, self._cache_built_at = tau, now
         return torch.cat(outs, dim=0).float().cpu().numpy().astype(np.float64)
@@ -818,6 +838,7 @@ class TRexOrigamiPolicy:
             n_action_in_cache=self._cache_n_action, x_split=self._cache_x_split,
             tau_split=self._cache_tau_split, attention_mask=self._cache_mask,
             num_steps_total=self.cfg.total_steps, split_step=self.cfg.split_step,
+            kv_exclude_mask=self._cache_kv_exclude_mask,
             **tac_r)
         self._sync()
         timing["fast_ms"] = 1000 * (time.time() - tf)

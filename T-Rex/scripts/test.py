@@ -415,6 +415,7 @@ class CascadedServer:
 
         # Slow-tick snapshot
         self.cached_kv          = None
+        self.kv_exclude_mask    = None
         self.x_split            = None             # [B, n_chunk, action_dim] bf16,
                                                    # action-expert intermediate at τ=τ_split
         self.tau_split          = None
@@ -749,20 +750,23 @@ class CascadedServer:
         return rows
 
     def _build_memory_kv(self, now):
-        """Combined slow+fast memory cache for this tick, or None (a true
-        no-op) when both tiers are off/empty -- forward_flow_action_full/
+        """Combined slow+fast memory cache for this tick, or (None, None) (a
+        true no-op) when both tiers are off/empty -- forward_flow_action_full/
         _partial's memory_kv=None path is then byte-identical to current
-        behavior."""
-        memory_kv = None
+        behavior. Second return value, kv_exclude_mask, hides redundant
+        memory-row task text from attention -- see
+        Qwen3VLVLAModel.build_memory_kv_slow."""
+        memory_kv, kv_exclude_mask = None, None
         slow_rows = self._select_memory_slow_rows(now)
         if slow_rows:
-            memory_kv = self.model.build_memory_kv_slow(
+            memory_kv, kv_exclude_mask = self.model.build_memory_kv_slow(
                 slow_rows, rope_stride=self.memory_rope_stride_slow)
         fast_rows = self._select_memory_fast_rows()
         if fast_rows:
-            memory_kv = self.model.build_memory_kv_fast(
-                fast_rows, past_kv=memory_kv, rope_stride=self.memory_rope_stride_fast)
-        return memory_kv
+            memory_kv, kv_exclude_mask = self.model.build_memory_kv_fast(
+                fast_rows, past_kv=memory_kv, kv_exclude_mask=kv_exclude_mask,
+                rope_stride=self.memory_rope_stride_fast)
+        return memory_kv, kv_exclude_mask
 
     # -- internal: last-command tracking (feeds the memory buffer) --------
     def _prev_command(self, state):
@@ -815,7 +819,7 @@ class CascadedServer:
         now = time.time()
         # Built from buffered PRIOR ticks only -- this tick's own content is
         # recorded into the buffers further down, after this call.
-        memory_kv = self._build_memory_kv(now)
+        memory_kv, kv_exclude_mask = self._build_memory_kv(now)
 
         if args.image_size:
             _sz = tuple(args.image_size)
@@ -926,10 +930,12 @@ class CascadedServer:
                 fast_embeds=fast_embeds,
                 num_steps=args.cascaded_total_steps,
                 memory_kv=memory_kv,
+                kv_exclude_mask=kv_exclude_mask,
             )
             self.x_split           = None
             self.tau_split         = None
             self.cached_kv         = None
+            self.kv_exclude_mask   = None
             self.position_ids      = position_ids
             self.attention_mask    = attention_mask
             self.n_action_in_cache = 0
@@ -952,10 +958,12 @@ class CascadedServer:
                 split_step=args.cascaded_split_step,
                 refresh_clean_kv=True,
                 memory_kv=memory_kv,
+                kv_exclude_mask=kv_exclude_mask,
             ))
         self.x_split    = x_split           # action expert's intermediate at τ=τ_split
         self.tau_split  = tau_split
         self.cached_kv         = cached_kv
+        self.kv_exclude_mask   = kv_exclude_mask
         self.position_ids      = position_ids
         self.attention_mask    = attention_mask
         self.n_action_in_cache = n_action_in_cache
@@ -1012,6 +1020,7 @@ class CascadedServer:
             tactile_f6_history = tac_hist_tensor,
             num_steps_total    = args.cascaded_total_steps,
             split_step         = args.cascaded_split_step,
+            kv_exclude_mask    = self.kv_exclude_mask,
         )
         a_refined = self._reconstruct(refined[0].float().cpu().numpy(),
                                       self.seed_state)

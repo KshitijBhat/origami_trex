@@ -551,9 +551,9 @@ def _action_mask_tensor(args, dataset):
 @torch.no_grad()
 def _build_memory_kv_for_batch(raw_model, batch, args):
     """Combined slow+fast memory KV for one training/validation batch, or
-    None (a true no-op) when memory is off or the batch carries no memory
-    entries (e.g. --memory_slow_seconds/--memory_fast both unset, in which
-    case collate_fn never adds the memory_slow/memory_fast keys at all).
+    (None, None) (a true no-op) when memory is off or the batch carries no
+    memory entries (e.g. --memory_slow_seconds/--memory_fast both unset, in
+    which case collate_fn never adds the memory_slow/memory_fast keys at all).
 
     Shared by train()'s main loop and run_validation() so both see the same
     memory-augmented forward -- see dev/memory MEMORY_DESIGN.md Part D.
@@ -571,18 +571,24 @@ def _build_memory_kv_for_batch(raw_model, batch, args):
     example's patch-offset range from image_grid_thw. Train/val separation
     is achieved by OrigamiDataset._as_val() forcing dropout to 0 on the
     validation dataset instance, not a runtime check in this function.
+
+    Second return value, `kv_exclude_mask`: hides redundant memory-row task
+    text (identical to the live tick's own text whenever phase_mode is off)
+    from every later query's attention, while leaving each memory row's
+    image content fully attendable -- see build_memory_kv_slow. None when
+    there's nothing to exclude (no slow rows, or memory entirely off).
     """
-    memory_kv = None
+    memory_kv, kv_exclude_mask = None, None
     slow_rows = batch.get("memory_slow")
     if slow_rows:
-        memory_kv = raw_model.build_memory_kv_slow(
+        memory_kv, kv_exclude_mask = raw_model.build_memory_kv_slow(
             slow_rows, rope_stride=getattr(args, "memory_rope_stride_slow", 32.0))
     fast_rows = batch.get("memory_fast")
     if fast_rows:
-        memory_kv = raw_model.build_memory_kv_fast(
-            fast_rows, past_kv=memory_kv,
+        memory_kv, kv_exclude_mask = raw_model.build_memory_kv_fast(
+            fast_rows, past_kv=memory_kv, kv_exclude_mask=kv_exclude_mask,
             rope_stride=getattr(args, "memory_rope_stride_fast", 8.0))
-    return memory_kv
+    return memory_kv, kv_exclude_mask
 
 
 def _fmt_bytes(n):
@@ -890,7 +896,7 @@ def run_validation(model, val_dataloader, accelerator, args,
         if i >= max_batches:
             break
         raw_model = accelerator.unwrap_model(model)
-        memory_kv = _build_memory_kv_for_batch(raw_model, batch, args)
+        memory_kv, kv_exclude_mask = _build_memory_kv_for_batch(raw_model, batch, args)
 
         inputs_embeds = raw_model.prepare_inputs_embeds(
             input_ids=batch["input_ids"],
@@ -973,7 +979,8 @@ def run_validation(model, val_dataloader, accelerator, args,
                 output_hidden_states=use_flare,
                 latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
-                tactile_indexes=torch.arange(0, 0, device=full_embeds.device))
+                tactile_indexes=torch.arange(0, 0, device=full_embeds.device),
+                kv_exclude_mask=kv_exclude_mask)
             hidden = outputs.last_hidden_state
             act_start = L_latent + n_fast + n_state + n_torque + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
@@ -997,6 +1004,7 @@ def run_validation(model, val_dataloader, accelerator, args,
                     num_steps_total=args.cascaded_total_steps,
                     split_step=args.cascaded_split_step,
                     refresh_clean_kv=True,
+                    kv_exclude_mask=kv_exclude_mask,
                 ))
 
             norm_actions_gt = batch["norm_actions"].to(slow_embeds.dtype)
@@ -1017,6 +1025,7 @@ def run_validation(model, val_dataloader, accelerator, args,
                 tactile_deform=batch.get("tactile_deforms_delayed"),
                 tactile_codes=batch.get("tactile_codes"),
                 tactile_f6_history=batch.get("tactile_f6_history"),
+                kv_exclude_mask=kv_exclude_mask,
             )
             loss_tac = nn.MSELoss()(v_pred_r, v_target_r)
         else:
@@ -1034,7 +1043,8 @@ def run_validation(model, val_dataloader, accelerator, args,
                 output_hidden_states=use_flare,
                 latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
-                tactile_indexes=torch.arange(0, 0, device=full_embeds.device))
+                tactile_indexes=torch.arange(0, 0, device=full_embeds.device),
+                kv_exclude_mask=kv_exclude_mask)
             hidden = outputs.last_hidden_state
             act_start = L_latent + n_fast + n_state + n_torque + 1
             v_act = raw_model.final_layer(hidden[:, act_start:act_start + chunk, :])
@@ -1422,7 +1432,7 @@ def train(args):
 
         for batch in it:
             raw_model = accelerator.unwrap_model(model)
-            memory_kv = _build_memory_kv_for_batch(raw_model, batch, args)
+            memory_kv, kv_exclude_mask = _build_memory_kv_for_batch(raw_model, batch, args)
 
             inputs_embeds = raw_model.prepare_inputs_embeds(
                 input_ids=batch["input_ids"],
@@ -1531,6 +1541,7 @@ def train(args):
                 latent_indexes=torch.arange(0, L_latent, device=full_embeds.device),
                 action_indexes=torch.arange(L_latent, L_total, device=full_embeds.device),
                 tactile_indexes=torch.arange(0, 0, device=full_embeds.device),
+                kv_exclude_mask=kv_exclude_mask,
             )
             hidden = outputs.last_hidden_state
             act_pred_start = L_latent + n_fast + n_state + n_torque + 1
@@ -1562,6 +1573,7 @@ def train(args):
                             num_steps_total=args.cascaded_total_steps,
                             split_step=args.cascaded_split_step,
                             refresh_clean_kv=True,
+                            kv_exclude_mask=kv_exclude_mask,
                         ))
 
                 # 2) L_flow_tactile — tactile expert predicts velocity at
@@ -1614,6 +1626,7 @@ def train(args):
                         tactile_deform=tac_def_in,
                         tactile_codes=tac_codes_in,
                         tactile_f6_history=tac_hist_in,
+                        kv_exclude_mask=kv_exclude_mask,
                     ),
                     v_target_r,
                 )

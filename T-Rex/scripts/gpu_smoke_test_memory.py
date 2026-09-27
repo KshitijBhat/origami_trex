@@ -141,18 +141,27 @@ def main():
         })
 
     print("\n=== build_memory_kv_slow / build_memory_kv_fast ===")
-    memory_kv_slow = model.build_memory_kv_slow(memory_slow_rows, rope_stride=32.0)
+    memory_kv_slow, exclude_slow = model.build_memory_kv_slow(memory_slow_rows, rope_stride=32.0)
     assert memory_kv_slow is not None
-    print(f"memory_kv_slow built, seq_len={memory_kv_slow.get_seq_length()}")
-    memory_kv = model.build_memory_kv_fast(memory_fast_rows, past_kv=memory_kv_slow, rope_stride=8.0)
+    assert exclude_slow is not None and exclude_slow.dtype == torch.bool
+    assert exclude_slow.shape[1] == memory_kv_slow.get_seq_length()
+    print(f"memory_kv_slow built, seq_len={memory_kv_slow.get_seq_length()}, "
+          f"excluded={int(exclude_slow.sum().item())}/{exclude_slow.numel()} positions")
+    memory_kv, kv_exclude_mask = model.build_memory_kv_fast(
+        memory_fast_rows, past_kv=memory_kv_slow, kv_exclude_mask=exclude_slow, rope_stride=8.0)
     assert memory_kv is not None
+    assert kv_exclude_mask.shape[1] == memory_kv.get_seq_length()
+    # fast-tier rows carry no text -- the newly-appended span must be all-False.
+    assert not kv_exclude_mask[:, exclude_slow.shape[1]:].any()
     print(f"memory_kv (slow+fast combined) built, seq_len={memory_kv.get_seq_length()}")
 
     # Empty-list no-op check.
-    assert model.build_memory_kv_slow([]) is None
-    assert model.build_memory_kv_fast([], past_kv=None) is None
-    passthrough = model.build_memory_kv_fast([], past_kv=memory_kv_slow)
-    assert passthrough is memory_kv_slow
+    assert model.build_memory_kv_slow([]) == (None, None)
+    assert model.build_memory_kv_fast([], past_kv=None) == (None, None)
+    passthrough_kv, passthrough_excl = model.build_memory_kv_fast(
+        [], past_kv=memory_kv_slow, kv_exclude_mask=exclude_slow)
+    assert passthrough_kv is memory_kv_slow
+    assert passthrough_excl is exclude_slow
     print("[PASS] empty-list no-op behavior confirmed on real model instance")
 
     print("\n=== forward_flow_action_full: memory_kv=None (regression) ===")
@@ -173,13 +182,27 @@ def main():
     out_b = model.forward_flow_action_full(
         inputs_embeds=slow_embeds, position_ids=pos_ids, noise=noise,
         attention_mask=attention_mask[:, :L_slow] if attention_mask is not None else None,
-        fast_embeds=fast_embeds, num_steps=4, memory_kv=memory_kv)
+        fast_embeds=fast_embeds, num_steps=4, memory_kv=memory_kv,
+        kv_exclude_mask=kv_exclude_mask)
     check_finite("forward_flow_action_full memory_kv=<slow+fast> output", out_b)
     assert out_b.shape == (B, ACTION_CHUNK, ACTION_DIM)
     diff = (out_b.float() - out_a1.float()).abs().max().item()
     print(f"[PASS] memory_kv=<slow+fast>: shape {tuple(out_b.shape)}, finite, "
           f"max abs diff vs no-memory = {diff:.6f} (memory measurably changes output)")
     assert diff > 0, "memory_kv should change the output -- got an exact match, suspicious"
+
+    print("\n=== forward_flow_action_full: kv_exclude_mask actually changes the output ===")
+    out_b_unmasked = model.forward_flow_action_full(
+        inputs_embeds=slow_embeds, position_ids=pos_ids, noise=noise,
+        attention_mask=attention_mask[:, :L_slow] if attention_mask is not None else None,
+        fast_embeds=fast_embeds, num_steps=4, memory_kv=memory_kv,
+        kv_exclude_mask=None)
+    check_finite("forward_flow_action_full kv_exclude_mask=None output", out_b_unmasked)
+    diff_excl = (out_b.float() - out_b_unmasked.float()).abs().max().item()
+    print(f"[PASS] kv_exclude_mask on vs off: max abs diff = {diff_excl:.6f} "
+          f"(masking the redundant memory-row text measurably changes output, "
+          f"not a silently-inert mask)")
+    assert diff_excl > 0, "kv_exclude_mask should change the output -- got an exact match"
 
     print("\n=== forward_flow_action_partial + tactile_flow_continue: memory_kv=None (regression) ===")
     x_split1, cached_kv1, n_act1, tau1 = model.forward_flow_action_partial(
@@ -200,13 +223,14 @@ def main():
     x_split2, cached_kv2, n_act2, tau2 = model.forward_flow_action_partial(
         inputs_embeds=slow_embeds, position_ids=pos_ids, noise=noise,
         attention_mask=attention_mask[:, :L_slow] if attention_mask is not None else None,
-        fast_embeds=fast_embeds, num_steps_total=4, split_step=2, memory_kv=memory_kv)
+        fast_embeds=fast_embeds, num_steps_total=4, split_step=2, memory_kv=memory_kv,
+        kv_exclude_mask=kv_exclude_mask)
     check_finite("forward_flow_action_partial memory_kv=<slow+fast> x_split", x_split2)
     tac_out2 = model.tactile_flow_continue(
         cached_kv2, pos_ids, n_act2, x_split2, tau2,
         attention_mask=attention_mask[:, :L_slow] if attention_mask is not None else None,
         tactile_f6_history=torch.rand(B, 16, 10, 6, device=DEVICE, dtype=torch.float32),
-        num_steps_total=4, split_step=2)
+        num_steps_total=4, split_step=2, kv_exclude_mask=kv_exclude_mask)
     check_finite("tactile_flow_continue memory_kv=<slow+fast> output", tac_out2)
     assert tac_out2.shape == (B, ACTION_CHUNK, ACTION_DIM)
     diff2 = (tac_out2.float() - tac_out1.float()).abs().max().item()

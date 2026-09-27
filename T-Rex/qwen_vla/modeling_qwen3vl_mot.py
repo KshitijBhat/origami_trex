@@ -493,11 +493,17 @@ def build_causal_mask(
     device:       torch.device,
     dtype:        torch.dtype,
     attention_mask: Optional[torch.Tensor] = None,
+    kv_exclude_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Returns additive causal mask of shape [1, 1, seq_len, past_len + seq_len].
     Combines the standard lower-triangular causal mask with an optional padding
-    mask from `attention_mask` (1 = keep, 0 = mask).
+    mask from `attention_mask` (1 = keep, 0 = mask), and an optional
+    `kv_exclude_mask` ([batch, past_len], bool, True = exclude) that hides
+    specific PAST (cached) positions from every query regardless of padding --
+    e.g. redundant memory-row text tokens (see build_memory_kv_slow). Unlike
+    `attention_mask`, this only ever concerns the past span: the live
+    (seq_len) span is never excluded by it.
     """
     total = past_len + seq_len
     # [1, 1, seq_len, total]
@@ -532,6 +538,14 @@ def build_causal_mask(
         # positions masked → softmax([-inf, ...]) = NaN.
         diag_idx = torch.arange(seq_len, device=device)
         mask[:, :, diag_idx, past_len + diag_idx] = 0.0
+
+    if kv_exclude_mask is not None:
+        B_ex = kv_exclude_mask.shape[0]
+        full_exclude = torch.zeros(B_ex, total, dtype=torch.bool, device=device)
+        full_exclude[:, :past_len] = kv_exclude_mask[:, :past_len]
+        excl_mask = torch.zeros(B_ex, total, dtype=dtype, device=device)
+        excl_mask = excl_mask.masked_fill(full_exclude, float("-inf"))
+        mask = mask + excl_mask.view(B_ex, 1, 1, total)
 
     return mask
 
@@ -662,6 +676,7 @@ class Qwen3VLModelMoT(nn.Module):
         latent_indexes:  Optional[torch.LongTensor]    = None,
         action_indexes:  Optional[torch.LongTensor]    = None,
         tactile_indexes: Optional[torch.LongTensor]    = None,
+        kv_exclude_mask: Optional[torch.Tensor]        = None,
     ) -> BaseModelOutputWithPast:
 
         hidden_states = inputs_embeds
@@ -710,6 +725,7 @@ class Qwen3VLModelMoT(nn.Module):
             device=hidden_states.device,
             dtype=hidden_states.dtype,
             attention_mask=attention_mask,
+            kv_exclude_mask=kv_exclude_mask,
         )
 
         # ── Rotary embeddings ────────────────────────────────────────────────

@@ -600,7 +600,7 @@ class Qwen3VLVLAModel(nn.Module):
         self,
         memory_rows: List[Dict[str, torch.Tensor]],
         rope_stride: float = 32.0,
-    ) -> Optional["DynamicCache"]:
+    ) -> Tuple[Optional["DynamicCache"], Optional[torch.Tensor]]:
         """
         Populate a DynamicCache from a list of past ("memory_slow") rows,
         oldest first, for use as the seed `past_key_values` of a live
@@ -630,13 +630,24 @@ class Qwen3VLVLAModel(nn.Module):
         dataset, so each row is forwarded as pure `latent_indexes` -- no
         `split_slow_fast_embeds` call is needed here, unlike a live tick.
 
-        Returns None for an empty list (caller treats that identically to
-        "no memory", matching today's default-off behavior).
+        Returns `(None, None)` for an empty list (caller treats that
+        identically to "no memory", matching today's default-off behavior).
+
+        Second return value, `kv_exclude_mask` (`[B, sum of row lengths]`,
+        bool, True = exclude): with `phase_mode` off (the default), every
+        row's task text is identical to the live tick's own -- carries zero
+        unique historical signal, pure redundant attention budget. Each
+        row's non-image positions (`input_ids != self.image_token_id`) are
+        marked for exclusion here; `build_causal_mask` (via the
+        `kv_exclude_mask` argument threaded through every call site that
+        reads this cache) hides them from every later query while leaving
+        each row's image-patch positions fully attendable.
         """
         if not memory_rows:
-            return None
+            return None, None
 
         past_kv = None
+        exclude_chunks: List[torch.Tensor] = []
         for row in memory_rows:
             input_ids     = row["input_ids"]
             pixel_values   = row.get("pixel_values")
@@ -657,6 +668,10 @@ class Qwen3VLVLAModel(nn.Module):
 
             call_attn_mask = self._front_pad_attention_mask(
                 row_attn_mask, B, L, past_kv, device)
+            # So-far-accumulated exclusion (earlier rows' redundant text),
+            # so THIS row's own construction pass doesn't waste attention on
+            # it either -- mirrors build_memory_kv_fast's identical pattern.
+            excl_so_far = torch.cat(exclude_chunks, dim=1) if exclude_chunks else None
 
             outputs = self.model(
                 inputs_embeds=inputs_embeds,
@@ -667,18 +682,21 @@ class Qwen3VLVLAModel(nn.Module):
                 latent_indexes=torch.arange(0, L, device=device),
                 action_indexes=torch.arange(0, 0, device=device),
                 tactile_indexes=torch.arange(0, 0, device=device),
+                kv_exclude_mask=excl_so_far,
             )
             past_kv = outputs.past_key_values
+            exclude_chunks.append(~(input_ids == self.image_token_id))  # [B, L], text=True
 
-        return past_kv
+        return past_kv, torch.cat(exclude_chunks, dim=1)
 
     @torch.no_grad()
     def build_memory_kv_fast(
         self,
         memory_rows: List[Dict[str, torch.Tensor]],
         past_kv: Optional["DynamicCache"] = None,
+        kv_exclude_mask: Optional[torch.Tensor] = None,
         rope_stride: float = 8.0,
-    ) -> Optional["DynamicCache"]:
+    ) -> Tuple[Optional["DynamicCache"], Optional[torch.Tensor]]:
         """
         Populate/extend a DynamicCache from a list of past ("memory_fast")
         rows, oldest first, continuing from a CLONE of whatever `past_kv`
@@ -725,11 +743,15 @@ class Qwen3VLVLAModel(nn.Module):
         `tactile_f6` path. Known limitation, not yet needed by any tested
         config (see MEMORY_DESIGN.md).
 
-        Returns `past_kv` unchanged (including `None`) when `memory_rows`
-        is empty -- matches `build_memory_kv_slow`'s no-op convention.
+        Returns `(past_kv, kv_exclude_mask)` unchanged (including `None`s)
+        when `memory_rows` is empty -- matches `build_memory_kv_slow`'s
+        no-op convention. `kv_exclude_mask` (see that method) is extended
+        here to cover this method's own newly-appended positions, always
+        `False` (attendable) since fast-tier rows carry no task text at all
+        (wrist image + action + tactile only, nothing redundant to hide).
         """
         if not memory_rows:
-            return past_kv
+            return past_kv, kv_exclude_mask
 
         # Clone before this loop's own use_cache=True/no_grad calls mutate
         # it in place (DynamicCache.update()). past_kv is typically the
@@ -794,6 +816,7 @@ class Qwen3VLVLAModel(nn.Module):
                 attention_mask=call_attn_mask,
                 past_key_values=past_kv,
                 use_cache=True,
+                kv_exclude_mask=kv_exclude_mask,
                 # Wrist images are FAST/action-stream content (matches every
                 # live tick: forward_flow_action_full/_partial put fast_embeds
                 # inside act_parts, under action_indexes) -- routing them
@@ -808,8 +831,12 @@ class Qwen3VLVLAModel(nn.Module):
                 tactile_indexes=torch.arange(L_wrist + n_action, L_total, device=device),
             )
             past_kv = outputs.past_key_values
+            if kv_exclude_mask is not None:
+                kv_exclude_mask = torch.cat(
+                    [kv_exclude_mask, torch.zeros(B, L_total, dtype=torch.bool, device=device)],
+                    dim=1)
 
-        return past_kv
+        return past_kv, kv_exclude_mask
 
     # ──────────────────────────────────────────────────────────────────────
     # Cascaded flow matching
@@ -835,6 +862,7 @@ class Qwen3VLVLAModel(nn.Module):
         fast_embeds: Optional[torch.Tensor] = None,
         num_steps: int = 10,
         memory_kv: Optional["DynamicCache"] = None,
+        kv_exclude_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Action-expert-only full flow τ ∈ [0, 1].
 
@@ -912,6 +940,7 @@ class Qwen3VLVLAModel(nn.Module):
                     latent_indexes=torch.arange(0, L_latent, device=device),
                     action_indexes=torch.arange(L_latent, L_latent + n_act, device=device),
                     tactile_indexes=torch.arange(0, 0, device=device),
+                    kv_exclude_mask=kv_exclude_mask,
                 )
             else:
                 past_kv.crop(-n_act)
@@ -926,6 +955,7 @@ class Qwen3VLVLAModel(nn.Module):
                     latent_indexes=torch.arange(0, 0, device=device),
                     action_indexes=torch.arange(0, n_act, device=device),
                     tactile_indexes=torch.arange(0, 0, device=device),
+                    kv_exclude_mask=kv_exclude_mask,
                 )
 
             hidden = outputs.last_hidden_state
@@ -950,6 +980,7 @@ class Qwen3VLVLAModel(nn.Module):
         split_step: int = 6,
         refresh_clean_kv: bool = True,
         memory_kv: Optional["DynamicCache"] = None,
+        kv_exclude_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, "DynamicCache", int, float]:
         """Cascaded slow-tick: run the action expert for `split_step` of
         `num_steps_total` Euler steps, stopping at τ = 1 − split_step/num_steps_total.
@@ -1025,6 +1056,7 @@ class Qwen3VLVLAModel(nn.Module):
                     latent_indexes=torch.arange(0, L_latent, device=device),
                     action_indexes=torch.arange(L_latent, L_latent + n_act, device=device),
                     tactile_indexes=torch.arange(0, 0, device=device),
+                    kv_exclude_mask=kv_exclude_mask,
                 )
             else:
                 past_kv.crop(-n_act)
@@ -1039,6 +1071,7 @@ class Qwen3VLVLAModel(nn.Module):
                     latent_indexes=torch.arange(0, 0, device=device),
                     action_indexes=torch.arange(0, n_act, device=device),
                     tactile_indexes=torch.arange(0, 0, device=device),
+                    kv_exclude_mask=kv_exclude_mask,
                 )
 
             hidden = outputs.last_hidden_state
@@ -1074,6 +1107,7 @@ class Qwen3VLVLAModel(nn.Module):
                 latent_indexes=torch.arange(0, 0, device=device),
                 action_indexes=torch.arange(0, n_act_final, device=device),
                 tactile_indexes=torch.arange(0, 0, device=device),
+                kv_exclude_mask=kv_exclude_mask,
             )
             n_action_in_cache = n_act_final
         else:
@@ -1097,6 +1131,7 @@ class Qwen3VLVLAModel(nn.Module):
         tactile_f6_history: Optional[torch.Tensor] = None,
         num_steps_total: int = 10,
         split_step: int = 6,
+        kv_exclude_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Cascaded fast-tick: continue the flow from x_split at τ=tau_split
         down to τ=0 using the tactile expert.  Returns the final clean action
@@ -1146,6 +1181,7 @@ class Qwen3VLVLAModel(nn.Module):
                 latent_indexes=torch.arange(0, 0, device=device),
                 action_indexes=torch.arange(0, 0, device=device),
                 tactile_indexes=torch.arange(0, n_tac_seq, device=device),
+                kv_exclude_mask=kv_exclude_mask,
             )
             hidden = outputs.last_hidden_state
             v = self.final_layer_tactile(hidden[:, -n_chunk:, :])
@@ -1166,6 +1202,7 @@ class Qwen3VLVLAModel(nn.Module):
         tactile_deform: Optional[torch.Tensor] = None,
         tactile_codes: Optional[torch.Tensor] = None,
         tactile_f6_history: Optional[torch.Tensor] = None,
+        kv_exclude_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Single tactile-only forward at (x_τ, τ) for cascaded training.
 
@@ -1213,6 +1250,7 @@ class Qwen3VLVLAModel(nn.Module):
             latent_indexes=torch.arange(0, 0, device=device),
             action_indexes=torch.arange(0, 0, device=device),
             tactile_indexes=torch.arange(0, n_tac_seq, device=device),
+            kv_exclude_mask=kv_exclude_mask,
         )
         hidden = outputs.last_hidden_state
         v_pred = self.final_layer_tactile(hidden[:, -n_chunk:, :])

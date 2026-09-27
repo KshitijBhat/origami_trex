@@ -37,20 +37,27 @@ class FakeProcessor:
 
 class FakeModel:
     """Records exactly what rows/kwargs build_memory_kv_slow/_fast were
-    called with, instead of actually running a forward pass."""
+    called with, instead of actually running a forward pass. Returns
+    (kv, kv_exclude_mask) tuples now, matching the real model's interface
+    (see Qwen3VLVLAModel.build_memory_kv_slow) -- kv_exclude_mask is just a
+    string tag here (mirroring the kv stand-ins below) since these tests
+    only check chaining/selection logic, not real tensor masking."""
     def __init__(self):
         self.slow_calls = []
         self.fast_calls = []
 
     def build_memory_kv_slow(self, rows, rope_stride=32.0):
         self.slow_calls.append((rows, rope_stride))
-        return f"slow_kv(n={len(rows)})" if rows else None
-
-    def build_memory_kv_fast(self, rows, past_kv=None, rope_stride=8.0):
-        self.fast_calls.append((rows, past_kv, rope_stride))
         if not rows:
-            return past_kv
-        return f"combined_kv(prev={past_kv}, n_fast={len(rows)})"
+            return None, None
+        return f"slow_kv(n={len(rows)})", f"slow_excl(n={len(rows)})"
+
+    def build_memory_kv_fast(self, rows, past_kv=None, kv_exclude_mask=None, rope_stride=8.0):
+        self.fast_calls.append((rows, past_kv, kv_exclude_mask, rope_stride))
+        if not rows:
+            return past_kv, kv_exclude_mask
+        return (f"combined_kv(prev={past_kv}, n_fast={len(rows)})",
+                f"combined_excl(prev={kv_exclude_mask}, n_fast={len(rows)})")
 
 
 def make_server(memory_slow_seconds, memory_fast, margin=2.0):
@@ -87,7 +94,7 @@ def img(tag):
 def test_slow_no_op_when_disabled():
     srv = make_server([], 0)
     assert srv._select_memory_slow_rows(100.0) == []
-    assert srv._build_memory_kv(100.0) is None
+    assert srv._build_memory_kv(100.0) == (None, None)
     print("[PASS] slow memory disabled: true no-op")
 
 
@@ -157,14 +164,18 @@ def test_build_memory_kv_chains_slow_into_fast():
     srv = make_server([1.0], 1)
     srv._remember_slow(99.0, img(1), "t")
     srv._remember_fast(99.0, [img(1), img(2)], np.zeros(4))
-    kv = srv._build_memory_kv(100.0)
+    kv, kv_exclude_mask = srv._build_memory_kv(100.0)
     assert kv == "combined_kv(prev=slow_kv(n=1), n_fast=1)", kv
+    assert kv_exclude_mask == "combined_excl(prev=slow_excl(n=1), n_fast=1)", kv_exclude_mask
     # Confirm build_memory_kv_fast really was called WITH the slow tier's
-    # output as its past_kv (not None, not a separate independent call).
-    fast_rows, fast_past_kv, _ = srv.model.fast_calls[-1]
+    # output as its past_kv/kv_exclude_mask (not None, not a separate
+    # independent call).
+    fast_rows, fast_past_kv, fast_excl, _ = srv.model.fast_calls[-1]
     assert fast_past_kv == "slow_kv(n=1)"
+    assert fast_excl == "slow_excl(n=1)"
     print("[PASS] _build_memory_kv chains build_memory_kv_slow's output into "
-          "build_memory_kv_fast's past_kv, producing one combined cache")
+          "build_memory_kv_fast's past_kv/kv_exclude_mask, producing one "
+          "combined cache + exclusion mask")
 
 
 def test_current_tick_never_sees_its_own_memory():
@@ -173,13 +184,13 @@ def test_current_tick_never_sees_its_own_memory():
     memory -- simulate that ordering directly here."""
     srv = make_server([1.0], 1)
     now = 100.0
-    memory_kv = srv._build_memory_kv(now)         # buffer still empty
+    memory_kv, _ = srv._build_memory_kv(now)       # buffer still empty
     assert memory_kv is None
     srv._remember_slow(now, img(1), "self")
     srv._remember_fast(now, [img(1), img(2)], np.zeros(4))
     # A SUBSEQUENT tick now sees this one as memory -- but this tick itself
     # got memory_kv=None, confirmed above.
-    later_kv = srv._build_memory_kv(now + 0.1)
+    later_kv, _ = srv._build_memory_kv(now + 0.1)
     assert later_kv is not None
     print("[PASS] a tick's own content is recorded AFTER its own memory_kv "
           "is built, so it never becomes memory for itself")
