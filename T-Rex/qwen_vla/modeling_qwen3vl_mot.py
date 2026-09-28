@@ -540,9 +540,19 @@ def build_causal_mask(
         mask[:, :, diag_idx, past_len + diag_idx] = 0.0
 
     if kv_exclude_mask is not None:
-        B_ex = kv_exclude_mask.shape[0]
+        # kv_exclude_mask covers a PREFIX of the past span, not necessarily
+        # all of it: it's built once from the original memory content, but
+        # `past_len` can grow beyond that afterward (e.g. a multi-step Euler
+        # loop folds each step's own latent/action tokens into the SAME
+        # cache -- crop(-n_act) between steps leaves the memory+latent
+        # prefix in place and only trims the most recent action tokens, so
+        # past_len legitimately exceeds kv_exclude_mask's original length on
+        # step 2+). Only the positions kv_exclude_mask actually covers are
+        # ever excluded; anything past that (newly-cached live content) is
+        # correctly left fully attendable, never assumed excluded.
+        B_ex, n_ex = kv_exclude_mask.shape
         full_exclude = torch.zeros(B_ex, total, dtype=torch.bool, device=device)
-        full_exclude[:, :past_len] = kv_exclude_mask[:, :past_len]
+        full_exclude[:, :n_ex] = kv_exclude_mask
         excl_mask = torch.zeros(B_ex, total, dtype=dtype, device=device)
         excl_mask = excl_mask.masked_fill(full_exclude, float("-inf"))
         mask = mask + excl_mask.view(B_ex, 1, 1, total)

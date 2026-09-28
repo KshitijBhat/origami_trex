@@ -103,9 +103,36 @@ def test_kv_exclude_mask_batch_dim():
     print("[PASS] kv_exclude_mask is genuinely per-batch-row, not accidentally shared")
 
 
+def test_kv_exclude_mask_shorter_than_past_len():
+    """Regression test for a real bug caught on a real-GPU run: a multi-step
+    Euler loop (forward_flow_action_full/_partial) folds each step's own
+    latent/action tokens into the SAME cache that originally held only
+    memory content -- crop(-n_act) between steps leaves the memory+latent
+    prefix in place, so past_len legitimately grows past kv_exclude_mask's
+    original length on step 2+ (e.g. memory=442, then past_len=511 once the
+    69-token latent block is folded in). kv_exclude_mask must NOT be assumed
+    to cover the whole past span -- only its own (shorter) prefix should be
+    excluded; the newly-cached live content beyond it must stay attendable,
+    and the call must not crash from a shape mismatch."""
+    seq_len, past_len, B = 2, 511, 1
+    kv_exclude_mask = torch.zeros(B, 442, dtype=torch.bool)  # shorter than past_len=511
+    kv_exclude_mask[:, 5] = True
+
+    mask = build_causal_mask(seq_len, past_len, "cpu", torch.float32,
+                              kv_exclude_mask=kv_exclude_mask)
+    assert mask.shape == (1, 1, seq_len, past_len + seq_len)
+    assert torch.isinf(mask[0, 0, :, 5]).all()          # explicitly excluded, still works
+    assert (mask[0, 0, :, 6] == 0.0).all()               # unexcluded position within the mask's own span
+    assert (mask[0, 0, :, 442] == 0.0).all()             # first position PAST kv_exclude_mask's length
+    assert (mask[0, 0, :, 510] == 0.0).all()             # last past position (just below past_len) -- never excluded
+    print("[PASS] kv_exclude_mask shorter than past_len: no crash, only its own "
+          "prefix is excluded, newly-cached live content beyond it stays attendable")
+
+
 if __name__ == "__main__":
     test_no_op_when_none()
     test_exclusion_hits_exact_positions()
     test_composes_with_padding_mask()
     test_kv_exclude_mask_batch_dim()
+    test_kv_exclude_mask_shorter_than_past_len()
     print("\nALL TESTS PASSED")
