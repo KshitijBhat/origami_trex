@@ -219,6 +219,20 @@ class Qwen3VLAttentionMoT(nn.Module):
         v =        v_proj(hidden).view(B, S, self.num_kv_heads, self.head_dim) .transpose(1, 2)
         return q, k, v
 
+    def _empty_qkv(self, hidden):
+        """Shape-matched q/k/v for a zero-length expert branch, without
+        running any Linear/Norm weight on the empty input.  Eager/Inductor
+        already handle a Linear on a [B, 0, H] tensor silently (this
+        function's own output would be bit-identical either way), but
+        TensorRT's static shape engine cannot trace a matmul with a genuine
+        zero-length dimension -- so for the TRT-compiled path this isn't
+        just an optimization, it's required. See docs/tensorrt plan."""
+        B = hidden.shape[0]
+        q = hidden.new_zeros(B, self.num_heads,    0, self.head_dim)
+        k = hidden.new_zeros(B, self.num_kv_heads, 0, self.head_dim)
+        v = hidden.new_zeros(B, self.num_kv_heads, 0, self.head_dim)
+        return q, k, v
+
     def forward(
         self,
         hidden_states:      torch.Tensor,
@@ -239,10 +253,15 @@ class Qwen3VLAttentionMoT(nn.Module):
         act_h = hidden_states[:, action_indexes]   if len(action_indexes)  > 0 else hidden_states[:, :0]
         tac_h = hidden_states[:, tactile_indexes]  if len(tactile_indexes) > 0 else hidden_states[:, :0]
 
-        # Per-expert projections
-        lat_q, lat_k, lat_v = self._proj_qkv(lat_h, self.q_proj,   self.k_proj,   self.v_proj,   self.q_norm,   self.k_norm)
-        act_q, act_k, act_v = self._proj_qkv(act_h, self.q_proj_action,  self.k_proj_action,  self.v_proj_action,  self.q_norm_action,  self.k_norm_action)
-        tac_q, tac_k, tac_v = self._proj_qkv(tac_h, self.q_proj_tactile, self.k_proj_tactile, self.v_proj_tactile, self.q_norm_tactile, self.k_norm_tactile)
+        # Per-expert projections -- skip the Linear/Norm entirely for an empty
+        # branch (see _empty_qkv's docstring: required for TensorRT, and a
+        # bit-identical no-op for eager/Inductor).
+        lat_q, lat_k, lat_v = (self._proj_qkv(lat_h, self.q_proj,   self.k_proj,   self.v_proj,   self.q_norm,   self.k_norm)
+                                if len(latent_indexes)  > 0 else self._empty_qkv(lat_h))
+        act_q, act_k, act_v = (self._proj_qkv(act_h, self.q_proj_action,  self.k_proj_action,  self.v_proj_action,  self.q_norm_action,  self.k_norm_action)
+                                if len(action_indexes)  > 0 else self._empty_qkv(act_h))
+        tac_q, tac_k, tac_v = (self._proj_qkv(tac_h, self.q_proj_tactile, self.k_proj_tactile, self.v_proj_tactile, self.q_norm_tactile, self.k_norm_tactile)
+                                if len(tactile_indexes) > 0 else self._empty_qkv(tac_h))
 
         # Concatenate across sequence dim for joint attention [B, heads, total_seq, head_dim]
         query_states = torch.cat([lat_q, act_q, tac_q], dim=2)
@@ -374,16 +393,16 @@ class Qwen3VLDecoderLayerMoT(nn.Module):
     ) -> Tuple:
         residual = hidden_states
 
-        lat_h = hidden_states[:, latent_indexes]
-        act_h = hidden_states[:, action_indexes]
-        tac_h = hidden_states[:, tactile_indexes]
+        # Slice + per-expert pre-attention layer norm together, guarded: skip
+        # the RMSNorm weight entirely for an empty branch (bit-identical no-op
+        # for eager/Inductor, required for TensorRT -- same reasoning as
+        # _empty_qkv above).
+        lat_h = self.input_layernorm(hidden_states[:, latent_indexes])          if len(latent_indexes)  > 0 else hidden_states[:, :0]
+        act_h = self.input_layernorm_action(hidden_states[:, action_indexes])   if len(action_indexes)  > 0 else hidden_states[:, :0]
+        tac_h = self.input_layernorm_tactile(hidden_states[:, tactile_indexes]) if len(tactile_indexes) > 0 else hidden_states[:, :0]
 
-        # Per-expert pre-attention layer norm, then re-assemble for joint attention
-        hidden_states = torch.cat([
-            self.input_layernorm(lat_h),
-            self.input_layernorm_action(act_h),
-            self.input_layernorm_tactile(tac_h),
-        ], dim=1)
+        # Re-assemble for joint attention
+        hidden_states = torch.cat([lat_h, act_h, tac_h], dim=1)
 
         hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
@@ -400,16 +419,13 @@ class Qwen3VLDecoderLayerMoT(nn.Module):
         hidden_states = residual + hidden_states
 
         # ── Per-expert FFN ──────────────────────────────────────────────────
+        # Same empty-branch guard as the pre-attention norm above.
         residual  = hidden_states
-        lat_h = hidden_states[:, latent_indexes]
-        act_h = hidden_states[:, action_indexes]
-        tac_h = hidden_states[:, tactile_indexes]
+        lat_h = self.mlp(self.post_attention_layernorm(hidden_states[:, latent_indexes]))                  if len(latent_indexes)  > 0 else hidden_states[:, :0]
+        act_h = self.mlp_action(self.post_attention_layernorm_action(hidden_states[:, action_indexes]))    if len(action_indexes)  > 0 else hidden_states[:, :0]
+        tac_h = self.mlp_tactile(self.post_attention_layernorm_tactile(hidden_states[:, tactile_indexes])) if len(tactile_indexes) > 0 else hidden_states[:, :0]
 
-        ffn_out = torch.cat([
-            self.mlp(self.post_attention_layernorm(lat_h)),
-            self.mlp_action(self.post_attention_layernorm_action(act_h)),
-            self.mlp_tactile(self.post_attention_layernorm_tactile(tac_h)),
-        ], dim=1)
+        ffn_out = torch.cat([lat_h, act_h, tac_h], dim=1)
 
         hidden_states = residual + ffn_out
 

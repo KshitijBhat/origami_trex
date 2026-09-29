@@ -496,7 +496,10 @@ class Qwen3VLVLAModel(nn.Module):
         if (tactile_codes is not None
                 and self.use_tactile_code
                 and tactile_codes.shape[1] > 0):
-            code_emb = self.tactile_code_embedder(tactile_codes.to(device).long())
+            # int32, not int64/.long(): codebook indices are in [0, 64), well
+            # within int32 range, and TensorRT's embedding converter requires
+            # int32 indices -- int64 fails conversion (see docs/tensorrt plan).
+            code_emb = self.tactile_code_embedder(tactile_codes.to(device).to(torch.int32))
             tac_parts.append(code_emb.to(dtype))
         if tactile_f6 is not None and tactile_f6.shape[1] > 0:
             tac_parts.append(self.tacf6_embedder(tactile_f6.to(dtype)))
@@ -652,7 +655,7 @@ class Qwen3VLVLAModel(nn.Module):
         num_steps_total: int = 10,
         split_step: int = 6,
         refresh_clean_kv: bool = True,
-    ) -> Tuple[torch.Tensor, "DynamicCache", int, float]:
+    ) -> Tuple[torch.Tensor, "DynamicCache", int, torch.Tensor]:
         """Cascaded slow-tick: run the action expert for `split_step` of
         `num_steps_total` Euler steps, stopping at τ = 1 − split_step/num_steps_total.
 
@@ -662,7 +665,10 @@ class Qwen3VLVLAModel(nn.Module):
                                                        at τ = τ_split.
         cached_kv         : DynamicCache with [latent KV | action KV at τ_split].
         n_action_in_cache : int
-        tau_split         : float                      ∈ (0, 1)
+        tau_split         : scalar torch.Tensor        ∈ (0, 1) -- kept on-device
+                             (never `.item()`'d) so a torch.compile'd caller
+                             doesn't take a host sync / graph break here; see
+                             `tactile_flow_continue`'s matching parameter.
         """
         if not (0 < split_step < num_steps_total):
             raise ValueError(
@@ -762,8 +768,7 @@ class Qwen3VLVLAModel(nn.Module):
         else:
             n_action_in_cache = n_act
 
-        tau_split = float(time.item())
-        return x_t, past_kv, n_action_in_cache, tau_split
+        return x_t, past_kv, n_action_in_cache, time
 
     @torch.no_grad()
     def tactile_flow_continue(
@@ -772,7 +777,7 @@ class Qwen3VLVLAModel(nn.Module):
         latent_position_ids: torch.Tensor,
         n_action_in_cache: int,
         x_split: torch.Tensor,                  # [B, n_chunk, action_dim] at τ=τ_split
-        tau_split: float,
+        tau_split: torch.Tensor,                # scalar, on-device (see forward_flow_action_partial)
         attention_mask: Optional[torch.Tensor] = None,
         tactile_f6: Optional[torch.Tensor] = None,
         tactile_deform: Optional[torch.Tensor] = None,
@@ -810,7 +815,7 @@ class Qwen3VLVLAModel(nn.Module):
         # trajectory's integration step matches what a monolithic 10-step flow
         # would use.  `remaining` steps complete the integration.
         dt   = torch.tensor(-1.0 / num_steps_total, dtype=dtype, device=device)
-        time = torch.tensor(tau_split, dtype=dtype, device=device)
+        time = tau_split.to(dtype=dtype, device=device)
         remaining = num_steps_total - split_step
         x = x_split.to(dtype)
 

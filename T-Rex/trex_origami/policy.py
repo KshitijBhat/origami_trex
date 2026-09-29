@@ -252,10 +252,16 @@ class TRexOrigamiPolicy:
         read-only container.  `mode="default"` on purpose: CUDA-graph modes
         capture on the warm-up thread and deadlock when Zenoh's callback
         thread replays them (observed on the previous submission).
-        `tau_split = float(time.item())` inside forward_flow_action_partial
-        is a known, benign graph break.
+        `forward_flow_action_partial` used to end with a `.item()`-induced
+        graph break (`tau_split = float(time.item())`, converting the final
+        flow-time tensor to a Python float purely so `tactile_flow_continue`
+        could rebuild a tensor from it) -- removed: `tau_split` now stays a
+        scalar tensor end to end (see both functions' signatures in
+        qwen_vla/modeling_vla.py), so that call compiles as one graph with
+        no host sync at the end.
         """
         import torch._dynamo
+        import torch_tensorrt  # noqa: F401 -- side-effect: registers the "tensorrt" dynamo backend
         torch._dynamo.config.automatic_dynamic_shapes = False
         torch._dynamo.config.cache_size_limit = max(
             torch._dynamo.config.cache_size_limit, 64)
@@ -263,7 +269,8 @@ class TRexOrigamiPolicy:
         m.forward_flow_action_partial = torch.compile(
             m.forward_flow_action_partial, mode=self.cfg.compile_mode)
         m.tactile_flow_continue = torch.compile(
-            m.tactile_flow_continue, mode=self.cfg.compile_mode)
+            m.tactile_flow_continue, backend="tensorrt",
+            options={"enabled_precisions": {torch.float32, torch.bfloat16}})  # EXPERIMENT: was mode=self.cfg.compile_mode; force off TRT's fp16 auto-selection (NaN suspect)
         m.forward_flow_action_full = torch.compile(
             m.forward_flow_action_full, mode=self.cfg.compile_mode)
         print(f"[policy] torch.compile({self.cfg.compile_mode!r}) armed for "
@@ -580,6 +587,19 @@ class TRexOrigamiPolicy:
             absolute = self.projector.project(state, absolute)
         actions = np.ascontiguousarray(absolute, dtype=np.float32)
         if actions.shape != (self.action_chunk, self.action_dim) or not np.isfinite(actions).all():
+            # DEBUG: pinpoint where non-finite values first appear.
+            nm_bad = ~np.isfinite(norm_mean)
+            ab_bad = ~np.isfinite(absolute)
+            print(f"[DEBUG] norm_mean shape={norm_mean.shape} dtype={norm_mean.dtype} "
+                  f"nan={np.isnan(norm_mean).sum()} inf={np.isinf(norm_mean).sum()} "
+                  f"bad_dims={sorted(set(np.argwhere(nm_bad)[:, -1].tolist())) if nm_bad.any() else []} "
+                  f"finite_min={norm_mean[~nm_bad].min() if (~nm_bad).any() else 'n/a'} "
+                  f"finite_max={norm_mean[~nm_bad].max() if (~nm_bad).any() else 'n/a'}", flush=True)
+            print(f"[DEBUG] absolute shape={absolute.shape} dtype={absolute.dtype} "
+                  f"nan={np.isnan(absolute).sum()} inf={np.isinf(absolute).sum()} "
+                  f"bad_dims={sorted(set(np.argwhere(ab_bad)[:, -1].tolist())) if ab_bad.any() else []}", flush=True)
+            print(f"[DEBUG] actions shape={actions.shape} expected={(self.action_chunk, self.action_dim)} "
+                  f"dtype={actions.dtype}", flush=True)
             raise RuntimeError("policy produced an invalid action chunk")
         return actions
 

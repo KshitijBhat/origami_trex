@@ -144,7 +144,10 @@ class F6PerFingerEncoder(nn.Module):
         x = self.stem(x)                                    # [B*5, hidden, T]
 
         # Finger ID broadcast: [5, hidden] → repeat per batch → [B*5, hidden, 1]
-        ids = torch.arange(F, device=f6.device).repeat(B)   # [B*5]
+        # int32, not the default int64: TensorRT's embedding converter requires
+        # int32 indices (see docs/tensorrt plan); harmless for eager/inductor
+        # since embedding lookup doesn't depend on the index tensor's bit-width.
+        ids = torch.arange(F, device=f6.device, dtype=torch.int32).repeat(B)   # [B*5]
         fid = self.finger_embed(ids).unsqueeze(-1)          # [B*5, hidden, 1]
         x = x + fid
 

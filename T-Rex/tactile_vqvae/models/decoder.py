@@ -158,7 +158,8 @@ class F6PerFingerDecoder(nn.Module):
         x = z_q.reshape(B * F, E).unsqueeze(2).expand(-1, -1, self._bottleneck_T)
         x = self.from_embed(x)                                    # [B*5, bn, T_bn]
 
-        ids = torch.arange(F, device=z_q.device).repeat(B)        # [B*5]
+        # int32, not the default int64 -- see encoder.py's matching fix.
+        ids = torch.arange(F, device=z_q.device, dtype=torch.int32).repeat(B)        # [B*5]
         fid = self.finger_embed(ids).unsqueeze(-1)                # [B*5, bn, 1]
         x = x + fid
 
